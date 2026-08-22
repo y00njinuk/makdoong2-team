@@ -1,0 +1,46 @@
+{
+  "$schema": "./makdoong2-team.schema.json",
+  "agents": {},
+  "coverage": {
+    "threshold": 95
+  },
+  "timeout": {
+    "substage_minutes": 30,
+    "per_agent": {
+      "makdoong2-engineer": 60
+    }
+  },
+  "tmux": {
+    "enabled": true,
+    "placement": "window",
+    "layout": "main-vertical",
+    "main_pane_size": 60,
+    "agent_pane_min_width": 52,
+    "split_direction": "-h",
+    "attach_command": "opencode attach",
+    "server_url": null,
+    "keep_pane_on_success": false,
+    "auto_close_on_failure": false,
+    "pane_close_delay_seconds": 5
+  },
+  "worktree": {
+    "extra_exclude": ""
+  },
+  "logging": {
+    "level": "error",
+    "mode": "stdin",
+    "path": null
+  },
+  "hosts": {
+    "JIRA_HOST": "",
+    "CONFLUENCE_HOST": "",
+    "BITBUCKET_API_BASE_PATH": "",
+    "BAMBOO_URL": ""
+  },
+  "secrets": {
+    "BITBUCKET_API_TOKEN": "",
+    "JIRA_API_TOKEN": "",
+    "CONFLUENCE_API_TOKEN": "",
+    "BAMBOO_TOKEN": ""
+  }
+}

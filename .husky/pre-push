@@ -1,0 +1,15 @@
+#!/bin/sh
+. "$(dirname "$0")/_/husky.sh"
+
+echo "Running unit tests..."
+if ! npm test; then
+  echo ""
+  echo "Unit tests failed - push blocked"
+  echo "Fix the tests or use 'git push --no-verify' to skip (not recommended)"
+  exit 1
+fi
+echo "Unit tests passed"
+
+echo ""
+echo "Checking version change in pushed commits..."
+HOOK_STDIN=1 bash scripts/publish-if-changed.sh

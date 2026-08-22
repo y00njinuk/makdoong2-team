@@ -1,0 +1,40 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": [
+    "~/.config/opencode/custom_instructions.md"
+  ],
+  "autoupdate": false,
+  "_comment_plugin": "makdoong2-team install이 자동으로 npm 패키지 이름(@local/makdoong2-team)을 주입한다. 직접 편집 불필요.",
+  "plugin": [
+    "@local/makdoong2-team"
+  ],
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "git commit*": "deny",
+      "git push*": "deny",
+      "git push --force*": "deny",
+      "git reset --hard*": "ask",
+      "git branch -D*": "ask",
+      "git worktree remove*": "ask",
+      "git worktree add*": "ask",
+      "rm -rf*": "ask"
+    }
+  },
+  "mcp": {
+    "_comment": "Site-wide MCP only. Per-stage MCP (works/repos/docs) is embedded in skills/*/SKILL.md for lazy loading.",
+    "chrome-devtools-mcp": {
+      "type": "local",
+      "command": ["npx", "-y", "chrome-devtools-mcp@latest"],
+      "enabled": true
+    }
+  },
+  "tools": {
+    "chrome-devtools-mcp*": true,
+    "verify_stage": true,
+    "dispatch_stage": true,
+    "dispatch_verifier": true,
+    "auto_advance_stage": true,
+    "get_fallback_model": true
+  }
+}

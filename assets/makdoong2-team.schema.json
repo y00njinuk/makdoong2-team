@@ -1,0 +1,357 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/y00njinuk/makdoong2-team/master/assets/makdoong2-team.schema.json",
+  "title": "makdoong2-team Configuration",
+  "description": "Single configuration file for the makdoong2-team opencode plugin. Lives at ${XDG_CONFIG_HOME:-$HOME/.config}/opencode/makdoong2-team.json. Replaces all MAKDOONG2 environment variables.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "model_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Site-level model policy. Extends the built-in primary allow-list so per-agent overrides can reference models beyond the defaults (sonnet-4.6, gpt-5.1-codex).",
+      "properties": {
+        "allowed_primaries": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Extra primary model IDs (provider/model) allowed on top of the built-in defaults. Built-in defaults are always allowed."
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "description": "Per-agent model overrides. Merged onto the built-in POLICIES; primary must stay within the runtime allow-list (defaults ∪ model_policy.allowed_primaries) and fallback tier must be strictly lower than primary tier.",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "provider/model, e.g. github-copilot/claude-sonnet-4.6"
+          },
+          "variant": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          },
+          "fallback_models": {
+            "description": "Ordered fallback model(s). Tried in order on failure. String form (tier defaults to 'low') OR object form {id, tier?} to set an explicit tier; mixing both in an array is allowed.",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "tier": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "max"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "array",
+                "items": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "id"
+                      ],
+                      "properties": {
+                        "id": {
+                          "type": "string"
+                        },
+                        "tier": {
+                          "type": "string",
+                          "enum": [
+                            "low",
+                            "medium",
+                            "high",
+                            "max"
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "threshold": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "description": "Minimum line-coverage percent the stage-5 coverage gate enforces. Default 95."
+        }
+      }
+    },
+    "timeout": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Substage polling timeout settings.",
+      "properties": {
+        "substage_minutes": {
+          "type": "number",
+          "minimum": 1,
+          "description": "Maximum minutes to wait for a single dispatch_stage or dispatch_verifier sub-agent to complete. Default 30. Minimum 1 (enforced at runtime)."
+        },
+        "per_agent": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "number",
+            "minimum": 1
+          },
+          "description": "Per-agent timeout overrides in minutes. Key is the agent name (e.g. \"makdoong2-engineer\"). Takes precedence over substage_minutes. Minimum 1 (enforced at runtime)."
+        },
+        "stall_escalate_threshold": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Accumulated hang_history entries (message_stall / status_absent) per substage that block further dispatch_stage calls and force user escalation. Counts across tool calls, unlike the per-call MAX_ATTEMPTS budget which resets on every re-dispatch. Default 5."
+        }
+      }
+    },
+    "tmux": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Sub-session pane monitor. Only active when run inside tmux AND enabled=true.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Spawn a tmux pane per dispatched 막둥이. Default false."
+        },
+        "placement": {
+          "type": "string",
+          "enum": [
+            "window",
+            "pane"
+          ],
+          "description": "Where each 막둥이 is spawned. 'window' (default) opens a separate tmux window, leaving 부장님's pane geometry untouched. 'pane' splits 부장님's window (legacy) — this resizes the source pane on every spawn/kill, which makes the opencode TUI re-run OSC palette detection and can leak reply fragments like '/0c0c/0c0c' into the prompt. layout / main_pane_size / agent_pane_min_width / split_direction apply only when placement='pane'."
+        },
+        "layout": {
+          "type": "string",
+          "enum": [
+            "main-vertical",
+            "main-horizontal",
+            "tiled",
+            "even-horizontal",
+            "even-vertical"
+          ],
+          "description": "tmux layout applied after each spawn. Default main-vertical."
+        },
+        "main_pane_size": {
+          "type": "number",
+          "description": "Percent of window width kept for 부장님. Default 60."
+        },
+        "agent_pane_min_width": {
+          "type": "number",
+          "description": "Minimum 막둥이 pane width (chars). Default 52."
+        },
+        "split_direction": {
+          "type": "string",
+          "enum": [
+            "-h",
+            "-v"
+          ],
+          "description": "-h side-by-side, -v top/bottom. Default -h."
+        },
+        "attach_command": {
+          "type": "string",
+          "description": "Command run inside the pane. Default 'opencode attach'."
+        },
+        "server_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "If set, appended as ' --server <url>' to the attach command."
+        },
+        "keep_pane_on_success": {
+          "type": "boolean",
+          "description": "Keep pane open after successful dispatch_stage (user can read output). Default false."
+        },
+        "auto_close_on_failure": {
+          "type": "boolean",
+          "description": "Auto-close pane on dispatch failure (clean up for retry). Default false — failed 막둥이 panes are kept for diagnosis. The kept pane shows the placeholder until 부장님 focuses it; focusing swaps in the real session view."
+        },
+        "pane_close_delay_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Seconds to wait before closing pane (0 = immediate). Default 0."
+        }
+      }
+    },
+    "worktree": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "extra_exclude": {
+          "type": "string",
+          "description": "Extra newline/space-separated patterns excluded by scripts/wt-sync-ignored.sh."
+        }
+      }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Plugin runtime logging. Controls level threshold, output destination (console vs file), and log file path.",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": [
+            "silent",
+            "error",
+            "warn",
+            "info",
+            "debug",
+            "trace"
+          ],
+          "description": "Log level threshold. Only messages at or below this level are emitted. Default 'error' — only errors/BLOCKED messages surface; set to 'debug' or 'trace' for full audit trail."
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "stdin",
+            "file"
+          ],
+          "description": "Output destination. 'stdin' (default) writes to console (stderr/stdout) — legacy behaviour. 'file' appends to `path`. Appending (never truncating) is required because every opencode process on the host shares one log file; size is bounded by `max_bytes` rotation instead."
+        },
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Absolute or relative path to the log file. Consulted only when mode='file' — ignored when mode='stdin' even if set. When mode='file' this MUST be a non-empty string; missing/empty path causes plugin initialization to fail."
+        },
+        "max_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Rotation threshold in bytes for mode='file'. When the log exceeds this size it is renamed to `<path>.1` and a fresh file is started. Default 10485760 (10 MiB)."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "file"
+              }
+            },
+            "required": [
+              "mode"
+            ]
+          },
+          "then": {
+            "required": [
+              "path"
+            ],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      ]
+    },
+    "paths": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional path overrides. Defaults derive from the opencode config dir; set these only for non-standard installs.",
+      "properties": {
+        "hooks": {
+          "type": "string"
+        },
+        "gates": {
+          "type": "string"
+        },
+        "scripts": {
+          "type": "string"
+        },
+        "stages": {
+          "type": "string"
+        }
+      }
+    },
+    "hosts": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "On-prem endpoint hosts consumed by research-skill MCP wrappers. Read at runtime by skills/*/run-*.sh via jq. The wrapper exits with instructions when a host is missing.",
+      "properties": {
+        "JIRA_HOST": {
+          "type": "string",
+          "description": "Jira DC host (no scheme), e.g. jira.example.com. Consumed by skills/jira-research/run-works.sh."
+        },
+        "CONFLUENCE_HOST": {
+          "type": "string",
+          "description": "Confluence DC host (no scheme), e.g. confluence.example.com. Consumed by skills/confluence-research/run-docs.sh."
+        },
+        "BITBUCKET_API_BASE_PATH": {
+          "type": "string",
+          "description": "Bitbucket DC REST base URL, e.g. https://bitbucket.example.com/rest. Consumed by skills/bitbucket-research/run-repos.sh."
+        },
+        "BAMBOO_URL": {
+          "type": "string",
+          "description": "Bamboo base URL, e.g. https://bamboo.example.com. Consumed by skills/bamboo-ci/run-bamboo.sh."
+        }
+      }
+    },
+    "secrets": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Credentials consumed by research-skill MCP wrappers. Read at runtime by skills/*/run-*.sh via jq. Leave empty to disable the corresponding skill — the wrapper exits with instructions when the token is missing. NEVER commit real tokens to a shared repo; keep this file at chmod 600.",
+      "properties": {
+        "BITBUCKET_API_TOKEN": {
+          "type": "string",
+          "description": "Bitbucket Data Center personal-access token consumed by skills/bitbucket-research/run-repos.sh."
+        },
+        "JIRA_API_TOKEN": {
+          "type": "string",
+          "description": "JIRA Data Center personal-access token consumed by skills/jira-research/run-works.sh."
+        },
+        "CONFLUENCE_API_TOKEN": {
+          "type": "string",
+          "description": "Confluence Data Center personal-access token consumed by skills/confluence-research/run-docs.sh."
+        },
+        "BAMBOO_TOKEN": {
+          "type": "string",
+          "description": "Bamboo personal-access token consumed by skills/bamboo-ci/run-bamboo.sh."
+        }
+      }
+    }
+  }
+}
