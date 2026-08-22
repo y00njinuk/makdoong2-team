@@ -4,9 +4,9 @@
     "~/.config/opencode/custom_instructions.md"
   ],
   "autoupdate": false,
-  "_comment_plugin": "makdoong2-team install이 자동으로 npm 패키지 이름(@local/makdoong2-team)을 주입한다. 직접 편집 불필요.",
+  "_comment_plugin": "makdoong2-team install이 자동으로 npm 패키지 이름(makdoong2-team)을 주입한다. 직접 편집 불필요.",
   "plugin": [
-    "@local/makdoong2-team"
+    "makdoong2-team"
   ],
   "permission": {
     "bash": {

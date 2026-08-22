@@ -84,8 +84,8 @@ export function parseJsonc(text) {
 // nvm versions and reinstalls.
 const LEGACY_RELATIVE_PLUGIN_REF = "./plugins/makdoong2-team/src/opencode-plugin.ts";
 const LEGACY_ABSOLUTE_TS_SUFFIX = "/src/opencode-plugin.ts";
-const LEGACY_UNSCOPED_NAME = "makdoong2-team";
-const PLUGIN_PACKAGE_NAME = "@local/makdoong2-team";
+const LEGACY_SCOPED_NAME = "@local/makdoong2-team";
+const PLUGIN_PACKAGE_NAME = "makdoong2-team";
 const TOOLS = ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"];
 const TOOL_SEARCH_PLUGIN_PREFIX = "opencode-tool-search";
 // UTIL_SCRIPTS is no longer deployed (scripts live inside the npm module).
@@ -126,9 +126,11 @@ function pluginRef(_pkgRoot) {
  * opencode.json before the current package-name ref is inserted. Recognises:
  *   1. Old relative path from the pre-npm-module install layout.
  *   2. Pre-dist absolute path pointing at src/opencode-plugin.ts.
- *   3. Old unscoped npm name ("makdoong2-team") used before the package was
- *      republished under the @local scope on 사내 Artifactory. Accepts both
- *      bare name and "name@version" suffix form.
+ *   3. Old @local-scoped npm name used while the package lived on the internal
+ *      Artifactory, before it was published to the public npm registry.
+ *   4. Version-pinned form of the current name ("makdoong2-team@1.2.0"), which
+ *      would freeze the plugin on one version across upgrades.
+ * Cases 3 and 4 accept both the bare name and the "name@version" suffix form.
  * @param {unknown} entry - Element from opencode.json plugin[]
  * @returns {boolean}
  */
@@ -136,8 +138,9 @@ function isLegacyPluginEntry(entry) {
   if (typeof entry !== "string") return false;
   if (entry === LEGACY_RELATIVE_PLUGIN_REF) return true;
   if (entry.endsWith(LEGACY_ABSOLUTE_TS_SUFFIX)) return true;
-  if (entry === LEGACY_UNSCOPED_NAME) return true;
-  if (entry.startsWith(`${LEGACY_UNSCOPED_NAME}@`)) return true;
+  if (entry === LEGACY_SCOPED_NAME) return true;
+  if (entry.startsWith(`${LEGACY_SCOPED_NAME}@`)) return true;
+  if (entry.startsWith(`${PLUGIN_PACKAGE_NAME}@`)) return true;
   return false;
 }
 
@@ -381,12 +384,13 @@ export function install(opts) {
   }
 
   // 6) Seed opencode plugin cache directory.
-  // opencode's internal npm client hard-codes registry.npmjs.org and does not
-  // honour @scope:registry mappings from ~/.npmrc, so it cannot fetch this
-  // package from the internal 사내 Artifactory. We work around that by
-  // pre-populating ~/.cache/opencode/packages/@local/makdoong2-team@latest/
-  // with a symlink to the already-installed npm module. opencode then skips
-  // the fetch step because the cache is already primed.
+  // The package now lives on the public registry.npmjs.org, so opencode's
+  // internal npm client *can* fetch it — but that fetch resolves independently
+  // of the globally installed module and can leave the session running a
+  // different version than `npm ls -g` reports. We pre-populate
+  // ~/.cache/opencode/packages/makdoong2-team@latest/ with a symlink to the
+  // already-installed npm module so opencode skips the fetch and always loads
+  // exactly the version that was just installed (also keeps installs offline-safe).
   seedOpencodeCache(pkgRoot, { ok, info, warn });
 
   return result;
@@ -493,9 +497,9 @@ function removeLegacyReadPermission(oc) {
  *
  * Absolute-path prefixes are used instead of glob patterns because
  * path.matchesGlob's "**" cannot traverse dot-directories (.nvm, .config),
- * making patterns like "**\/@local\/makdoong2-team\/**" ineffective in practice.
+ * making patterns like "**\/makdoong2-team\/**" ineffective in practice.
  *
- * @param {string} pkgRoot - npm module root (e.g. /root/.nvm/.../node_modules/@local/makdoong2-team)
+ * @param {string} pkgRoot - npm module root (e.g. /root/.nvm/.../node_modules/makdoong2-team)
  * @param {string} configDir - opencode config dir (e.g. /root/.config/opencode)
  * @returns {string[]}
  */
@@ -744,10 +748,11 @@ function unpatchOpencodeJson(configDir, pkgRoot, { ok, skip, warn }) {
   // We match by package-name suffix rather than exact pkgRoot prefix because the
   // uninstall may run from a different pkgRoot (e.g. dev checkout) than the one
   // that originally wrote the entry (npm global install path).  Any key that ends
-  // with "@local/makdoong2-team/**" is safe to remove.
+  // with "makdoong2-team/**" is safe to remove — that suffix also matches the
+  // legacy "@local/makdoong2-team/**" entries written by internal-registry installs.
   const extDir = oc.permission?.external_directory;
   if (extDir && typeof extDir === "object") {
-    const pkgSuffix = `${PLUGIN_PACKAGE_NAME}/**`;  // "@local/makdoong2-team/**"
+    const pkgSuffix = `${PLUGIN_PACKAGE_NAME}/**`;  // "makdoong2-team/**"
     const pkgEntry  = pkgRoot.replace(/\/+$/, "") + "/**";
     for (const key of Object.keys(extDir)) {
       const isLegacyGlob = key === LEGACY_PKG_EXTERNAL_DIR_GLOB;
@@ -809,7 +814,9 @@ function removeOpencodeCache(pkgRoot, { ok, skip, warn }) {
     try {
       if (lstatSync(modulesDir).isSymbolicLink()) {
         rmSync(modulesDir, { force: true });
-        // Prune now-empty ancestor dirs (scoped package has an extra level: @local/)
+        // Prune now-empty ancestor dirs. slice(0, -1) is empty for the current
+        // unscoped name (scopeDir === node_modules); it still resolves the extra
+        // scope level for caches left behind by the old @local-scoped installs.
         const scopeDir = join(cacheDir, "node_modules", ...name.split("/").slice(0, -1));
         tryCleanEmptyDir(scopeDir);
         tryCleanEmptyDir(join(cacheDir, "node_modules"));
@@ -841,7 +848,7 @@ function removeOpencodeCache(pkgRoot, { ok, skip, warn }) {
  * What is intentionally left in place:
  *   - makdoong2-team.json  (user credentials / config)
  *   - configDir/** from external_directory (broad permission; may be used by others)
- *   - The npm package itself (use npm uninstall -g @local/makdoong2-team for that)
+ *   - The npm package itself (use npm uninstall -g makdoong2-team for that)
  *
  * @param {Object} opts
  * @param {string} opts.configDir - Absolute path to config dir
@@ -925,10 +932,10 @@ export function uninstall(opts) {
  * Pre-populate opencode's plugin cache with a symlink pointing at the
  * already-installed npm module for this package. Idempotent.
  *
- * Rationale: opencode's built-in npm client only hits registry.npmjs.org and
- * cannot see private/scoped packages published to 사내 Artifactory. Without
- * this step, opencode logs "failed to install plugin" on every session start
- * and the plugin's tools never load.
+ * Rationale: pins the session to the globally installed module instead of
+ * whatever opencode's built-in npm client resolves from registry.npmjs.org on
+ * its own. Without this step an upgrade can appear to succeed (`npm ls -g`
+ * shows the new version) while opencode keeps loading a stale cached copy.
  *
  * @param {string} pkgRoot - Absolute path to this npm module's root (source of the symlink target)
  * @param {Object} helpers - {ok, info, warn} logger callbacks
@@ -958,8 +965,8 @@ function seedOpencodeCache(pkgRoot, { ok, info, warn }) {
 
   // opencode caches under `<name>@latest` (the tag it resolves) as well as
   // `<name>@<explicit-version>` for pinned refs. Seed both so opencode.json
-  // entries in either shape ("@local/makdoong2-team" or
-  // "@local/makdoong2-team@0.2.1") both hit the cache.
+  // entries in either shape ("makdoong2-team" or "makdoong2-team@0.2.1")
+  // both hit the cache.
   const cacheRoot = opencodeCacheRoot();
   const tags = [`${name}@latest`, `${name}@${version}`];
   for (const tag of tags) {

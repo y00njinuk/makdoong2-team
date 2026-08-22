@@ -1,6 +1,21 @@
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { TmuxMonitor, readTmuxConfig, isInsideTmux, buildWindowName, buildPlaceholderCommand } from "../dist/tmux-monitor.js";
+
+// TmuxMonitor captures process.env.TMUX_PANE in its constructor and uses it as the
+// -t target for `tmux display-message`; with no source pane it cannot resolve a
+// source window, so every placement="window" spawn fails closed and returns null.
+// Left to the ambient environment that makes this file pass only when the suite is
+// run from inside a tmux pane and fail everywhere else (plain shell, CI, Docker).
+// Pin it here so the file is hermetic. A test that needs the unresolvable case
+// should make `display-message` exit non-zero rather than unset this — see
+// "unresolvable source window → spawn is SKIPPED".
+const AMBIENT_TMUX_PANE = process.env.TMUX_PANE;
+process.env.TMUX_PANE = "%0";
+after(() => {
+  if (AMBIENT_TMUX_PANE === undefined) delete process.env.TMUX_PANE;
+  else process.env.TMUX_PANE = AMBIENT_TMUX_PANE;
+});
 
 function makeShellRecorder({ splitWindowExitCode = 0, splitPaneId = "%1", widthCols = 400, heightRows = 100, panesTable = null, focusedPaneIds = null } = {}) {
   const calls = [];

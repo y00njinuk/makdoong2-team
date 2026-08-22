@@ -278,7 +278,7 @@ describe("install-lib", () => {
     mkdirSync(configDir, { recursive: true });
     
     const ocPath = join(configDir, "opencode.json");
-    const pluginPath = "@local/makdoong2-team";
+    const pluginPath = "makdoong2-team";
     const existingOc = {
       plugin: [pluginPath],
       tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, auto_advance_stage: true, get_fallback_model: true },
@@ -321,7 +321,7 @@ describe("install-lib", () => {
       });
       
       const afterOc = JSON.parse(readFileSync(ocPath, "utf8"));
-      assert.ok(afterOc.plugin.includes("@local/makdoong2-team"), "plugin ref added as npm package name");
+      assert.ok(afterOc.plugin.includes("makdoong2-team"), "plugin ref added as npm package name");
       assert.ok(afterOc.tools.verify_stage === true, "tools added");
       assert.ok(result.backedUp.some(p => p.includes("opencode.json")), "backup created on always");
     } finally {
@@ -582,7 +582,7 @@ describe("install-lib", () => {
         ["opencode-tool-search@0.4.3", {
           alwaysLoad: ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"],
         }],
-        "@local/makdoong2-team",
+        "makdoong2-team",
       ],
       tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, auto_advance_stage: true, get_fallback_model: true },
       permission: { read: { "~/.config/opencode/skills/*/secrets.env": "allow" } },
@@ -619,7 +619,7 @@ describe("install-lib", () => {
         ["opencode-tool-search@0.4.3", {
           alwaysLoad: ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"],
         }],
-        "@local/makdoong2-team",
+        "makdoong2-team",
       ],
       tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, auto_advance_stage: true, get_fallback_model: true },
       permission: { external_directory: Object.fromEntries(computeExternalDirPaths(PKG_ROOT, configDir).map(p => [p, "allow"])) },
@@ -642,7 +642,7 @@ describe("install-lib", () => {
     }
   });
 
-  test("legacy plugin refs are migrated to scoped npm package name", () => {
+  test("legacy plugin refs are migrated to the published npm package name", () => {
     const tmpHome = mkdtempSync(join(tmpdir(), "mkd2-install-"));
     const configDir = join(tmpHome, ".config", "opencode");
     mkdirSync(configDir, { recursive: true });
@@ -652,7 +652,8 @@ describe("install-lib", () => {
       plugin: [
         "./plugins/makdoong2-team/src/opencode-plugin.ts",
         "/usr/local/lib/node_modules/makdoong2-team/src/opencode-plugin.ts",
-        "makdoong2-team",
+        "@local/makdoong2-team",
+        "@local/makdoong2-team@0.2.1",
         "makdoong2-team@0.1.0",
         "opencode-claude-auth@1.5.4",
       ],
@@ -672,9 +673,10 @@ describe("install-lib", () => {
       const oc = JSON.parse(readFileSync(ocPath, "utf8"));
       assert.ok(!oc.plugin.includes("./plugins/makdoong2-team/src/opencode-plugin.ts"), "relative legacy ref stripped");
       assert.ok(!oc.plugin.some(p => typeof p === "string" && p.endsWith("/src/opencode-plugin.ts")), "absolute legacy ref stripped");
-      assert.ok(!oc.plugin.includes("makdoong2-team"), "unscoped legacy name stripped");
-      assert.ok(!oc.plugin.includes("makdoong2-team@0.1.0"), "unscoped legacy name with version stripped");
-      assert.ok(oc.plugin.includes("@local/makdoong2-team"), "scoped npm package name inserted");
+      assert.ok(!oc.plugin.includes("@local/makdoong2-team"), "legacy @local-scoped name stripped");
+      assert.ok(!oc.plugin.includes("@local/makdoong2-team@0.2.1"), "legacy @local-scoped name with version stripped");
+      assert.ok(!oc.plugin.includes("makdoong2-team@0.1.0"), "version-pinned ref normalised to the bare name");
+      assert.ok(oc.plugin.includes("makdoong2-team"), "published npm package name inserted");
       assert.ok(oc.plugin.includes("opencode-claude-auth@1.5.4"), "unrelated plugin entries preserved");
     } finally {
       rmSync(tmpHome, { recursive: true, force: true });

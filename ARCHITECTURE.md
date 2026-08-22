@@ -34,11 +34,11 @@ tmux -V  # Must show >= 3.0
 opencode --version  # Must show >= 1.18.0
 
 # 3. Upgrade plugin
-npm install -g @local/makdoong2-team@1.0.0
+npm install -g makdoong2-team@1.0.0
 makdoong2-team install --force
 ```
 
-If you cannot upgrade tmux or opencode, stay on `@local/makdoong2-team@0.22.x`.
+If you cannot upgrade tmux or opencode, stay on `makdoong2-team@0.22.x`.
 
 ---
 
@@ -264,7 +264,7 @@ capacity 산정: window 폭 / `agent_pane_min_width`. 가득 차면 가장 오�
 ### npm 전역 모듈 (`npm install -g` 로 설치)
 
 ```
-<npm-global>/node_modules/@local/makdoong2-team/
+<npm-global>/node_modules/makdoong2-team/
 ├─ bin/cli.js                # install / doctor / validate
 ├─ dist/opencode-plugin.js   # TS → JS 컴파일 산출물 (main)
 ├─ src/**/*.ts               # 원본 소스
@@ -353,8 +353,8 @@ capacity 산정: window 폭 / `agent_pane_min_width`. 가득 차면 가장 오�
 ## 13. 배포 & 릴리즈
 
 ### 13.1 npm 패키지 이름 및 registry
-- 패키지 이름은 `@local/makdoong2-team` (사내 전용 스코프).
-- 배포 대상: 사내 Artifactory `npm-local-repos` (`https://registry.example.com/artifactory/api/npm/npm-local-repos/`). `package.json` 의 `publishConfig` 로 고정한다.
+- 패키지 이름은 `makdoong2-team` (unscoped, 공개 npm).
+- 배포 대상: 공개 npm registry (`https://registry.npmjs.org`). `package.json` 의 `publishConfig.access = "public"` 으로 고정한다 — unscoped 패키지는 기본이 public 이지만 명시해 두어 scope 전환 시에도 의도가 유지된다.
 - opencode.json 에는 다른 플러그인들과 마찬가지로 npm 이름만 기록한다. 절대경로는 legacy 로 취급하며 install 시 자동으로 stripping 된다.
 
 ### 13.2 빌드 산출물
@@ -371,12 +371,12 @@ capacity 산정: window 폭 / `agent_pane_min_width`. 가득 차면 가장 오�
 - **나머지** (`dist/`, `gates/`, `scripts/`, `stages/`, `references/`, `bin/`) → npm 모듈 내부에만 존재. `src/config.ts`의 `resolvePaths()`가 npm 모듈 경로를 자동으로 해결한다.
 
 ### 13.4 opencode plugin cache seeding
-- opencode 내장 npm client 는 하드코딩된 `registry.npmjs.org` 만 사용하므로 사내 registry 에서 자동으로 fetch 하지 못한다.
-- `scripts/install-lib.mjs` 의 `seedOpencodeCache()` 가 `~/.cache/opencode/packages/@local/makdoong2-team@latest/node_modules/@local/makdoong2-team` 을 npm 전역 설치 경로로 심볼릭 링크하여 opencode 가 fetch 를 건너뛰도록 한다. 이 우회는 opencode 가 사내 registry 를 정식 지원하기 전까지 유지된다.
+- 공개 registry 로 옮긴 뒤에는 opencode 내장 npm client 도 패키지를 fetch 할 수 있다. 다만 그 fetch 는 전역 설치본과 무관하게 해석되므로, 업그레이드 후에도 opencode 가 이전 캐시본을 계속 로드할 수 있다.
+- `scripts/install-lib.mjs` 의 `seedOpencodeCache()` 가 `~/.cache/opencode/packages/makdoong2-team@latest/node_modules/makdoong2-team` 을 npm 전역 설치 경로로 심볼릭 링크한다. opencode 가 fetch 를 건너뛰고 방금 설치한 버전을 그대로 로드하도록 고정하는 것이 목적이다 (오프라인 설치도 함께 보장).
 
 ### 13.5 credential 관리
-- 사내 Artifactory 인증은 `~/.npmrc` 에 `_auth` (base64 `user:pass`) 로 저장한다. chmod 600 필수.
-- `~/.docker/config.json` 의 동일 registry 호스트 항목이 같은 형식의 credential 을 가지면 재사용할 수 있다.
+- 배포 인증은 `npm login` 또는 `~/.npmrc` 의 `//registry.npmjs.org/:_authToken=<token>` 으로 한다. chmod 600 필수.
+- 설치하는 쪽은 인증이 필요 없다 (공개 패키지).
 - 프로젝트 `.npmrc` 는 `.gitignore` 에 포함되어 있어 실수로 credential 을 커밋할 수 없다.
 
 ### 13.6 리서치 skill credential 관리 (SSoT: makdoong2-team.json)
@@ -399,8 +399,8 @@ capacity 산정: window 폭 / `agent_pane_min_width`. 가득 차면 가장 오�
   4. **승인 게이트 #1** — 버전 bump 확인
   5. `npm version <bump>` 실행 (커밋 + 태그)
   6. `npm publish --dry-run` 으로 tarball 검증
-  7. **승인 게이트 #2** — 사내 registry 배포 확인
-  8. `npm publish` → 사내 Artifactory
+  7. **승인 게이트 #2** — npm 공개 배포 확인
+  8. `npm publish` → 공개 npm registry
   9. `git push --follow-tags`
 - Publish 이전 실패 시 자동 롤백(태그 삭제 + `git reset --hard HEAD~1`). Publish 이후 실패 시 수동 조치.
 - 동일 버전 재-publish 는 registry 가 거부 → rollback 후 새 버전 필요.

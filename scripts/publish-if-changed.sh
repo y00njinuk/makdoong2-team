@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# publish-if-changed.sh - push 시점에 version 변경을 감지해 사내 registry 배포를 트리거
+# publish-if-changed.sh - push 시점에 version 변경을 감지해 npm 공개 배포를 트리거
 #
 # 동작:
 #   1. push 대상 커밋들 중 package.json version이 변경되었는지 확인
@@ -150,7 +150,7 @@ log "=========================================="
 info "이 push에는 다음 버전 변경이 포함되어 있습니다:"
 info "  ${old_version:-<없음>} → ${BOLD}${new_version}${RESET}"
 
-if ! confirm "${BOLD}${YELLOW}이 버전을 사내 Artifactory에 배포하시겠습니까?${RESET}"; then
+if ! confirm "${BOLD}${YELLOW}이 버전을 공개 npm registry에 배포하시겠습니까?${RESET}"; then
   err "사용자가 배포를 거부함 - push 차단"
   err "이 버전을 배포하지 않으려면:"
   err "  1) package.json 의 version을 이전 값으로 되돌린 커밋을 추가"
@@ -171,14 +171,14 @@ ok "Dry-run 통과"
 
 # ---------- STEP 6: 승인 게이트 #2 (돌이킬 수 없는 배포) ----------
 log "=========================================="
-log "승인 게이트 #2: 사내 registry 배포 확인"
+log "승인 게이트 #2: npm 공개 배포 확인"
 log "=========================================="
 
-warn "이제 사내 Artifactory에 $new_version 을(를) 배포합니다."
+warn "이제 공개 npm registry (registry.npmjs.org) 에 $new_version 을(를) 배포합니다."
 warn "배포 후에는 동일 버전 재-publish 가 registry에 의해 거부됩니다."
 warn "돌이킬 수 없는 작업입니다."
 
-if ! confirm "${BOLD}${RED}정말 사내 Artifactory에 $new_version 을(를) 배포하시겠습니까?${RESET}"; then
+if ! confirm "${BOLD}${RED}정말 공개 npm registry에 $new_version 을(를) 배포하시겠습니까?${RESET}"; then
   err "사용자가 최종 배포를 거부함 - push 차단"
   err "다시 시도하려면 git push 를 재실행하세요."
   exit 1
@@ -191,17 +191,17 @@ if [ "$SKIP_PUBLISH" = "1" ]; then
 fi
 
 log "=========================================="
-log "npm publish 실행 → 사내 Artifactory"
+log "npm publish 실행 → public npm registry"
 log "=========================================="
 
 if ! npm publish; then
   err "npm publish 실패 - push 차단"
   err "수동 확인 필요:"
-  err "  - 사내 registry 접근성 (~/.npmrc)"
+  err "  - npm 로그인 상태 (npm whoami)"
   err "  - 동일 버전 중복 배포 여부"
   err "  - 문제 해결 후 git push 재실행"
   exit 1
 fi
 
-ok "${BOLD}${GREEN}사내 registry 배포 완료: ${PACKAGE_NAME}@${new_version}${RESET}"
+ok "${BOLD}${GREEN}npm 배포 완료: ${PACKAGE_NAME}@${new_version}${RESET}"
 info "push를 계속 진행합니다..."

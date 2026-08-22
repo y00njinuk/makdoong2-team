@@ -26,7 +26,13 @@ git -C "$WT" merge-base --is-ancestor "$BASE" HEAD 2>/dev/null || {
 # 커밋만 취소, 변경은 보존 (soft reset)
 N=$(git -C "$WT" rev-list --count "$BASE..HEAD" 2>/dev/null || echo 0)
 git -C "$WT" reset --soft "$BASE"
-echo "[rollback] HEAD를 $BASE 로 soft-reset 완료 (취소된 커밋 $N개, working tree/index 변경은 보존됨)"
+# ${N} and ${BASE} must stay braced. Unbraced, bash reads the variable name with
+# legal_variable_char() == isalnum() one byte at a time, and Darwin libc reports
+# 0xEA — the lead byte of the Hangul counter suffix that follows — as alnum in
+# UTF-8 locales. The name absorbs that byte, becomes unbound, and set -u aborts.
+# glibc keeps high bytes non-alnum, so this only bites on macOS.
+# Guarded by test/shell-portability.test.mjs.
+echo "[rollback] HEAD를 ${BASE} 로 soft-reset 완료 (취소된 커밋 ${N}개, working tree/index 변경은 보존됨)"
 
 # 3_delivery.commit 관련 state 초기화 (base_sha는 보존 — 동일 기준점으로 재커밋)
 "$HERE/state.sh" set "$ISSUE" '.stages."3_delivery".substages."commit".done' 'false' >/dev/null

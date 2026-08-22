@@ -106,11 +106,15 @@
 - `.stages."3_delivery".substages."review".comments_per_commit` 는 커밋 SHA → posting 수 매핑. 모든 값 ≥ 1, 항목 수 = `atomic_review.count_commits`, 총합 = `.comments`.
 
 ### 테스트
-- 새 기능은 반드시 `test/*.test.mjs` 회귀 케이스 추가. `npm test` 는 모든 단위 테스트를 순차 실행하며 pre-push 훅에서 자동 검증.
+- 새 기능은 반드시 `test/*.test.mjs` 회귀 케이스 추가. `npm test` 는 `scripts/run-tests.mjs` 로 모든 단위 테스트를 순차 실행하며 pre-push 훅에서 자동 검증.
+- 새 테스트 파일은 `scripts/run-tests.mjs` 의 `STEPS` 에 반드시 등록할 것 — 등록하지 않으면 `npm test` 가 영영 실행하지 않는다 (`gate-requirements-quality.test.mjs` 가 실제로 그 상태였다).
+- 러너는 실패해도 멈추지 않고 끝까지 돌린 뒤 실패 목록을 보고한다. 실패 1건만 보고 끝내지 말고 전체 목록을 확인할 것.
+- 셸 스크립트에서 변수 뒤에 한글이 붙으면 반드시 `${VAR}` 로 감쌀 것. macOS libc 는 UTF-8 로케일에서 멀티바이트 첫 바이트를 alnum 으로 보고해 변수명이 오염된다 (Linux 에서는 재현되지 않음). `test/shell-portability.test.mjs` 가 강제한다.
+- 플랫폼 의존 실패가 의심되면 `npm run test:ubuntu` 로 Ubuntu 24.04 컨테이너에서 교차 확인. 단 macOS 전용 버그는 이 경로로 잡히지 않는다.
 - pollSubSession / dispatch_stage 로직 수정 시 특히 `test/poll-sub-session.test.mjs`, `test/dispatch-stage-redispatch.test.mjs` 확장 필수.
 
 ## 릴리즈 프로세스
-- `npm run release:patch|minor|major` — 2회 사용자 승인 게이트를 거쳐 사내 Artifactory 배포. 상세: ARCHITECTURE.md §13.7.
+- `npm run release:patch|minor|major` — 2회 사용자 승인 게이트를 거쳐 공개 npm registry 배포. 상세: ARCHITECTURE.md §13.7.
 - `--yes` 플래그는 CI 전용. 대화형에서 사용 금지.
 - `.husky/pre-push` 훅이 `package.json` version 변경 감지 시 자동 publish (동일 승인 게이트).
 

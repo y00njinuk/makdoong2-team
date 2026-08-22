@@ -1,0 +1,27 @@
+# Ubuntu test image for makdoong2-team.
+#
+# The plugin is developed and run on Ubuntu, but the test suite is regularly
+# executed on macOS too. Several suites are sensitive to the difference (libc
+# ctype tables, /var symlinks, bash 3.2 vs 5.x), so this image pins the Linux
+# side of that matrix and lets `npm run test:ubuntu` reproduce it from any host.
+#
+# Ubuntu 24.04 ships nodejs 18, below the >=20 required by package.json engines,
+# so Node comes from NodeSource rather than the distro archive.
+FROM ubuntu:24.04
+
+ARG NODE_MAJOR=22
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl gnupg git jq tmux bash procps locales \
+ && sed -i 's/^# *\(en_US.UTF-8\)/\1/' /etc/locale.gen \
+ && locale-gen \
+ && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# A UTF-8 locale is what developers actually run under; the C locale would mask
+# multibyte-adjacent shell bugs instead of exposing them.
+ENV LANG=en_US.UTF-8 \
+    LC_ALL=en_US.UTF-8
+
+WORKDIR /w

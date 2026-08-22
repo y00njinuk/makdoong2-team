@@ -19,7 +19,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,7 +40,13 @@ const GIT_ENV = {
 
 /** 메인 repo 생성: git init + 최초 커밋 (worktree add에 커밋 필요) */
 function makeMainRepo() {
-  const main = mkdtempSync(join(tmpdir(), "makdoong2-wt-sync-main-"));
+  // realpathSync is required, not cosmetic: on macOS os.tmpdir() is /var/folders/…
+  // and /var is a symlink to /private/var, so git reports the resolved path while
+  // mkdtempSync returns the unresolved one. The gate compares .worktree against
+  // `git worktree list` as plain strings, so the two forms never match and the
+  // stale-path check silently passes. Linux /tmp is a real directory, which is why
+  // this only diverges on macOS.
+  const main = realpathSync(mkdtempSync(join(tmpdir(), "makdoong2-wt-sync-main-")));
   spawnSync("git", ["init", "-q"], { cwd: main, env: GIT_ENV });
   spawnSync("git", ["config", "user.email", "test@test.com"], { cwd: main, env: GIT_ENV });
   spawnSync("git", ["config", "user.name", "test"], { cwd: main, env: GIT_ENV });

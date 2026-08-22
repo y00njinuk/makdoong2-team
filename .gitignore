@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.npmrc
+*.tgz
+.DS_Store
+.omc/
+
+# Host-side scratch for scripts/test-ubuntu.sh (Linux node_modules + container passwd)
+.docker-test/

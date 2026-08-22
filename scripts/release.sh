@@ -11,8 +11,8 @@
 #   4. **사용자 승인 게이트 #1** (버전 bump 확인)
 #   5. npm version <bump> 실행 (커밋 + 태그 생성)
 #   6. Publish 미리보기 (npm publish --dry-run)
-#   7. **사용자 승인 게이트 #2** (사내 registry 배포 확인)
-#   8. npm publish → 사내 Artifactory
+#   7. **사용자 승인 게이트 #2** (npm 공개 배포 확인)
+#   8. npm publish → public npm registry (registry.npmjs.org)
 #   9. git push --follow-tags
 #
 # 옵션:
@@ -218,16 +218,17 @@ node -e "
   console.log('  target:  ' + (pkg.publishConfig?.registry || 'default'));
 "
 
-# ---------- STEP 7: 승인 게이트 #2 - 사내 registry 배포 ----------
+# ---------- STEP 7: 승인 게이트 #2 - npm 공개 배포 ----------
 log "=========================================="
-log "STEP 7: 사내 Artifactory 배포 승인 (게이트 #2)"
+log "STEP 7: npm 공개 배포 승인 (게이트 #2)"
 log "=========================================="
 
-warn "이제 사내 Artifactory에 $NEW_TAG 를 배포합니다."
+warn "이제 공개 npm registry (registry.npmjs.org) 에 $NEW_TAG 를 배포합니다."
+warn "공개 배포이므로 누구나 설치할 수 있게 됩니다."
 warn "배포 후에는 동일 버전 재-publish 가 registry에 의해 거부됩니다."
 warn "돌이킬 수 없는 작업이므로 신중히 확인하세요."
 
-confirm "${BOLD}${RED}사내 Artifactory에 $NEW_TAG 를 배포하시겠습니까?${RESET}" || {
+confirm "${BOLD}${RED}공개 npm registry에 $NEW_TAG 를 배포하시겠습니까?${RESET}" || {
   warn "사용자가 배포를 거부함. 버전 bump는 유지됩니다."
   info "나중에 배포하려면: npm publish && git push origin HEAD --follow-tags"
   info "취소하려면: git tag -d $NEW_TAG && git reset --hard HEAD~1"
@@ -236,13 +237,13 @@ confirm "${BOLD}${RED}사내 Artifactory에 $NEW_TAG 를 배포하시겠습니�
 
 # ---------- STEP 8: npm publish ----------
 log "=========================================="
-log "STEP 8: npm publish (사내 registry 배포)"
+log "STEP 8: npm publish (공개 npm registry 배포)"
 log "=========================================="
 
 if ! npm publish; then
   err "npm publish 실패. 롤백 필요."
   err "수동 확인 필요:"
-  err "  - 사내 registry 접근성 (~/.npmrc)"
+  err "  - npm 로그인 상태 (npm whoami)"
   err "  - 동일 버전 중복 배포 여부"
   err ""
   err "롤백 여부는 상황에 따라 결정하세요."
@@ -250,7 +251,7 @@ if ! npm publish; then
   err "  재시도: npm publish"
   exit 1
 fi
-ok "사내 registry 배포 완료: $NEW_TAG"
+ok "npm 배포 완료: $NEW_TAG"
 
 # ---------- STEP 9: git push ----------
 log "=========================================="
@@ -270,6 +271,6 @@ ok "${BOLD}${GREEN}릴리스 완료: $NEW_TAG${RESET}"
 log "=========================================="
 info ""
 info "다음 단계 (사용자 환경 업데이트):"
-info "  npm install -g @local/makdoong2-team@${NEXT_VERSION}"
+info "  npm install -g makdoong2-team@${NEXT_VERSION}"
 info "  makdoong2-team install"
 info ""

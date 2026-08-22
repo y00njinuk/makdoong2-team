@@ -6,22 +6,18 @@
 
 ## 설치
 
-패키지는 사내 Artifactory (`@local` scope) 에 게시된다.
+패키지는 공개 npm registry ([`makdoong2-team`](https://www.npmjs.com/package/makdoong2-team)) 에 게시된다. 별도 registry 설정이나 인증은 필요 없다.
 
 ```bash
-# ~/.npmrc 최초 1회
-# @local:registry=https://registry.example.com/artifactory/api/npm/npm-local-repos/
-# //registry.example.com/artifactory/api/npm/npm-local-repos/:_auth=<base64 user:pass>
-
-npm install -g @local/makdoong2-team    # npm 모듈 설치
-makdoong2-team install                  # opencode 배포 (agents, skills, opencode.json 패치)
-makdoong2-team doctor                   # 설치 진단
+npm install -g makdoong2-team    # npm 모듈 설치
+makdoong2-team install           # opencode 배포 (agents, skills, opencode.json 패치)
+makdoong2-team doctor            # 설치 진단
 ```
 
 로컬 dev 설치는 `npm pack` 후 tgz 를 `npm install -g` 한다.
 
 - `install` 은 agents / skills / config seed 만 `~/.config/opencode/` 에 복사한다. 런타임 자산 (dist, gates, stages, scripts) 은 npm 모듈 내부에서 로드된다.
-- opencode 는 npm registry 에서 플러그인을 fetch 하지 않고 `~/.cache/opencode/packages/@local/makdoong2-team@latest/` 심볼릭 링크로 seed 된 전역 모듈을 로드한다.
+- `install` 은 `~/.cache/opencode/packages/makdoong2-team@latest/` 를 전역 모듈 심볼릭 링크로 seed 한다. opencode 가 registry 에서 별도로 fetch 하지 않고 방금 설치한 버전을 그대로 로드하게 만든다.
 - 재설치 시 `makdoong2-team.json` 은 보존된다. 덮어쓰려면 `--force`.
 
 ## 설정 — `makdoong2-team.json` 한 파일
@@ -171,18 +167,54 @@ npm run release:major   # 0.2.3 → 1.0.0  (breaking)
 
 ### 경로 B — git push 시 자동 배포
 
-`package.json` 의 `version` 을 수동으로 올린 커밋을 push 하면 `.husky/pre-push` 훅이 감지해 승인 게이트 2회 후 자동 publish 한다. 이미 registry 에 있는 버전은 skip.
+`package.json` 의 `version` 을 수동으로 올린 커밋을 push 하면 `.husky/pre-push` 훅이 감지해 승인 게이트 2회 후 자동 publish 한다. 이미 npm registry 에 있는 버전은 skip.
 
-### 사내 Artifactory 인증
+### npm 인증
 
-`~/.npmrc` 에 `_auth` (base64 `user:pass`) 형식으로 저장 (chmod 600). `~/.docker/config.json` 의 동일 registry 호스트 항목에서 재사용 가능.
+공개 registry 배포이므로 `npm login` (또는 `~/.npmrc` 의 `//registry.npmjs.org/:_authToken=<token>`) 만 있으면 된다. 배포 권한은 `makdoong2-team` 패키지 owner 계정에 한정된다.
 
 ## Testing
 
 ```bash
-npm test               # build + smoke + gate policy + install-lib
-npm run test:install   # 설치 라이브러리 테스트
+npm test               # build + 43개 단계 전체 (scripts/run-tests.mjs)
+npm run test:ubuntu    # 위와 동일한 스위트를 Ubuntu 24.04 컨테이너에서 실행
+npm run test:install   # 설치 라이브러리 테스트만
 ```
+
+`npm test` 는 `scripts/run-tests.mjs` 로 각 단계를 **순차 실행하되 실패해도 멈추지 않고**
+끝까지 돌린 뒤 실패 목록을 모아 보고한다. 이전의 `&&` 체인은 앞 단계가 하나만 깨져도
+뒤 단계가 전부 미실행 상태가 되어, 실제로 여러 실패가 서로를 가려왔다.
+
+### Ubuntu 에서 실행 — `npm run test:ubuntu`
+
+플러그인은 Ubuntu 에서 개발·운영되지만 테스트는 macOS 에서도 자주 돌린다. 두 환경은
+다음 지점에서 갈리며, 셋 다 실제로 테스트 실패로 나타난 적이 있다.
+
+| 갈리는 지점 | macOS | Linux |
+|---|---|---|
+| `isalnum()` (UTF-8 로케일, 상위 바이트) | `0xEA` 를 alnum 으로 보고 → `$VAR한글` 이 깨짐 | 상위 바이트는 non-alnum → 정상 |
+| `os.tmpdir()` | `/var/folders/…` (`/var` 는 심볼릭 링크) | `/tmp` (실제 디렉토리) |
+| 기본 bash | 3.2 | 5.x |
+
+`scripts/test-ubuntu.sh` 가 `Dockerfile.test` (ubuntu:24.04 + Node 22) 를 빌드해 같은
+스위트를 컨테이너에서 돌린다. Docker 또는 OrbStack 이 필요하다. 호스트 uid 로 실행하므로
+root 소유 파일이 생기지 않고, Linux 용 `node_modules` 는 `.docker-test/` (gitignore) 에
+따로 두어 호스트 것을 덮어쓰지 않는다.
+
+```bash
+npm run test:ubuntu                       # 전체 스위트
+bash scripts/test-ubuntu.sh npm run build # 임의 명령
+bash scripts/test-ubuntu.sh bash          # 컨테이너 셸 (디버깅)
+```
+
+**자동 정리** — 컨테이너는 `docker run --rm` 으로 종료 즉시 제거된다. docker 데몬
+(OrbStack/colima VM) 이 꺼져 있어서 스크립트가 직접 기동한 경우에는 테스트가 끝날 때
+자동으로 다시 끈다. 실행 전부터 떠 있었다면 다른 작업을 끊지 않도록 그대로 둔다.
+`MAKDOONG2_KEEP_DOCKER=1` 로 자동 종료를 끌 수 있다.
+
+**주의**: Ubuntu 러너는 macOS 전용 버그를 잡지 못한다 — 위 표의 첫 줄이 정확히 그런
+경우다. 그 부류는 `test/shell-portability.test.mjs` 가 정적으로 검사한다 (`$VAR` 뒤에
+non-ASCII 가 붙으면 실패, `${VAR}` 로 감쌀 것).
 
 `.husky/pre-push` 가 unit test 실행 + version 변경 감지 시 자동 배포 훅을 트리거한다.
 

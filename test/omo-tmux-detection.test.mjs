@@ -77,7 +77,7 @@ describe("isOmoTmuxManaged — OMO tmux 관리 정확 감지", () => {
   test("혼합 배열 (OMO 문자열 포함) → true", () => {
     assert.equal(
       isOmoTmuxManaged([
-        "@local/makdoong2-team",
+        "makdoong2-team",
         "oh-my-openagent@3.17.15",
         ["opencode-tool-search@0.4.3", { searchLimit: 5 }],
       ]),
@@ -88,7 +88,7 @@ describe("isOmoTmuxManaged — OMO tmux 관리 정확 감지", () => {
   test("혼합 배열 (OMO tuple 포함) → true", () => {
     assert.equal(
       isOmoTmuxManaged([
-        "@local/makdoong2-team",
+        "makdoong2-team",
         "opencode-claude-auth@2.0.0",
         ["oh-my-openagent@3.17.15", { tmux: { enabled: true } }],
       ]),
