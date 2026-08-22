@@ -110,7 +110,8 @@
 - 새 테스트 파일은 `scripts/run-tests.mjs` 의 `STEPS` 에 반드시 등록할 것 — 등록하지 않으면 `npm test` 가 영영 실행하지 않는다 (`gate-requirements-quality.test.mjs` 가 실제로 그 상태였다).
 - 러너는 실패해도 멈추지 않고 끝까지 돌린 뒤 실패 목록을 보고한다. 실패 1건만 보고 끝내지 말고 전체 목록을 확인할 것.
 - 셸 스크립트에서 변수 뒤에 한글이 붙으면 반드시 `${VAR}` 로 감쌀 것. macOS libc 는 UTF-8 로케일에서 멀티바이트 첫 바이트를 alnum 으로 보고해 변수명이 오염된다 (Linux 에서는 재현되지 않음). `test/shell-portability.test.mjs` 가 강제한다.
-- 플랫폼 의존 실패가 의심되면 `npm run test:ubuntu` 로 Ubuntu 24.04 컨테이너에서 교차 확인. 단 macOS 전용 버그는 이 경로로 잡히지 않는다.
+- Linux 교차 검증은 `npm test` 가 자동 수행한다 (비-Linux 호스트 + docker 사용 가능 시 Ubuntu 24.04 컨테이너에서 스위트 재실행, 종료 시 컨테이너·데몬 자동 정리). 별도 명령을 칠 필요 없다.
+- 호스트 실행을 컨테이너 실행으로 대체하지 말 것 — Darwin libc 에서만 재현되는 결함이 실재하며 (rollback-commits.sh 사례), 컨테이너로 갈아타면 그 부류가 영구히 은폐된다. 두 번 도는 것이 의도된 설계다.
 - pollSubSession / dispatch_stage 로직 수정 시 특히 `test/poll-sub-session.test.mjs`, `test/dispatch-stage-redispatch.test.mjs` 확장 필수.
 
 ## 릴리즈 프로세스

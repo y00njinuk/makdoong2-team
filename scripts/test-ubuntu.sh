@@ -47,6 +47,15 @@ err()  { printf "%s[error]%s       %s\n" "$RED" "$RESET" "$*" >&2; }
 STARTED_DAEMON=0
 DAEMON_KIND=""
 
+wait_for_daemon() {
+  local i
+  for i in $(seq 1 40); do
+    docker info >/dev/null 2>&1 && return 0
+    sleep 2
+  done
+  return 1
+}
+
 cleanup() {
   local status=$?
   # 컨테이너는 --rm 이 이미 지웠다. 여기서는 "우리가 켠 것"만 되돌린다.
@@ -82,10 +91,7 @@ else
     exit 1
   fi
 
-  for _ in $(seq 1 40); do
-    docker info >/dev/null 2>&1 && break
-    sleep 2
-  done
+  wait_for_daemon
   if ! docker info >/dev/null 2>&1; then
     err "$DAEMON_KIND 기동 후에도 docker 데몬에 연결할 수 없다."
     exit 1
@@ -114,9 +120,11 @@ else
 fi
 
 # ---------- 실행 ----------
-log "실행: $INNER_CMD"
-STATUS=0
-docker run --rm -t \
+# 데몬이 기동/종료 전환 중이면 docker info 가 일시적으로 성공한 뒤 컨테이너가
+# SIGKILL(137) 로 죽을 수 있다. 이 스크립트가 끝날 때 데몬을 끄므로 연속 실행에서
+# 실제로 걸릴 수 있는 경로다. 전환 계열 종료코드에 한해 1회만 재시도한다.
+run_container() {
+  docker run --rm -t \
   -v "$ROOT:/w" \
   -v "$MODULES:/w/node_modules" \
   -v "$PASSWD:/etc/passwd:ro" \
@@ -126,6 +134,7 @@ docker run --rm -t \
   -e npm_config_cache=/tmp/.npm \
   -e npm_config_update_notifier=false \
   -e CI=true \
+  -e MAKDOONG2_IN_TEST_CONTAINER=1 \
   "$IMAGE" \
   bash -euo pipefail -c '
     git config --global --add safe.directory /w
@@ -145,7 +154,22 @@ docker run --rm -t \
 
     echo "[test-ubuntu] node $(node -v) | bash $(bash --version | head -1 | sed "s/.*version //;s/ .*//") | tmux $(tmux -V | cut -d" " -f2) | LANG=$LANG"
     '"$INNER_CMD"'
-  ' || STATUS=$?
+  '
+}
+
+log "실행: $INNER_CMD"
+STATUS=0
+run_container || STATUS=$?
+
+if { [ "$STATUS" -eq 137 ] || [ "$STATUS" -eq 125 ]; }; then
+  warn "컨테이너가 exit $STATUS 로 종료됐다 (docker 데몬 전환 중일 가능성). 준비 상태 재확인 후 1회 재시도."
+  if wait_for_daemon; then
+    STATUS=0
+    run_container || STATUS=$?
+  else
+    err "docker 데몬에 다시 연결할 수 없다."
+  fi
+fi
 
 if [ "$STATUS" -eq 0 ]; then
   printf "%s[test-ubuntu]%s %sUbuntu 실행 성공%s\n" "$CYAN" "$RESET" "$GREEN" "$RESET"

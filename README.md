@@ -176,45 +176,13 @@ npm run release:major   # 0.2.3 → 1.0.0  (breaking)
 ## Testing
 
 ```bash
-npm test               # build + 43개 단계 전체 (scripts/run-tests.mjs)
-npm run test:ubuntu    # 위와 동일한 스위트를 Ubuntu 24.04 컨테이너에서 실행
+npm test               # 전체 테스트
 npm run test:install   # 설치 라이브러리 테스트만
 ```
 
-`npm test` 는 `scripts/run-tests.mjs` 로 각 단계를 **순차 실행하되 실패해도 멈추지 않고**
-끝까지 돌린 뒤 실패 목록을 모아 보고한다. 이전의 `&&` 체인은 앞 단계가 하나만 깨져도
-뒤 단계가 전부 미실행 상태가 되어, 실제로 여러 실패가 서로를 가려왔다.
-
-### Ubuntu 에서 실행 — `npm run test:ubuntu`
-
-플러그인은 Ubuntu 에서 개발·운영되지만 테스트는 macOS 에서도 자주 돌린다. 두 환경은
-다음 지점에서 갈리며, 셋 다 실제로 테스트 실패로 나타난 적이 있다.
-
-| 갈리는 지점 | macOS | Linux |
-|---|---|---|
-| `isalnum()` (UTF-8 로케일, 상위 바이트) | `0xEA` 를 alnum 으로 보고 → `$VAR한글` 이 깨짐 | 상위 바이트는 non-alnum → 정상 |
-| `os.tmpdir()` | `/var/folders/…` (`/var` 는 심볼릭 링크) | `/tmp` (실제 디렉토리) |
-| 기본 bash | 3.2 | 5.x |
-
-`scripts/test-ubuntu.sh` 가 `Dockerfile.test` (ubuntu:24.04 + Node 22) 를 빌드해 같은
-스위트를 컨테이너에서 돌린다. Docker 또는 OrbStack 이 필요하다. 호스트 uid 로 실행하므로
-root 소유 파일이 생기지 않고, Linux 용 `node_modules` 는 `.docker-test/` (gitignore) 에
-따로 두어 호스트 것을 덮어쓰지 않는다.
-
-```bash
-npm run test:ubuntu                       # 전체 스위트
-bash scripts/test-ubuntu.sh npm run build # 임의 명령
-bash scripts/test-ubuntu.sh bash          # 컨테이너 셸 (디버깅)
-```
-
-**자동 정리** — 컨테이너는 `docker run --rm` 으로 종료 즉시 제거된다. docker 데몬
-(OrbStack/colima VM) 이 꺼져 있어서 스크립트가 직접 기동한 경우에는 테스트가 끝날 때
-자동으로 다시 끈다. 실행 전부터 떠 있었다면 다른 작업을 끊지 않도록 그대로 둔다.
-`MAKDOONG2_KEEP_DOCKER=1` 로 자동 종료를 끌 수 있다.
-
-**주의**: Ubuntu 러너는 macOS 전용 버그를 잡지 못한다 — 위 표의 첫 줄이 정확히 그런
-경우다. 그 부류는 `test/shell-portability.test.mjs` 가 정적으로 검사한다 (`$VAR` 뒤에
-non-ASCII 가 붙으면 실패, `${VAR}` 로 감쌀 것).
+`npm test` 는 각 단계를 순차 실행하되 실패해도 멈추지 않고 끝까지 돌린 뒤 실패 목록을
+모아 보고한다. macOS 등 비-Linux 호스트에서는 같은 스위트를 Ubuntu 컨테이너에서 한 번
+더 자동 실행해 플랫폼 차이로 갈리는 회귀를 함께 잡는다 (docker 가 없으면 안내 후 건너뛴다).
 
 `.husky/pre-push` 가 unit test 실행 + version 변경 감지 시 자동 배포 훅을 트리거한다.
 
