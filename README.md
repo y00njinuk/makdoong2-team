@@ -185,6 +185,13 @@ npm run test:install   # 설치 라이브러리 테스트만
 더 자동 실행해 플랫폼 차이로 갈리는 회귀를 함께 잡는다 (docker 가 없으면 안내 후 건너뛴다).
 
 `.husky/pre-push` 가 unit test 실행 + version 변경 감지 시 자동 배포 훅을 트리거한다.
+훅도 `npm test` 를 그대로 부르므로 push 마다 Linux 교차 검증이 함께 돌아 docker 가
+기동된다 (끝나면 자동 종료). 건너뛰려면 환경변수를 붙여 push 한다 — 대신 그 push 는
+Linux 검증 없이 나간다.
+
+```bash
+MAKDOONG2_SKIP_LINUX_CHECK=1 git push
+```
 
 ## 문서
 
