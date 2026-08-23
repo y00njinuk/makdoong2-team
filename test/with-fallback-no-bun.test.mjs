@@ -10,7 +10,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const WITH_FALLBACK_SH = resolve(HERE, "..", "scripts", "with-fallback.sh");
 
 // makdoong2-engineer is a known entry in POLICIES (model-fallback-policy.ts)
-// with 2-entry chain: local/qwen3.6-27b → github-copilot/claude-haiku-4.5
+// with 2-entry chain: github-copilot/gpt-5.6-luna → github-copilot/claude-haiku-4.5
 const TEST_AGENT = "makdoong2-engineer";
 
 describe("with-fallback.sh — bun 없는 환경에서 node dist/model-chain-cli.js 체인 조회", () => {

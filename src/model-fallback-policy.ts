@@ -97,37 +97,37 @@ export function tierRank(tier: ModelTier): number {
   return TIER_RANK[tier];
 }
 
-// Default chains. All agents now use local/qwen3.6-27b as primary (medium tier).
+// Default chains. All agents now use github-copilot/gpt-5.6-luna (variant xhigh) as primary (medium tier).
 // Fallback chain degrades to strictly lower tier. Override per-agent via 
 // makdoong2-team.json `agents` block.
 export const POLICIES: Record<string, AgentModelPolicy> = {
   "makdoong2-team-leader": {
-    primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
+    primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
   "makdoong2-analyzer": {
-    primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
+    primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
   // Research fan-out worker — one session per source, spawned in parallel.
   "makdoong2-researcher": {
-    primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
+    primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
   "makdoong2-planner": {
-    primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
+    primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
   "makdoong2-engineer": {
-    primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
+    primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
   "makdoong2-publisher": {
-    primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
+    primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
   "makdoong2-verifier": {
-    primary:   { id: "local/qwen3.6-27b",                                        tier: "medium" },
+    primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
 };

@@ -36,8 +36,8 @@ console.log("\n[smoke-test] model-fallback-policy chain logic\n");
 
 // ── Default chain semantics ──
 
-t("makdoong2-team-leader: qwen → haiku on first failure", () => {
-  const r = nextModel({ agent: "makdoong2-team-leader", current: "local/qwen3.6-27b", reason: "rate_limit" });
+t("makdoong2-team-leader: gpt-5.6-luna → haiku on first failure", () => {
+  const r = nextModel({ agent: "makdoong2-team-leader", current: "github-copilot/gpt-5.6-luna", reason: "rate_limit" });
   eq(r.exhausted, false, "should not be exhausted");
   eq(r.next.id, "github-copilot/claude-haiku-4.5", "next should be haiku-4.5");
 });
@@ -48,23 +48,23 @@ t("makdoong2-team-leader: haiku → exhausted after second failure", () => {
   eq(r.next, null, "next should be null");
 });
 
-t("makdoong2-planner: qwen → haiku", () => {
-  const r = nextModel({ agent: "makdoong2-planner", current: "local/qwen3.6-27b", reason: "5xx" });
+t("makdoong2-planner: gpt-5.6-luna → haiku", () => {
+  const r = nextModel({ agent: "makdoong2-planner", current: "github-copilot/gpt-5.6-luna", reason: "5xx" });
   eq(r.next.id, "github-copilot/claude-haiku-4.5", "planner fallback should be haiku");
 });
 
-t("makdoong2-engineer: qwen → haiku (lower-tier degrade)", () => {
-  const r = nextModel({ agent: "makdoong2-engineer", current: "local/qwen3.6-27b", reason: "context_exceeded" });
+t("makdoong2-engineer: gpt-5.6-luna → haiku (lower-tier degrade)", () => {
+  const r = nextModel({ agent: "makdoong2-engineer", current: "github-copilot/gpt-5.6-luna", reason: "context_exceeded" });
   eq(r.next.id, "github-copilot/claude-haiku-4.5", "engineer fallback should be haiku");
 });
 
-t("makdoong2-publisher: qwen → haiku", () => {
-  const r = nextModel({ agent: "makdoong2-publisher", current: "local/qwen3.6-27b" });
+t("makdoong2-publisher: gpt-5.6-luna → haiku", () => {
+  const r = nextModel({ agent: "makdoong2-publisher", current: "github-copilot/gpt-5.6-luna" });
   eq(r.next.id, "github-copilot/claude-haiku-4.5", "publisher fallback should be haiku");
 });
 
-t("makdoong2-verifier: qwen → haiku", () => {
-  const r = nextModel({ agent: "makdoong2-verifier", current: "local/qwen3.6-27b" });
+t("makdoong2-verifier: gpt-5.6-luna → haiku", () => {
+  const r = nextModel({ agent: "makdoong2-verifier", current: "github-copilot/gpt-5.6-luna" });
   eq(r.next.id, "github-copilot/claude-haiku-4.5", "verifier fallback should be haiku");
 });
 
@@ -75,7 +75,7 @@ t("unknown agent returns exhausted", () => {
 
 t("unknown current model starts from primary", () => {
   const r = nextModel({ agent: "makdoong2-team-leader", current: "anthropic/claude-fictional" });
-  eq(r.next.id, "local/qwen3.6-27b", "unknown current should start at primary");
+  eq(r.next.id, "github-copilot/gpt-5.6-luna", "unknown current should start at primary");
 });
 
 t("all default primaries are in DEFAULT_ALLOWED_PRIMARIES", () => {

@@ -72,7 +72,7 @@ permission:
    ```
 3. `hang_history` 배열 길이 ≥ 3 이면 **적극 개입 신호**. 다음 substage 진입 전 사용자에게 반드시 다음을 보고하고 진행 승인을 받는다:
    ```
-   ⚠️  LLM 서버 hang 반복 (<N>회). local/qwen3.6-27b 인퍼런스 서버 상태 확인 필요.
+   ⚠️  LLM 서버 hang 반복 (<N>회). github-copilot/gpt-5.6-luna 모델 응답 상태 확인 필요.
         계속 진행할지, get_fallback_model 로 fallback 모델 시도할지 결정 부탁드립니다.
    ```
 4. `dispatch_stage` 최종 응답에 `outcome_kind: "session_gone"` 이 포함된 경우 (MAX_ATTEMPTS 소진): 위 규약과 무관하게 즉시 사용자 보고 후 대기.
