@@ -87,7 +87,7 @@ bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."2_implementation".substage
 
 기대: 모든 항목(boolean)이 `true`인 JSON 객체. 누락·`false`·문법 오류 = **REJECTED**.
 
-> **⚠️ 스키마 규약:** state.sh 의 모든 jq path 는 `.stages."<PHASE>".substages."<SUBSTAGE>".<field>` 형태를 따른다. 참조: AGENTS.md "워크플로우 상태 & 위임 규약".
+> **⚠️ 스키마 규약:** state.sh 의 모든 jq path 는 `.stages."<PHASE>".substages."<SUBSTAGE>".<field>` 형태를 따른다. 참조: CLAUDE.md "워크플로우 상태 & 위임 규약".
 
 ### 2. 단계 명세 재대조
 

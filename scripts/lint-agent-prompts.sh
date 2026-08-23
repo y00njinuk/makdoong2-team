@@ -63,7 +63,7 @@ echo "$matches" | while IFS=: read -r file line rest; do
 done
 
 cat >&2 <<EOF
-state.json 스키마 규약 (AGENTS.md "state.json 스키마 규약 (hardrule)" 참조):
+state.json 스키마 규약 (CLAUDE.md "state.json 스키마 규약 (hardrule)" 참조):
   hierarchical : .stages."<PHASE>".substages."<SUBSTAGE>".<field>
   flat (금지)  : .stages."<PHASE>.<SUBSTAGE>".<field>
 

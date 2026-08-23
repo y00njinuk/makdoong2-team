@@ -748,7 +748,7 @@ publish 이전 실패는 자동 롤백된다 (태그 삭제 + `git reset --hard 
 3. `stages/NN-<name>.md` 작성
 4. `agents/makdoong2-<role>.md` + `gates/verify.sh` (+ 전용 `stage*-verify.sh`)
 5. `scripts/smoke-test.mjs` 미러 테이블 갱신
-6. README 매핑표 · `AGENTS.md` 규약 갱신
+6. README 매핑표 · `CLAUDE.md` 규약 갱신
 
 ### 새 primary 모델 등록
 

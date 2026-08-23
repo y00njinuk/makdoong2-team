@@ -5,7 +5,7 @@
 // client. The plugin passes its real `client` at call sites; tests inject a
 // scripted mock via the same shape.
 //
-// Design invariants (see AGENTS.md and Oracle diagnosis for rationale):
+// Design invariants (see CLAUDE.md and Oracle diagnosis for rationale):
 //   INV-1: `!status` alone must never mean "idle". A missing status entry can
 //          equally mean "session not registered yet" or "session cleaned up".
 //          Idle is confirmed only by `status.type === "idle"` AFTER we have

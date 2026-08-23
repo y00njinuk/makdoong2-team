@@ -1133,7 +1133,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
             `• 다른 substage 작업 필요 시: 결과·스펙을 team-leader에게 반환하면 team-leader가 dispatch_stage로 라우팅.\n` +
             `• 상태 공유: \`state.sh set\` 으로 state.json 마커에 기록. team-leader가 읽어서 다음 단계 결정.\n\n` +
             `**아키텍처 원칙:** 각 substage는 self-contained. Inter-substage 의존은 team-leader 오케스트레이션을 통해서만 흐르며, ` +
-            `agent-to-agent 직접 호출은 금지된다. 참조: AGENTS.md "워크플로우 상태 & 위임 규약".`
+            `agent-to-agent 직접 호출은 금지된다. 참조: CLAUDE.md "워크플로우 상태 & 위임 규약".`
           );
         }
       } else if (agent && SEALED_SUBAGENTS.has(agent) && DELEGATION_LIKE_NAME.test(toolLower) && !KNOWN_SAFE_TOOLS.has(toolLower)) {
@@ -1210,7 +1210,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
           `• Planning 단계 (planner): "무엇을 만들지" 결정만. 실제 파일 생성은 implementation 단계로 위임.\n` +
           `• Analysis 단계 (analyzer): workspace-analysis.json 1개만 생성 가능 (Write 툴 사용).\n` +
           `• 초안 파일 필요 시: spec을 team-leader에게 반환 → dev 단계에서 engineer가 구현.\n\n` +
-          `**참조**: agents/${agent}.md "금지" 섹션, AGENTS.md "워크플로우 상태 & 위임 규약"`
+          `**참조**: agents/${agent}.md "금지" 섹션, CLAUDE.md "워크플로우 상태 & 위임 규약"`
         );
       }
 

@@ -85,7 +85,7 @@ bash <SCRIPTS_DIR>/state.sh get {ISSUE_KEY} '.stages."1_planning".substages."jir
 
 이미 완료된 하위 작업(done 마커, research 완료 등)이 있으면 건너뛰고 미완 지점부터 재개한다.
 
-> **⚠️ state.json 스키마 규약 (반드시 준수):** state.sh 의 모든 jq path 는 hierarchical 표기 `.stages."<PHASE>".substages."<SUBSTAGE>".<field>` 를 사용한다. flat 표기 `.stages."<PHASE>.<SUBSTAGE>"` 는 phantom 키를 만들어 verifier·auto_advance 를 무력화한다. state.sh 훅이 flat 표기 write 를 물리 차단한다. (참조: AGENTS.md "워크플로우 상태 & 위임 규약")
+> **⚠️ state.json 스키마 규약 (반드시 준수):** state.sh 의 모든 jq path 는 hierarchical 표기 `.stages."<PHASE>".substages."<SUBSTAGE>".<field>` 를 사용한다. flat 표기 `.stages."<PHASE>.<SUBSTAGE>"` 는 phantom 키를 만들어 verifier·auto_advance 를 무력화한다. state.sh 훅이 flat 표기 write 를 물리 차단한다. (참조: CLAUDE.md "워크플로우 상태 & 위임 규약")
 
 ### 0-exit. 타깃 substage 가 이미 완료된 경우 (필수 — 최우선 체크)
 

@@ -180,7 +180,7 @@ makdoong2-team doctor            # 설치 진단
 2. `src/opencode-plugin.ts` — `STAGE_ORDER` 배열에 삽입
 3. `stages/NN-<name>.md` — 신규 spec 작성
 4. `agents/makdoong2-<role>.md` + `gates/verify.sh` (+ 전용 `stage*-verify.sh`)
-5. README 매핑표 · `AGENTS.md` sealed workflow 규약 갱신
+5. README 매핑표 · `CLAUDE.md` sealed workflow 규약 갱신
 
 이후 `makdoong2-team validate` → `npm test` 로 회귀를 확인한다.
 
@@ -231,7 +231,7 @@ npm run release:major   # 1.3.1 → 2.0.0  (breaking)
 |---|---|
 | [ARCHITECTURE.md](./ARCHITECTURE.md) | **어떻게 동작하는가** — 모듈, 툴 API, state 스키마, 훅, 런타임 방어, 실패 모드 |
 | [DESIGN.md](./DESIGN.md) | **왜 이렇게 만들었는가** — 하네스 4기둥 (Constrain / Inform / Verify / Correct) 과 트레이드오프 |
-| [AGENTS.md](./AGENTS.md) | **개발 규약** — git commit, npm 배포, sealed workflow, state.sh 하드룰 |
+| [CLAUDE.md](./CLAUDE.md) | **개발 규약** — git commit, npm 배포, sealed workflow, state.sh 하드룰 |
 
 ## 라이선스
 

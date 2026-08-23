@@ -391,6 +391,6 @@ stall 경로가 별도로 필요했던 이유: 호출 1회 안의 재시도 예�
 
 ## 9. 참고
 
-**이 저장소** — [ARCHITECTURE.md](./ARCHITECTURE.md) (어떻게 동작하는가) · [README.md](./README.md) (어떻게 쓰는가) · [AGENTS.md](./AGENTS.md) (개발 규약) · `agents/*.md`, `stages/*.md` (실제 명세)
+**이 저장소** — [ARCHITECTURE.md](./ARCHITECTURE.md) (어떻게 동작하는가) · [README.md](./README.md) (어떻게 쓰는가) · [CLAUDE.md](./CLAUDE.md) (개발 규약) · `agents/*.md`, `stages/*.md` (실제 명세)
 
 **외부** — Anthropic *Writing Tools for Agents* / 3-Agent 패턴 · Hamel Husain *Your AI Product Needs Evals* · Mitchell Hashimoto (Ghostty) "실패 1 = 방지 1"

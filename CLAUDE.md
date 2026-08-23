@@ -1,5 +1,5 @@
 ## Project Overview
-- **AGENTS.md**: 개발자가 코드를 작성할 때 따라야 하는 규칙과 가이드라인.
+- **CLAUDE.md**: 개발자가 코드를 작성할 때 따라야 하는 규칙과 가이드라인.
 - **ARCHITECTURE.md**: 시스템이 어떻게 동작하는지 (모듈 책임, tool API, hook 흐름, 워크플로우 상태, pollSubSession 방어, tmux 소유권, 배포·릴리즈 프로세스 등).
 - **DESIGN.md**: 왜 이렇게 설계했는지 (설계 원칙과 트레이드오프).
 
