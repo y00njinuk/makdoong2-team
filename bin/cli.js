@@ -31,7 +31,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(HERE, "..");
 const PKG = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8"));
 
-const TOOLS = ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"];
+const TOOLS = ["verify_stage", "dispatch_stage", "dispatch_verifier", "dispatch_research", "auto_advance_stage", "get_fallback_model"];
 
 // Skill directories that used to ship a per-skill secrets.env under
 // ${configDir}/skills/<skill>/. Credentials are now sourced only from

@@ -10,6 +10,7 @@ tools:
   Glob: true
   skill: true
   skill_mcp: true
+  dispatch_research: true
 permission:
   bash:
     "*": "allow"

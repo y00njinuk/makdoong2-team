@@ -55,6 +55,14 @@ export interface TimeoutConfig {
 
 export const DEFAULT_STALL_ESCALATE_THRESHOLD = 5;
 
+export interface ResearchConfig {
+  /** Max research sub-sessions spawned simultaneously. Clamped to [1, 6]. */
+  max_parallel?: number;
+  /** Per-source wall-clock budget. Shorter than a substage on purpose — a source
+   *  that cannot answer in this window is reported as failed, not waited on. */
+  timeout_minutes?: number;
+}
+
 export type LogLevel = "silent" | "error" | "warn" | "info" | "debug" | "trace";
 
 // LogMode: user-facing schema name kept as "stdin"/"file".
@@ -81,6 +89,7 @@ export interface Makdoong2Config {
   model_policy?: ModelPolicyConfig;
   coverage?: { threshold?: number };
   timeout?: TimeoutConfig;
+  research?: ResearchConfig;
   tmux?: TmuxConfigJson;
   worktree?: { extra_exclude?: string };
   paths?: PathsConfig;

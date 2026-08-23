@@ -88,14 +88,40 @@ bash <SCRIPTS_DIR>/state.sh set <이슈키> \
 
 ## 2-1. 다출처 교차 조사
 
-Jira 본문만 보고 판단하지 않는다. 세 출처를 **모두 교차 검증**한다. 조사는 makdoong2 스킬 체계 안에서만 수행한다 — `skill_mcp` 로 아래 네 스킬의 MCP를 직접 호출한다. **outer-world 에이전트 위임(예: Sisyphus/Explore/Librarian, 또는 `task(subagent_type=...)` 로 다른 카테고리 스폰) 금지.** planner에는 `Task` 툴이 없으므로 물리적으로도 불가.
+Jira 본문만 보고 판단하지 않는다. 세 출처를 **모두 교차 검증**한다.
 
-각 research 스킬은 자체 MCP를 embedded로 들고 있어 로드 시에만 connect된다. 4개 스킬을 필요한 만큼 순차 호출하되, 조사 A/B/C는 이슈 유형과 무관하게 모두 시도한다 (Simple 유형만 A/C로 축소 가능).
+**`dispatch_research` 툴 1회 호출로 소스별 조사를 병렬 실행한다.** 스스로 `skill_mcp` 를 순차 호출하지 않는다 — 플러그인이 소스마다 별도 세션을 동시에 띄우므로 (a) 대기 시간이 가장 느린 소스 하나로 수렴하고, (b) 각 소스의 원자료가 당신의 컨텍스트를 잠식하지 않는다. **outer-world 에이전트 위임(Sisyphus/Explore/Librarian, `task(subagent_type=...)`) 금지** — planner 에는 `Task` 툴이 없어 물리적으로도 불가하다.
 
-- **조사 A — Jira 맥락 심화** (`jira-research`): 에픽/상위 이슈, 링크 이슈(blocks/relates/causes), 같은 컴포넌트·라벨의 최근 해결 이슈, 코멘트에서 명확해진 요구.
-- **조사 B — 설계 문서** (`confluence-research`): 언급된 시스템·모듈의 설계 문서, 아키텍처/API 스펙/운영 가이드/회의록, ADR·기술선택 기록. 키워드는 description 명사구·시스템명·프로토콜 번호.
-- **조사 C — 기존 코드·PR 이력** (`bitbucket-research`): 수정 대상 추정 파일/클래스/메서드의 현재 구현, 유사 기능의 과거 구현, 관련 영역 최근 PR(변경 패턴·테스트 방식·리뷰 지적), 최근 커밋 이력.
-- **(필요 시) 조사 D — 오픈소스** (`github-oss-research`): 외부 라이브러리 공식 예제·이슈 트래커, 버전 호환성·알려진 버그.
+```
+dispatch_research(
+  issue = "<이슈키>",
+  worktree = "<Working directory 절대경로>",
+  context = "<Jira 요약 3~5줄 — 모든 조사 세션에 공통 주입>",
+  queries = [
+    {source: "jira",       focus: "에픽/상위 이슈, 링크 이슈(blocks/relates/causes), 같은 컴포넌트·라벨의 최근 해결 이슈, 코멘트에서 명확해진 요구"},
+    {source: "confluence", focus: "<시스템·모듈명> 설계 문서, 아키텍처/API 스펙/운영 가이드/회의록, ADR·기술선택 기록"},
+    {source: "bitbucket",  focus: "<수정 대상 추정 파일/클래스>의 현재 구현, 유사 기능의 과거 구현, 관련 영역 최근 PR 의 변경 패턴·테스트 방식·리뷰 지적"}
+  ]
+)
+```
+
+- **조사 A — Jira 맥락 심화** (`source: "jira"`)
+- **조사 B — 설계 문서** (`source: "confluence"`). 키워드는 description 명사구·시스템명·프로토콜 번호.
+- **조사 C — 기존 코드·PR 이력** (`source: "bitbucket"`)
+- **(필요 시) 조사 D — 오픈소스** (`source: "github-oss"`): 외부 라이브러리 공식 예제·이슈 트래커, 버전 호환성·알려진 버그.
+
+`focus` 는 구체적일수록 좋다. 조사 세션은 서로를 보지 못하므로 **한 focus 가 다른 조사 결과에 의존하면 안 된다.** 의존이 필요하면 라운드를 나눠 두 번 호출한다.
+
+조사 A/B/C 는 이슈 유형과 무관하게 모두 시도한다 (Simple 유형만 A/C 로 축소 가능).
+
+### 결과 읽기
+
+반환 JSON 의 `artifact_path` (기본 `.makdoong2-team/<이슈키>/research-findings.json`) 를 Read 로 읽어 종합한다.
+
+- **부분 성공이 정상이다.** `failed` 배열에 실패 소스와 사유가 담긴다. 남은 소스의 결과는 그대로 유효하므로 실패 1건으로 조사를 통째로 다시 돌리지 않는다.
+- 실패한 소스가 **요구사항 확정에 필수**라면 그 사유(인증 실패·권한 부족 등)를 사용자에게 보고한다. 없어도 되는 소스면 `gaps` 로만 남기고 진행한다.
+- `deferred` 가 비어 있지 않으면 병렬 상한에 걸려 빠진 조사가 있다는 뜻이다. 필요하면 2차 호출한다.
+- 모든 소스가 실패하면(`ok: false`) 체크리스트를 추측으로 채우지 말고 사용자에게 보고한다.
 
 ## 2-2. 요구사항 체크리스트
 

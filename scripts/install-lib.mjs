@@ -86,7 +86,7 @@ const LEGACY_RELATIVE_PLUGIN_REF = "./plugins/makdoong2-team/src/opencode-plugin
 const LEGACY_ABSOLUTE_TS_SUFFIX = "/src/opencode-plugin.ts";
 const LEGACY_SCOPED_NAME = "@local/makdoong2-team";
 const PLUGIN_PACKAGE_NAME = "makdoong2-team";
-const TOOLS = ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"];
+const TOOLS = ["verify_stage", "dispatch_stage", "dispatch_verifier", "dispatch_research", "auto_advance_stage", "get_fallback_model"];
 const TOOL_SEARCH_PLUGIN_PREFIX = "opencode-tool-search";
 // UTIL_SCRIPTS is no longer deployed (scripts live inside the npm module).
 // Retained for cleanup: older installs copied these into ~/.config/opencode/scripts/

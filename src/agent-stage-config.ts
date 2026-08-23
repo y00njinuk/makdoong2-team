@@ -98,6 +98,16 @@ export const AGENTS: Record<string, AgentSpec> = {
     tools: ["bash", "read", "grep", "glob", "write"],
     skills: [],
   },
+  // Research fan-out worker. Not bound to a substage — dispatch_research spawns
+  // one session per source in parallel, each loading exactly one research skill.
+  "makdoong2-researcher": {
+    id: "makdoong2-researcher",
+    stage: "all",
+    primary_only: false,
+    permissions: RO_PERM,
+    tools: ["bash", "read", "grep", "glob", "skill", "skill_mcp"],
+    skills: ["jira-research", "confluence-research", "bitbucket-research", "github-oss-research"],
+  },
   "makdoong2-engineer": {
     id: "makdoong2-engineer",
     stage: "all",

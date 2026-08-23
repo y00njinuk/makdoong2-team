@@ -55,6 +55,7 @@ const BUILTIN_PLUGIN_TOOLS = new Set([
   "verify_stage",
   "dispatch_stage",
   "dispatch_verifier",
+  "dispatch_research",
   "auto_advance_stage",
   "get_fallback_model",
 ]);

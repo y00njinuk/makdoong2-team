@@ -44,7 +44,7 @@ makdoong2-team doctor            # 설치 진단
 
 ## 2. 에이전트와 단계
 
-에이전트 **6개**. 권한이 좁을수록 사고 반경이 좁다는 원칙으로 나눴다.
+에이전트 **7개**. 권한이 좁을수록 사고 반경이 좁다는 원칙으로 나눴다.
 
 | 에이전트 | 담당 | 권한 |
 |---|---|---|
@@ -54,6 +54,7 @@ makdoong2-team doctor            # 설치 진단
 | `makdoong2-engineer` | dev / test | edit·write 허용, commit/push deny |
 | `makdoong2-publisher` | 3_delivery 3단계 | **git add/commit/push 직접 실행** + bitbucket MCP |
 | `makdoong2-verifier` | 메타 검증 | 읽기 전용 |
+| `makdoong2-researcher` | 리서치 fan-out 워커 | 읽기 전용 + 리서치 MCP — 소스 1개 전담 |
 
 > **Publisher 는 직접 실행자다.** commit·pr·review 모두 publisher 가 worktree 에서 직접 git 명령과 MCP 를 호출한다. 부장님은 git 권한이 아예 없고 dispatch 와 verdict 수신만 한다. (구버전의 "spec 계산 → 부장님 실행" 하이브리드 모델은 폐기됐다.)
 
@@ -83,6 +84,16 @@ makdoong2-team doctor            # 설치 진단
 
 게이트는 이 마커를 **결정론적으로만** 검사한다 (LLM 호출 0).
 
+### 다출처 병렬 조사
+
+`1_planning.requirements` 의 교차 조사는 `dispatch_research` 툴 **1회 호출**로 Jira · Confluence · Bitbucket (필요 시 GitHub OSS) 을 **동시에** 조사한다. 플러그인이 소스마다 별도 세션을 띄우므로:
+
+- 대기 시간이 **가장 느린 소스 하나**로 수렴한다 (직렬 합이 아니다)
+- 각 소스의 원자료가 planner 컨텍스트를 잠식하지 않는다
+- 한 소스가 실패해도 나머지 결과는 그대로 남는다 (부분 성공이 정상)
+
+결과는 `.makdoong2-team/<이슈>/research-findings.json` 으로 병합된다. 상세: ARCHITECTURE.md §3.6
+
 ---
 
 ## 3. 설정 — `makdoong2-team.json` 한 파일
@@ -97,6 +108,8 @@ makdoong2-team doctor            # 설치 진단
 | `timeout.substage_minutes` | 서브에이전트 1회 실행 상한 (기본 30분) |
 | `timeout.per_agent` | 에이전트별 상한 override (기본 seed: engineer 60분) |
 | `timeout.stall_escalate_threshold` | substage 누적 hang 상한 (기본 5). 초과 시 dispatch 차단 후 사용자 에스컬레이션 |
+| `research.max_parallel` | 동시 리서치 세션 수 (기본 3, 상한 6) |
+| `research.timeout_minutes` | 리서치 소스 1개당 상한 (기본 10분) |
 | `tmux` | 막둥이 pane 모니터. 코드 기본값은 off, seed 되는 설정 파일은 `enabled: true` |
 | `worktree.extra_exclude` | worktree 동기화 추가 제외 패턴 |
 | `logging` | `level` / `mode` / `path` / `max_bytes` |

@@ -65,8 +65,16 @@
 ### 파일 편집 (sealed sub-agent + team-leader)
 - `makdoong2-team-leader` 는 Write/Edit/Patch/Multiedit 툴 부재 → 직접 파일 편집·생성 불가. 모든 파일 조작은 `dispatch_stage` 로 위임.
 - **team-leader 는 git 명령(`commit` / `push` / `add` / `rm` / `worktree`) permission 이 deny** → 3_delivery.* 는 publisher 가 worktree 에서 직접 실행. team-leader 는 오케스트레이션만 수행.
-- Sealed sub-agent (`planner` / `analyzer` / `engineer` / `publisher` / `verifier`) 는 outer-world 위임 툴(`call_omo_agent`, `delegate_task`, `background_task`, `task_*`) 호출 금지. `tool.execute.before` 훅이 런타임 차단.
+- Sealed sub-agent (`planner` / `analyzer` / `engineer` / `publisher` / `verifier` / `researcher`) 는 outer-world 위임 툴(`call_omo_agent`, `delegate_task`, `background_task`, `task_*`) 호출 금지. `tool.execute.before` 훅이 런타임 차단.
+- **신규 서브에이전트를 추가하면 `SEALED_SUBAGENTS` 에도 반드시 등록한다.** 프론트매터에서 Task 툴을 빼는 것은 1차 방어일 뿐이고, 이 집합에 빠지면 런타임 2차 방어가 그 에이전트만 통과시킨다.
 - 상세: ARCHITECTURE.md §4.2 참조.
+
+### 다출처 병렬 조사 (dispatch_research)
+- `1_planning.requirements` 의 교차 조사는 `dispatch_research` 툴 1회 호출로 소스별 세션을 병렬 spawn 한다. planner 가 `skill_mcp` 를 순차 호출하지 않는다.
+- 병렬화를 프롬프트가 아니라 플러그인 코드에 둔 이유: "병렬로 호출하라" 는 지시는 모델이 순차로 불러도 감지할 방법이 없다.
+- 부분 성공이 정상 동작이다. 한 소스 실패로 fan-out 전체를 재실행하지 않는다.
+- 순수 계약(소스 레지스트리·정규화·파싱·병합)은 `src/research-fanout.ts`, 회귀는 `test/research-fanout.test.mjs`.
+- 상세: ARCHITECTURE.md §3.6 참조.
 
 ### REJECTED verdict 재작업 flow (dispatch_verifier + dispatch_stage 자동 연계)
 - `dispatch_verifier` 가 REJECTED 반환 시 verdict raw 텍스트를 state.json 에 자동 기록: `.stages."<PHASE>".substages."<SUBSTAGE>".last_verdict_reason` / `last_verdict_reason_hash` / `last_verdict_at` / `same_reason_streak` / `rejected_count`.

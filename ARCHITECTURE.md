@@ -8,7 +8,7 @@
 |---|---|
 | [1](#1-실행-모델) | 실행 모델 — 한 사이클이 어떻게 돌아가는가 |
 | [2](#2-모듈-지도) | 모듈 지도 |
-| [3](#3-custom-tool-api) | Custom Tool API (7종) |
+| [3](#3-custom-tool-api) | Custom Tool API (8종) |
 | [4](#4-훅과-권한-강제) | 훅과 권한 강제 |
 | [5](#5-상태-statejson) | 상태 — state.json |
 | [6](#6-게이트) | 게이트 |
@@ -83,6 +83,7 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 | `src/model-fallback-policy.ts` | primary → fallback 체인 단일 정의 + invariant 검증 |
 | `src/agent-stage-config.ts` | `Stage` 타입, 에이전트 spec, stage → spec 파일 매핑 |
 | `src/stall-escalation.ts` | `hang_history` 기반 재디스패치 차단 판정 (§10.2) |
+| `src/research-fanout.ts` | 병렬 리서치 fan-out 의 순수 계약 — 소스 레지스트리, 쿼리 정규화, 출력 파싱, 병합 (§3.6) |
 | `src/skill-mcp-registry.ts` | SKILL.md frontmatter 스캔 → `mcp_name → skill_name` 룩업 |
 | `src/mcp-secret-injector.ts` | MCP 초기화 전 secret in-place 주입 |
 | `src/verdict-hash.ts` | verdict 사유 hash (streak 판정용) |
@@ -113,7 +114,7 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 
 | 파일 | 책임 |
 |---|---|
-| `agents/*.md` | 6개 에이전트 frontmatter + 시스템 프롬프트 |
+| `agents/*.md` | 7개 에이전트 frontmatter + 시스템 프롬프트 |
 | `stages/*.md` | substage 명세 (진입 게이트, 절차, self_check) |
 | `scripts/model-policy.mjs` | `model-fallback-policy.ts` 의 JS 미러 (CLI·smoke-test 공유) |
 | `scripts/install-lib.mjs` | 배포 로직 (`bin/cli.js` + `postinstall.mjs` 공유) |
@@ -123,7 +124,7 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 
 ## 3. Custom Tool API
 
-플러그인이 등록하는 **7개 툴**. opencode `tool.*` 네임스페이스에 들어가며, 에이전트 frontmatter `tools:` 에 명시해야 사용 가능하다.
+플러그인이 등록하는 **8개 툴**. opencode `tool.*` 네임스페이스에 들어가며, 에이전트 frontmatter `tools:` 에 명시해야 사용 가능하다.
 
 `Stage` 유니온:
 
@@ -178,7 +179,33 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 
 `{ agent, current, reason? }` → `{ next: ModelSpec | null, exhausted, chain, reasonAccepted }`.
 
-### 3.6 `inspect_sub_sessions` — 잔존 세션 진단·정리
+### 3.6 `dispatch_research` — 다출처 병렬 조사 fan-out
+
+`{ issue, worktree, queries: [{ source, focus }], context? }`
+
+소스마다 **별도 서브세션을 동시에** 띄워 조사하고, 결과를 하나의 artifact 로 병합한다. `1_planning.requirements` 의 다출처 교차 조사가 이 툴을 쓴다.
+
+| source | skill | MCP |
+|---|---|---|
+| `jira` | `jira-research` | `works` |
+| `confluence` | `confluence-research` | `docs` |
+| `bitbucket` | `bitbucket-research` | `repos` |
+| `github-oss` | `github-oss-research` | **없음** — WebFetch / site-wide chrome-devtools-mcp |
+
+**왜 플러그인이 fan-out 하는가.** sealed sub-agent 는 스스로 위임할 수 없고(§4.2), "병렬로 호출하라" 는 프롬프트는 **강제할 수단이 없다** — 모델이 순차로 불러도 이를 감지하는 장치가 없다. 코드로 옮기면 병렬성이 결정론이 되고, 소스마다 세션이 갈리므로 한 소스의 원자료가 다른 소스의 컨텍스트를 잠식하지 않는다 (DESIGN.md §3.7).
+
+**동작**:
+1. `normalizeQueries()` — 알 수 없는 source·빈 focus·중복은 `rejected`, 병렬 상한 초과분은 `deferred` 로 분리한다. **조용히 버리지 않는다** — 말없이 빠진 조사는 "그 소스엔 아무것도 없었다" 와 구별되지 않는다
+2. 재귀 가드 — 호출자가 `makdoong2-researcher` 면 거부 (중첩 fan-out 금지)
+3. `Promise.all` 로 세션 동시 생성 → `makdoong2-researcher` 에이전트로 프롬프트 → 소스별 폴링
+4. `parseResearchOutput()` — 마지막 ```json 펜스 우선, 없으면 균형 잡힌 중괄호 스캔. **파싱 실패는 실패로 기록한다** (빈 성공으로 뭉개지 않는다)
+5. `mergeResearchFindings()` → `.makdoong2-team/<이슈>/research-findings.json` 기록 + `…requirements.research_path` 마커 (상대경로, §5.3)
+
+**실패 격리**: 소스 하나가 죽어도 나머지 결과는 그대로 남는다. 한 소스라도 성공하면 `ok: true` 이고, 호출자는 `failed` 배열로 결손을 판단한다. 전 소스 실패 시에만 `ok: false`.
+
+**설정**: `research.max_parallel` (기본 3, 상한 6), `research.timeout_minutes` (기본 10 — substage 상한보다 짧게 둬서, 답하지 못하는 소스를 기다리는 대신 실패로 기록하고 나머지 결과를 살린다).
+
+### 3.7 `inspect_sub_sessions` — 잔존 세션 진단·정리
 
 `{ issue, abort_orphans?, stale_minutes? }`
 
@@ -186,7 +213,7 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 
 반환: `{ total, orphans, stale, aborted, sessions: [...] }`.
 
-### 3.7 `cleanup_panes` — tmux 수동 정리
+### 3.8 `cleanup_panes` — tmux 수동 정리
 
 `{ grace_seconds? }`. `@mdn2_session` marker 가 붙은 pane 만 kill 한다 (§9.3).
 
@@ -204,7 +231,7 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 
 ### 4.2 `tool.execute.before` 가 하는 5가지
 
-1. `dispatch_*` 호출 시 `currentParentSessionID` 를 캐치 (자식 세션의 `parentID` 로 전달 → orphan 방지)
+1. `dispatch_*` 호출 시 호출자 세션을 `parentSessionByCallID` (callID 별 Map, 스택 폴백) 에 기록 — 자식 세션의 `parentID` 로 전달해 orphan 을 막는다. callID 별로 분리해 두므로 **같은 부모에서 동시 dispatch 해도 parentID 가 섞이지 않는다** (`dispatch_research` 의 병렬 fan-out 이 이 성질에 의존한다)
 2. **Sealed workflow** — sealed sub-agent (planner / analyzer / engineer / publisher / verifier) 가 outer-world 위임 툴 (`call_omo_agent`, `delegate_task`, `background_task`, `task_create|update|get|list`) 호출 시 throw. 알려지지 않은 위임성 이름(`delegate*` / `spawn*` / `background_*`)은 경고 로그
 3. **Leader 하드룰 1** — 부장님의 `write`/`edit`/`patch`/`multiedit` 호출 시 throw
 4. **Leader 하드룰 2** — 부장님 bash 의 파일 쓰기 리다이렉트 (`>`, `>>`, `tee`, `sed -i`, `python -c open()`, `node -e writeFileSync` 등) 차단. **허용 예외는 `state.sh set` 뿐**

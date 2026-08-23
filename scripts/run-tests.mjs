@@ -73,7 +73,8 @@ const STEPS = [
   "node --test test/state-path-relative.test.mjs",
   "node --test test/with-fallback-no-bun.test.mjs",
   "node --test test/doctor-exit-code.test.mjs",
-  "node --test test/example-config-portability.test.mjs"
+  "node --test test/example-config-portability.test.mjs",
+  "node --test test/research-fanout.test.mjs"
 ];
 
 const CYAN = "\u001b[36m", GREEN = "\u001b[32m", RED = "\u001b[31m", YELLOW = "\u001b[33m", OFF = "\u001b[0m";

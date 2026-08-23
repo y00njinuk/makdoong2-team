@@ -109,6 +109,11 @@ export const POLICIES: Record<string, AgentModelPolicy> = {
     primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
+  // Research fan-out worker — one session per source, spawned in parallel.
+  "makdoong2-researcher": {
+    primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
+    fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
+  },
   "makdoong2-planner": {
     primary:   { id: "local/qwen3.6-27b",                    variant: "high",   tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],

@@ -281,7 +281,7 @@ describe("install-lib", () => {
     const pluginPath = "makdoong2-team";
     const existingOc = {
       plugin: [pluginPath],
-      tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, auto_advance_stage: true, get_fallback_model: true },
+      tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, dispatch_research: true, auto_advance_stage: true, get_fallback_model: true },
     };
     writeFileSync(ocPath, JSON.stringify(existingOc, null, 2));
     
@@ -444,7 +444,7 @@ describe("install-lib", () => {
       const ts = oc.plugin.find(p => Array.isArray(p) && p[0].startsWith("opencode-tool-search"));
       assert.ok(ts, "tool-search plugin entry preserved");
       const al = ts[1].alwaysLoad;
-      for (const t of ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"]) {
+      for (const t of ["verify_stage", "dispatch_stage", "dispatch_verifier", "dispatch_research", "auto_advance_stage", "get_fallback_model"]) {
         assert.ok(al.includes(t), `${t} added to alwaysLoad`);
       }
       assert.ok(al.includes("bash"), "existing alwaysLoad entries preserved");
@@ -580,11 +580,11 @@ describe("install-lib", () => {
     const configuredWithStaleGlob = {
       plugin: [
         ["opencode-tool-search@0.4.3", {
-          alwaysLoad: ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"],
+          alwaysLoad: ["verify_stage", "dispatch_stage", "dispatch_verifier", "dispatch_research", "auto_advance_stage", "get_fallback_model"],
         }],
         "makdoong2-team",
       ],
-      tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, auto_advance_stage: true, get_fallback_model: true },
+      tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, dispatch_research: true, auto_advance_stage: true, get_fallback_model: true },
       permission: { read: { "~/.config/opencode/skills/*/secrets.env": "allow" } },
     };
     writeFileSync(ocPath, JSON.stringify(configuredWithStaleGlob, null, 2) + "\n");
@@ -617,11 +617,11 @@ describe("install-lib", () => {
     const fullyConfigured = {
       plugin: [
         ["opencode-tool-search@0.4.3", {
-          alwaysLoad: ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"],
+          alwaysLoad: ["verify_stage", "dispatch_stage", "dispatch_verifier", "dispatch_research", "auto_advance_stage", "get_fallback_model"],
         }],
         "makdoong2-team",
       ],
-      tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, auto_advance_stage: true, get_fallback_model: true },
+      tools: { verify_stage: true, dispatch_stage: true, dispatch_verifier: true, dispatch_research: true, auto_advance_stage: true, get_fallback_model: true },
       permission: { external_directory: Object.fromEntries(computeExternalDirPaths(PKG_ROOT, configDir).map(p => [p, "allow"])) },
     };
     writeFileSync(ocPath, JSON.stringify(fullyConfigured, null, 2) + "\n");

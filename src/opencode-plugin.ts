@@ -17,7 +17,7 @@
 // Place this file at ~/.config/opencode/plugins/makdoong2-team/src/opencode-plugin.ts
 // (or load the npm package via opencode.json "plugin": ["./plugins/makdoong2-team/src/opencode-plugin.ts"]).
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as pathResolve, sep as pathSep } from "node:path";
 import type { Plugin } from "@opencode-ai/plugin";
@@ -27,6 +27,17 @@ import { computeVerdictHash } from "./verdict-hash.js";
 import { nextModel, applyConfigOverrides, POLICIES } from "./model-fallback-policy.ts";
 import { agentForStage, STAGE_SPEC_FILES, type Stage } from "./agent-stage-config.ts";
 import { shouldEscalateStall } from "./stall-escalation.ts";
+import {
+  RESEARCH_SOURCES,
+  DEFAULT_RESEARCH_TIMEOUT_MINUTES,
+  buildResearchPrompt,
+  mergeResearchFindings,
+  normalizeQueries,
+  parseResearchOutput,
+  resolveParallelism,
+  summarizeOutcomes,
+  type SourceOutcome,
+} from "./research-fanout.ts";
 import { TmuxMonitor, readTmuxConfig, orphanCleanupGuard } from "./tmux-monitor.ts";
 import {
   resolvePaths,
@@ -960,6 +971,10 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     "makdoong2-engineer",
     "makdoong2-publisher",
     "makdoong2-verifier",
+    // Research fan-out worker. Sealed like every other sub-agent: its frontmatter
+    // already omits Task (L1), but sealed workflow is defence in depth — a worker
+    // missing here would be caught by nothing at runtime (L2).
+    "makdoong2-researcher",
   ]);
 
   // 미래의 oh-my-openagent 위임 툴을 조기 발견하기 위한 이름 패턴.
@@ -970,6 +985,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   const KNOWN_SAFE_TOOLS = new Set([
     "dispatch_stage",
     "dispatch_verifier",
+    "dispatch_research",
     "verify_stage",
     "auto_advance_stage",
     "get_fallback_model",
@@ -2449,6 +2465,301 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
        * get_fallback_model — fallback advisor.
        * Returns the next model in the chain, or exhausted=true.
        */
+      /**
+       * dispatch_research — parallel multi-source research fan-out.
+       *
+       * Why the plugin does the fan-out instead of the agent: sealed sub-agents
+       * cannot delegate (ARCHITECTURE.md §4.2), and a prompt asking the model to
+       * "call the sources in parallel" cannot be enforced — the model may call
+       * them one at a time and nothing detects it. Doing it in code makes the
+       * parallelism deterministic, and gives each source its own session so one
+       * source's material never crowds out another's (DESIGN.md §3.7).
+       *
+       * Failure is isolated per source: one source failing yields a partial
+       * artifact plus an explicit failure row, never an aborted fan-out.
+       */
+      dispatch_research: tool({
+        description:
+          "여러 리서치 소스(jira / confluence / bitbucket / github-oss)를 병렬 서브세션으로 동시 조사하고 " +
+          "결과를 research-findings.json 으로 병합한다. 소스별 컨텍스트가 격리되며 한 소스의 실패가 " +
+          "다른 소스를 막지 않는다. 1_planning.requirements 의 다출처 교차 조사에 사용.",
+        args: {
+          issue: tool.schema.string().describe("Jira issue key"),
+          worktree: tool.schema.string().describe("작업 디렉토리 절대경로 (state.sh 실행 컨텍스트)"),
+          queries: tool.schema
+            .array(
+              tool.schema.object({
+                source: tool.schema
+                  .string()
+                  .describe("jira | confluence | bitbucket | github-oss"),
+                focus: tool.schema
+                  .string()
+                  .describe("이 소스에서 확인할 것. 구체적일수록 좋다."),
+              }),
+            )
+            .describe("소스별 조사 지시. 동시 실행되므로 서로 의존하면 안 된다."),
+          context: tool.schema
+            .string()
+            .optional()
+            .describe("모든 조사 세션에 공통 주입할 배경 (예: Jira 요약)"),
+        },
+        async execute(args, context) {
+          const startedAll = Date.now();
+          const parallelLimit = resolveParallelism(config.research?.max_parallel);
+          const { queries, rejected, deferred } = normalizeQueries(args.queries, parallelLimit);
+
+          if (queries.length === 0) {
+            return JSON.stringify({
+              ok: false,
+              reason: "실행 가능한 query 가 없다.",
+              rejected,
+              deferred,
+              allowed_sources: Object.keys(RESEARCH_SOURCES),
+            });
+          }
+
+          const parentSessionID = context?.sessionID ?? dispatchParentSessionID(undefined);
+          if (!parentSessionID) {
+            return JSON.stringify({
+              ok: false,
+              reason: "dispatch_research 호출자의 sessionID를 얻지 못했다.",
+            });
+          }
+
+          const researcherId = "makdoong2-researcher";
+
+          // Recursion guard: a research session must never start its own fan-out.
+          // The researcher's frontmatter omits this tool (L1), but a fan-out that
+          // could nest would multiply sessions without bound, so it is refused at
+          // runtime too — same defence-in-depth reasoning as SEALED_SUBAGENTS.
+          if (sessionAgent.get(parentSessionID) === researcherId) {
+            logger.error(
+              `[dispatch_research] BLOCKED: researcher session ${parentSessionID} attempted a nested fan-out`,
+            );
+            return JSON.stringify({
+              ok: false,
+              reason:
+                "리서치 세션은 dispatch_research 를 다시 호출할 수 없다 (중첩 fan-out 금지). " +
+                "배정받은 소스만 조사하고 JSON 을 반환하라.",
+            });
+          }
+          const policy = POLICIES[researcherId];
+          if (!policy) {
+            return JSON.stringify({
+              ok: false,
+              reason: `POLICIES 에 ${researcherId} 항목이 없다. 모델 정책 설정을 확인하라.`,
+            });
+          }
+          const [providerID, ...modelRest] = policy.primary.id.split("/");
+          const modelID = modelRest.join("/");
+          const timeoutMs = Math.max(
+            60_000,
+            Math.round(
+              (config.research?.timeout_minutes ?? DEFAULT_RESEARCH_TIMEOUT_MINUTES) * 60_000,
+            ),
+          );
+
+          logger.debug(
+            `[dispatch_research] fan-out start issue=${args.issue} sources=` +
+            `${queries.map((q) => q.spec.source).join(",")} parallel_limit=${parallelLimit} ` +
+            `timeout_ms=${timeoutMs} parentID=${parentSessionID}`,
+          );
+
+          const runOne = async (q: typeof queries[number]): Promise<SourceOutcome> => {
+            const startedAt = Date.now();
+            const base: Omit<SourceOutcome, "status" | "findings" | "gaps" | "error"> = {
+              source: q.spec.source,
+              label: q.spec.label,
+              focus: q.focus,
+              session_id: null,
+              elapsed_ms: 0,
+            };
+            const fail = (error: string, sid: string | null): SourceOutcome => ({
+              ...base,
+              session_id: sid,
+              elapsed_ms: Date.now() - startedAt,
+              status: "failed",
+              findings: [],
+              gaps: [],
+              error,
+            });
+
+            const createResult = await (client as any).session
+              .create({
+                body: {
+                  parentID: parentSessionID,
+                  title: `research:${q.spec.source} (${args.issue})`,
+                },
+                query: { directory: args.worktree },
+              })
+              .catch((e: unknown) => ({ error: e, data: null }));
+            if (createResult.error || !createResult.data) {
+              return fail(`session create 실패: ${JSON.stringify(createResult.error)}`, null);
+            }
+            const sid = (createResult.data as { id: string }).id;
+
+            sessionIssue.set(sid, args.issue);
+            subSessionIds.add(sid);
+            sessionWorktree.set(sid, args.worktree);
+            pendingDispatch.set(sid, {
+              stage: `research:${q.spec.source}`,
+              agent: researcherId,
+              worktree: args.worktree,
+              startedAt,
+            });
+            appendSessionIndex({
+              sessionID: sid,
+              agent: researcherId,
+              worktree: args.worktree,
+              issue: args.issue,
+              stage: `research:${q.spec.source}`,
+              createdAt: new Date().toISOString(),
+            });
+
+            let outcomeText = "";
+            try {
+              const promptText = buildResearchPrompt(q, {
+                issue: args.issue,
+                scriptsDir: SCRIPTS_DIR,
+                worktree: args.worktree,
+                context: args.context,
+              });
+              const promptPromise = (client as any).session
+                .prompt({
+                  path: { id: sid },
+                  body: {
+                    agent: researcherId,
+                    tools: { question: false },
+                    parts: [{ type: "text", text: promptText }],
+                    model: { providerID, modelID },
+                  } as Record<string, unknown>,
+                  query: { directory: args.worktree },
+                })
+                .catch((e: unknown) => ({ error: e }));
+
+              const early = await Promise.race([
+                promptPromise,
+                new Promise<"pending">((r) => setTimeout(() => r("pending"), 2_000)),
+              ]);
+              if (early !== "pending" && (early as any)?.error) {
+                return fail(`prompt 실패: ${JSON.stringify((early as any).error)}`, sid);
+              }
+
+              await spawnPaneForSession(sid);
+
+              const outcome = await pollSubSession(sid, timeoutMs, args.worktree);
+              const legacy = pollOutcomeToLegacy(outcome);
+              outcomeText = legacy.text;
+              promptPromise.catch(() => {});
+
+              if (outcome.kind === "session_gone") {
+                await cleanupSubSession(sid, {
+                  success: false,
+                  reason: `research ${q.spec.source} session_gone`,
+                  skipSessionOps: outcome.reason !== "message_stall",
+                });
+                return fail(`세션 종료 (${outcome.reason ?? "status_absent"})`, sid);
+              }
+              if (outcome.kind === "timeout") {
+                await cleanupSubSession(sid, {
+                  success: false,
+                  reason: `research ${q.spec.source} timeout`,
+                });
+                return fail(`시간 초과 (${Math.round(timeoutMs / 60_000)}분)`, sid);
+              }
+
+              const parsed = parseResearchOutput(outcomeText);
+              await cleanupSubSession(sid, { success: parsed.ok });
+              if (!parsed.ok) {
+                return fail(`출력 파싱 실패: ${parsed.reason}`, sid);
+              }
+              return {
+                ...base,
+                session_id: sid,
+                elapsed_ms: Date.now() - startedAt,
+                status: "ok",
+                findings: parsed.data.findings,
+                gaps: parsed.data.gaps,
+                error: null,
+              };
+            } catch (e) {
+              await cleanupSubSession(sid, {
+                success: false,
+                reason: `research ${q.spec.source} threw`,
+              }).catch(() => undefined);
+              return fail(`예외: ${e instanceof Error ? e.message : String(e)}`, sid);
+            }
+          };
+
+          // Promise.all, not a loop: the whole point is that the sources run at
+          // the same time. runOne never rejects (every path returns an outcome),
+          // so one source cannot take the others down with it.
+          const outcomes = await Promise.all(queries.map(runOne));
+
+          const artifact = mergeResearchFindings(
+            args.issue,
+            new Date().toISOString(),
+            outcomes,
+            rejected,
+            deferred,
+          );
+
+          // state.json 산출물 경로는 상대경로만 저장한다 (ARCHITECTURE.md §5.3).
+          const relPath = `.makdoong2-team/${args.issue}/research-findings.json`;
+          let artifactWritten = false;
+          let artifactError: string | null = null;
+          try {
+            const absDir = join(args.worktree, ".makdoong2-team", args.issue);
+            mkdirSync(absDir, { recursive: true });
+            writeFileSync(join(absDir, "research-findings.json"), JSON.stringify(artifact, null, 2));
+            artifactWritten = true;
+          } catch (e) {
+            artifactError = e instanceof Error ? e.message : String(e);
+            logger.error(`[dispatch_research] artifact write 실패: ${artifactError}`);
+          }
+
+          if (artifactWritten) {
+            // cwd 는 반드시 args.worktree — state.sh root() 가 cwd 의 git toplevel 을
+            // 쓰므로 여기서 어긋나면 다른 state.json 에 기록된다 (ARCHITECTURE.md §10.2).
+            const setR = await $`bash ${SCRIPTS_DIR}/state.sh set ${args.issue} ${'.stages."1_planning".substages."requirements".research_path'} ${JSON.stringify(relPath)}`
+              .cwd(args.worktree).quiet().nothrow();
+            if (setR.exitCode !== 0) {
+              logger.debug(
+                `[dispatch_research] research_path 마커 기록 실패 exit=${setR.exitCode} ` +
+                `stderr=${redactAndTruncate(setR.stderr?.toString() ?? "", 160)}`,
+              );
+            }
+          }
+
+          const okCount = artifact.counts.ok;
+          logger.debug(
+            `[dispatch_research] fan-out done issue=${args.issue} ok=${okCount}/${outcomes.length} ` +
+            `findings=${artifact.counts.findings_total} elapsed_ms=${Date.now() - startedAll}`,
+          );
+
+          return JSON.stringify({
+            // 부분 성공도 ok=true. 한 소스가 죽었다고 나머지 조사 결과를 버리면
+            // fan-out 의 실패 격리가 의미를 잃는다. 호출자는 failed 배열을 본다.
+            ok: okCount > 0,
+            issue: args.issue,
+            artifact_path: artifactWritten ? relPath : null,
+            artifact_error: artifactError,
+            elapsed_ms: Date.now() - startedAll,
+            counts: artifact.counts,
+            summary: summarizeOutcomes(outcomes),
+            failed: outcomes.filter((o) => o.status === "failed").map((o) => ({
+              source: o.source,
+              error: o.error,
+            })),
+            rejected,
+            deferred,
+            next_action: okCount > 0
+              ? `조사 결과를 읽고 요구사항 체크리스트에 반영하라: ${relPath}`
+              : "모든 소스 조사가 실패했다. failed 사유를 사용자에게 보고하라.",
+          });
+        },
+      }),
+
       get_fallback_model: tool({
         description: "Return the next model in this agent's fallback chain after a failure (rate_limit/5xx/context_exceeded).",
         args: {

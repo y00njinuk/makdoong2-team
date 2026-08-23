@@ -105,15 +105,28 @@ bash <SCRIPTS_DIR>/state.sh set <이슈키> \
   '.stages."1_planning".substages."requirements".draft_path' '".makdoong2-team/<이슈키>/requirements-draft.md"'
 ```
 
-### 2-3. 다출처 교차 조사
+### 2-3. 다출처 교차 조사 (병렬)
 
-`skill_mcp`으로 필요한 스킬을 순차 호출한다. **outer-world 에이전트 위임 금지.**
+**`dispatch_research` 툴 1회 호출로 소스별 조사를 병렬 실행한다.** `skill_mcp` 를 직접 순차 호출하지 않는다 — 플러그인이 소스마다 별도 세션을 동시에 띄우므로 대기 시간이 가장 느린 소스 하나로 수렴하고, 각 소스의 원자료가 이 세션의 컨텍스트를 잠식하지 않는다. **outer-world 에이전트 위임 금지.**
 
-- **조사 A (`jira-research`)**: 에픽/상위 이슈, 링크 이슈, 관련 코멘트에서 구체화된 요구
-- **조사 B (`confluence-research`)**: 관련 설계 문서, ADR, API 스펙, 운영 가이드
-- **조사 C (`bitbucket-research`)**: 수정 대상 파일/클래스 현재 구현, 관련 PR 이력, 테스트 패턴
+```
+dispatch_research(
+  issue = "<이슈키>",
+  worktree = "<Working directory 절대경로>",
+  context = "<Phase 1 에서 요약한 Jira 핵심 3~5줄>",
+  queries = [
+    {source: "jira",       focus: "에픽/상위 이슈, 링크 이슈, 관련 코멘트에서 구체화된 요구"},
+    {source: "confluence", focus: "관련 설계 문서, ADR, API 스펙, 운영 가이드"},
+    {source: "bitbucket",  focus: "수정 대상 파일/클래스 현재 구현, 관련 PR 이력, 테스트 패턴"}
+  ]
+)
+```
 
-Simple 이슈는 조사 A + C만으로 축소 가능.
+조사 세션은 서로를 보지 못한다. **한 focus 가 다른 조사 결과에 의존하면 안 된다** — 의존이 필요하면 라운드를 나눠 두 번 호출한다.
+
+Simple 이슈는 조사 A + C만으로 축소 가능. 외부 라이브러리가 쟁점이면 `{source: "github-oss", ...}` 를 추가한다.
+
+**결과 읽기**: 반환 JSON 의 `artifact_path` (`.makdoong2-team/<이슈키>/research-findings.json`) 를 Read 로 읽는다. `failed` 가 있어도 **부분 성공이 정상**이므로 나머지 결과로 진행하고, 실패 소스가 요구사항 확정에 필수인 경우에만 사유를 사용자에게 보고한다. 전 소스 실패(`ok: false`)면 추측으로 채우지 말고 보고한다.
 
 ### 2-4. 요구사항 체크리스트 확인
 
