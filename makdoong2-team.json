@@ -1,12 +1,13 @@
 {
   "$schema": "./assets/makdoong2-team.schema.json",
   "agents": {
-    "makdoong2-team-leader": { "model": "github-copilot/claude-haiku-4.5" },
-    "makdoong2-planner":     { "model": "github-copilot/claude-haiku-4.5" },
-    "makdoong2-engineer":    { "model": "github-copilot/claude-haiku-4.5" },
-    "makdoong2-publisher":   { "model": "github-copilot/claude-haiku-4.5" },
-    "makdoong2-analyzer":    { "model": "github-copilot/claude-haiku-4.5" },
-    "makdoong2-verifier":    { "model": "github-copilot/claude-haiku-4.5" }
+    "makdoong2-team-leader": { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
+    "makdoong2-planner":     { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
+    "makdoong2-engineer":    { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
+    "makdoong2-publisher":   { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
+    "makdoong2-analyzer":    { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
+    "makdoong2-researcher":  { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
+    "makdoong2-verifier":    { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" }
   },
   "model_policy": {
     "allowed_primaries": ["github-copilot/claude-haiku-4.5"]
