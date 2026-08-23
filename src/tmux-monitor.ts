@@ -122,7 +122,7 @@ export function readTmuxConfig(block?: TmuxConfigBlock): TmuxMonitorConfig {
       : "main-vertical";
   const splitRaw = b.split_direction ?? "-h";
   // Defaults to "window": "pane" resizes 부장님's pane on every spawn/kill.
-  // ARCHITECTURE.md §17.6.
+  // ARCHITECTURE.md §9.1.
   const placement: TmuxPlacement = b.placement === "pane" ? "pane" : "window";
   return {
     enabled: b.enabled === true,
@@ -354,7 +354,7 @@ export class TmuxMonitor {
       : `${this.config.attachCommand} ${sessionId}`;
     // The pane always starts as a placeholder: `opencode attach` is a full TUI
     // that fires 19 terminal palette queries on startup, and tmux can deliver a
-    // fragmented reply to 부장님's prompt as literal text. ARCHITECTURE.md §17.7.
+    // fragmented reply to 부장님's prompt as literal text. ARCHITECTURE.md §9.2.
     const innerCmd = ["sh", "-c", buildPlaceholderCommand(stage, agent, sessionId)];
 
     const capacity = await this.computeCapacity();
@@ -490,7 +490,7 @@ export class TmuxMonitor {
 
   /**
    * placement=window — own tmux window; `-d` leaves the active window (and thus
-   * 부장님's pane geometry) untouched. ARCHITECTURE.md §17.6.
+   * 부장님's pane geometry) untouched. ARCHITECTURE.md §9.1.
    */
   private async spawnInNewWindow(
     sessionId: string,

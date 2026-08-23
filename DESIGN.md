@@ -1,387 +1,350 @@
 # makdoong2-team — DESIGN
 
-> 왜 이렇게 설계했는가. 어떻게 동작하는지는 [`ARCHITECTURE.md`](./ARCHITECTURE.md) 참조.
+> **왜 이렇게 만들었는가.** 어떻게 동작하는지는 [ARCHITECTURE.md](./ARCHITECTURE.md), 어떻게 쓰는지는 [README.md](./README.md).
 
-## 0. 요약
+---
 
-사내 "하네스 엔지니어링" 4기둥 **Constrain → Inform → Verify → Correct** 를 opencode 플러그인 아키텍처로 옮긴 결과물이다.
+## 0. 한 문장 요약
+
+사내 "하네스 엔지니어링" 4기둥 **Constrain → Inform → Verify → Correct** 를 opencode 플러그인 구조로 옮긴 결과물이다.
 
 | 기둥 | 한 줄 정의 | 핵심 구현 |
 |---|---|---|
-| **Constrain** | 할 수 없게 한다 | 에이전트별 권한 + PreToolUse 훅 + sealed workflow |
-| **Inform** | 알아야 할 것을 준다 | 단계 명세 + MCP 스킬 lazy connect + SessionStart 재주입 |
-| **Verify** | 정말 했는지 확인한다 | 결정론 셸 게이트 + verifier 에이전트 + self_check 5체크 |
-| **Correct** | 틀렸을 때 회복한다 | 모델 폴백 2-track + verification loop + 롤백 |
+| **Constrain** | 할 수 없게 한다 | 에이전트별 권한 + PreToolUse 훅 + sealed workflow + worktree 격리 |
+| **Inform** | 알아야 할 것을 준다 | 단계 명세 3계층 + MCP lazy connect + 절대경로 주입 |
+| **Verify** | 정말 했는지 확인한다 | 결정론 셸 게이트 + self_check 5체크 + verifier 에이전트 |
+| **Correct** | 틀렸을 때 회복한다 | 모델 폴백 2-track + 재작업 루프 + 무한루프 차단 |
+
+---
 
 ## 1. 출발점 — 다섯 실패 모드
 
-LLM 에이전트는 다섯 가지로 실패한다.
+LLM 에이전트는 대체로 다섯 가지로 실패한다. 각 기둥은 이 중 무엇을 막는지가 분명해야 한다.
 
 | 실패 모드 | 주 방어 기둥 |
 |---|---|
-| 환각 함수 호출 | Inform, Verify |
+| 환각 함수 호출 | Inform · Verify |
 | 긴 세션에서 길을 잃기 | Inform |
 | "다 했다" 거짓 보고 | Verify |
 | 위험 명령 무방비 실행 | Constrain |
-| 같은 실수 무한 반복 | Constrain, Correct |
+| 같은 실수 무한 반복 | Constrain · Correct |
 
-**설계 원칙 3가지**
-1. 셸 게이트가 단일 진실 소스. 동일 검증 로직을 재구현하지 않는다.
-2. 결정론 검증 우선. 가능하면 LLM 호출 없이 마커·exit code 로 판정한다.
-3. 실패는 격리한다. 에이전트 권한과 worktree 로 폭발 반경을 좁힌다.
+### 관통하는 설계 원칙 3가지
+
+1. **셸 게이트가 단일 진실 소스.** 같은 검증 로직을 두 군데 구현하지 않는다.
+2. **결정론 검증 우선.** 가능하면 LLM 없이 마커와 exit code 로 판정한다.
+3. **실패는 격리한다.** 권한과 worktree 로 폭발 반경을 좁힌다.
 
 ---
 
-## 2. CONSTRAIN — 제한
+## 2. CONSTRAIN — 못 하게 만든다
 
-### 2.1 5계층 방화벽
+### 2.1 겹쳐 쌓은 5계층
 
-한 겹이면 뚫린다. 독립 계층을 겹친다.
+한 겹은 반드시 뚫린다. 서로 독립적인 계층을 겹친다.
 
-| 계층 | 구현 |
+| 계층 | 구현 | 뚫렸을 때 잡는 다음 계층 |
+|---|---|---|
+| L1 프롬프트 가드레일 | 에이전트 명세 §금지 | L2 |
+| L2 도구 제한 | frontmatter `permission:` (deny/allow/ask) | L4 |
+| L3 조건부 승인 | `.policy.auto_approve` 마커 | L4 |
+| L4 도구 내부 검증 | `guard-bash.sh` PreToolUse | L5 |
+| L5 라이프사이클 훅 | `chat.params` / `tool.execute.before` / `.after` | — |
+
+### 2.2 권한을 역할별로 쪼갠 이유
+
+권한이 좁을수록 사고 반경이 좁다. 그래서 **한 에이전트가 계획·구현·배포를 모두 할 수 없게** 만들었다.
+
+| 에이전트 | 담당 | 핵심 제약 |
+|---|---|---|
+| `team-leader` | 라우팅 | **git 전면 deny**, 파일 편집 불가 |
+| `planner` | 1_planning | 읽기 전용 |
+| `analyzer` | analysis | 읽기 + 분석 산출물만 write |
+| `engineer` | dev / test | 코드는 짜지만 커밋은 못 한다 |
+| `publisher` | 3_delivery | 커밋·푸시는 하지만 코드는 못 고친다 |
+| `verifier` | 메타 검증 | 읽기 전용 |
+
+**책임 분리의 두 축**
+
+- **만드는 자와 내보내는 자를 나눈다.** engineer 가 코드를 만들고 publisher 가 그것을 커밋한다. 서로의 영역을 침범할 권한 자체가 없다.
+- **오케스트레이션과 실행을 나눈다.** 부장님은 어떤 막둥이를 언제 부를지만 결정한다. 직접 무언가를 실행하기 시작하면 게이트를 우회할 수 있으므로, git 권한을 통째로 뺐다.
+
+> **설계 변경 이력 — hybrid publisher 폐기.** 초기에는 publisher 가 commit spec 을 JSON 으로 계산해 반환하고 부장님이 그 spec 으로 실제 git 을 실행하는 하이브리드였다. 오케스트레이터가 spec 검증과 실행을 모두 떠안았고, "publisher 의 자기선언" 과 "부장님의 실제 실행" 사이 갭에서 마커 불일치가 반복됐다. 지금은 publisher 가 직접 실행하고, 부장님에게서 git 권한을 제거해 갭 자체를 없앴다.
+
+### 2.3 부장님 하드룰 — 프롬프트가 아니라 물리적 차단
+
+프롬프트로 "하지 마" 라고 쓴 규칙은 지켜지지 않을 때가 있다. 부장님의 우회 경로는 훅이 물리적으로 막는다.
+
+1. `write` / `edit` / `patch` / `multiedit` 호출 시 throw — 모든 파일 조작은 `dispatch_stage` 위임 강제.
+2. bash 파일 쓰기 리다이렉트 (`>`, `>>`, `tee`, `sed -i`, `python -c open()` 등) 차단. 허용 예외는 `state.sh set` 뿐.
+
+whitelist 를 먼저 매칭한 뒤 file-write 패턴을 탐지한다. FD 리다이렉트(`2>/dev/null`)와 `/dev/null` 은 통과시킨다.
+
+### 2.4 Sealed workflow — 바깥 세계로 새지 않게
+
+서브에이전트가 프로젝트 밖 범용 에이전트(`call_omo_agent`, `delegate_task`, `background_task`, `task_*`)에 위임할 수 있으면, 게이트를 통과하지 않은 작업이 워크플로우에 섞여 들어온다. 그래서 sealed sub-agent 는 이런 툴 호출 시 throw 한다. frontmatter whitelist(1차)를 우회해도 `tool.execute.before`(2차)가 잡는다.
+
+**대신 열어 둔 길**
+
+| 하고 싶은 것 | 허용된 방법 |
 |---|---|
-| L1 프롬프트 가드레일 | 에이전트 명세 §"금지" 섹션 |
-| L2 도구 제한 | frontmatter `permission:` (deny/allow/ask) |
-| L3 조건부 승인 | `.policy.auto_approve` 마커 기반 |
-| L4 도구 내부 검증 | `guard-bash.sh` PreToolUse |
-| L5 라이프사이클 훅 | `chat.params` / `tool.execute.before` / `.after` / SessionStart |
+| 외부 정보 조사 | `skill_mcp` + jira / confluence / bitbucket / github-oss / bamboo 리서치 skill |
+| 다른 substage 작업 | 결과를 부장님에게 반환 → 부장님이 `dispatch_stage` 로 라우팅 |
+| 상태 공유 | `state.sh set` 마커 |
 
-### 2.2 에이전트별 권한 분리
+금지만 쓰면 다른 잘못된 길로 우회한다. **금지와 대안은 항상 짝으로 쓴다.**
 
-권한이 좁을수록 사고 반경이 좁다.
+미래에 등장할 위임성 툴(`delegate*` / `spawn*` / `background_*` / `task_*`)도 이름 패턴으로 조기 감지해 경고를 남긴다.
 
-| 에이전트 | 담당 | 권한 |
-|---|---|---|
-| `makdoong2-team-leader` | 라우팅 + 환경 준비 | commit/push 허용 (오케스트레이션), 파일 편집 금지, **worktree 생성** |
-| `makdoong2-planner` | 1_planning | 읽기 전용 |
-| `makdoong2-engineer` | 2_implementation | edit/write, commit/push deny, **준비된 worktree에서 작업** |
-| `makdoong2-publisher` | 3_delivery | 읽기 전용 — spec 계산만 |
-| `makdoong2-verifier` | 메타 검증 | 읽기 전용 |
+### 2.5 승인 게이트를 어디에 둘 것인가
 
-**책임 분리 패턴**:
-- engineer 가 코드를 만들지만 커밋은 못 한다. publisher 가 커밋 메시지를 만들지만 실행은 못 한다. 실제 `git commit` 은 team-leader 만 실행한다 (**Publisher 하이브리드 모델**).
-- engineer 가 개발하지만 worktree는 만들지 않는다. team-leader 가 Planning 완료 후 Implementation 진입 전에 worktree를 준비한다 (**환경 준비 = 오케스트레이션**).
+전부 물으면 사소한 작업도 막히고, 아무것도 안 물으면 위험한 변경이 통과한다. 그래서 **위험도 분류와 승인 여부를 분리**했다.
 
-### 2.3 Team-Leader Hardrule (물리적 차단)
+- `1_planning.requirements` 가 `.policy.category` 를 `minor` / `major` 로 한 번만 판정한다 (LLM 1회).
+- 실제 승인 여부는 별개의 `.policy.auto_approve.<substage>` 마커가 결정하고, **기본값은 두 범주 모두 전 substage `true`** — 기본 흐름은 무인이다.
+- `category` 는 위험도 라벨이자 향후 이슈 유형별 opt-in 훅의 스위치로 남긴다.
+- HITL 이 필요한 예외에서는 planner 가 특정 substage 를 `false` 로 내린다. 그때만 그 substage 앞에 `change-report.md` + 사용자 승인이 요구된다.
+- 구형 state (마커 미설정) 는 **모든 단계 승인 요구**로 폴백한다 — 안전한 쪽으로 실패한다.
 
-team-leader 의 파일 조작 우회를 hook 이 물리적으로 차단한다.
+분류는 LLM 이 하지만 그 뒤 게이트는 마커만 결정론적으로 검사한다. 판단 비용은 1회, 강제는 매번.
 
-1. **Hardrule 1** — `write`/`edit`/`patch`/`multiedit` 툴 호출 시 throw. 모든 파일 조작은 `dispatch_stage` 위임.
-2. **Hardrule 2** — bash 파일 쓰기 리다이렉트 (`>`, `>>`, `tee`, `sed -i` 등) 차단. 허용: `git commit/push/add/rm`, `state.sh set`.
+**ESCALATION**: `1_planning.scope` 에서 실제 범위가 드러나면 `minor → major` **상향만** 허용한다 (하향 금지). 상향은 라벨만 정정하고 `auto_approve` 맵은 건드리지 않는다.
 
-정규식으로 whitelist 우선 매칭 후 file-write 패턴 탐지. FD 리다이렉트 (`2>/dev/null`) · `/dev/null` 은 허용.
+### 2.6 격리 단위로 worktree 를 고른 이유
 
-### 2.4 Sealed Workflow (outer-world 차단)
+VM / μVM 같은 물리 격리는 비용이 크다. git worktree 는 싸면서도 필요한 성질을 대부분 준다 — 메인 워킹 디렉토리가 오염되지 않고, 실패하면 디렉토리만 지우면 깨끗하게 복구된다.
 
-sealed sub-agent (planner/engineer/publisher/verifier) 가 outer-world 위임 툴 (`call_omo_agent`, `delegate_task`, `background_task`, `task_*`) 을 호출하면 throw 한다. frontmatter whitelist (1차) 를 우회해도 `tool.execute.before` (2차) 가 잡는다.
+**worktree 생성은 LLM 이 하지 않는다.** 마크다운 프롬프트에 "worktree 를 만들어라" 라고 쓰면 브랜치 충돌 감지나 경로 규약을 건너뛰는 경우가 생긴다. 그래서 플러그인의 `auto_advance_stage` 가 dev 진입 시점에 코드로 직접 수행한다 — 충돌 감지, 경로 규약(메인 repo 의 **형제** 디렉토리), 로컬 셋업 파일 동기화, state 기록까지. engineer 는 **이미 준비된** worktree 에서 개발만 한다.
 
-**허용된 대안**
-- 조사 — `skill_mcp` + jira/confluence/bitbucket/github-oss/bamboo-ci research 스킬
-- 다른 substage — 결과를 team-leader 에게 반환, team-leader 가 `dispatch_stage` 로 라우팅
-- 상태 공유 — `state.sh set` 으로 마커 기록
-
-미래의 위임성 툴 (`delegate*` / `spawn*` / `background_*` / `task_*`) 이 sealed subagent 에서 호출되면 경고 로그를 남긴다.
-
-### 2.5 조건부 자동 승인 (`.policy`) 와 HITL opt-in
-
-모두 물으면 사소한 작업도 막히고, 안 물으면 위험한 변경이 통과한다. 2단계에서 위험도를 분류해 `.policy.category` 에 기록하되, **기본 흐름은 두 범주 모두 무인 진행**으로 통일했다. 승인 게이트는 `.policy.auto_approve.<substage>` 마커가 결정하며 기본값은 전 substage `true` 다.
-
-| 분류 | 기준 | 기본 사람 개입 |
-|---|---|---|
-| `minor` | 단순 작업 + 작은 범위 | 없음 (전 단계 무인) |
-| `major` | criticality=critical OR scope_size=large | 없음 (전 단계 무인) — `category` 는 위험도 라벨/opt-in 훅용 |
-| 미설정 (구형 state) | — | 모든 단계 (안전 폴백) |
-
-**minor 와 major 는 흐름이 동일**하다. 두 범주의 차이는 `.policy.category` 라벨과 후속 감사·통계·이슈 유형별 확장 훅에서 의미를 갖는다. HITL 이 필요한 예외 상황(예: 향후 이슈 유형별 opt-in, 사용자 명시 지정)에서는 planner 가 특정 substage 의 `auto_approve` 를 `false` 로 재설정한다. `false` 로 opt-in 되면 그때 해당 substage 앞에 변경 보고서 + 사용자 승인이 요구된다. 분류는 LLM 이 1회만 판단하고, 이후 셸 게이트는 결정론적으로 마커만 검사한다.
-
-**ESCALATION**: 3단계 scope 에서 실제 범위가 드러나면 `minor → major` 상향만 허용 (하향 금지). 상향은 `.policy.category` 라벨만 정정하며 `auto_approve` 맵은 그대로 둔다 — HITL 재활성화가 필요하면 opt-in 훅으로 별도 지시한다.
-
-### 2.6 격리 — git worktree
-
-물리 격리 (VM/μVM) 는 비용이 크다. worktree 를 격리 단위로 사용한다.
-- 2_implementation.dev 는 별도 worktree 에서만 작업
-- 메인 워킹 디렉토리 오염 없음
-- 실패 시 worktree 만 삭제해 깨끗한 복구
-
-**Worktree 생성 = Deterministic** (플러그인 `auto_advance_stage`가 직접 실행):
-1. Planning → Dev 진입 시점에 `createWorktree()` 호출
-2. 브랜치 충돌 감지 (`git worktree list --porcelain` 파싱)
-3. 메인 repo 형제 디렉토리에 생성 (`<repo명>-<이슈키>`)
-4. 로컬 셋업 파일 동기화 (`wt-sync-ignored.sh`)
-5. state.json에 경로 기록
-
-**LLM 개입 없음** — Markdown 프롬프트에 의존하지 않음. 플러그인 코드가 직접 실행하므로:
-- ✅ 브랜치 충돌 항상 감지
-- ✅ 경로 규약 항상 준수
-- ✅ 동기화 항상 실행
-- ✅ 실패 시 명확한 에러 메시지
-
-Engineer는 **이미 준비된 worktree**에서 개발만 수행. Team-Leader 프롬프트는 "플러그인이 자동 생성함" 설명만 포함.
-
-강격리 (FireCracker 등) 는 미적용. 신뢰할 수 없는 코드 실행에는 별도 검토 필요.
+강격리(FireCracker 등)는 적용하지 않았다. 신뢰할 수 없는 코드를 실행하는 용도라면 별도 검토가 필요하다 (§6.4).
 
 ### 2.7 모델 티어링
 
-값비싼 모델만 쓰면 비용 누적, 싼 모델만 쓰면 품질 저하. 단계별 책임에 맞춰 티어 차등.
+비싼 모델만 쓰면 비용이 쌓이고, 싼 모델만 쓰면 품질이 무너진다. 단계별 책임에 맞춰 티어를 차등한다.
 
-fallback 은 항상 primary 보다 **strictly lower tier**. `validatePolicies()` 가 모듈 로드 + 오버라이드 적용 후 검사한다. 사용자 오설정 시 snapshot 복원 → defaults 로 부팅해 워크플로우가 죽지 않는다.
+폴백은 **항상 primary 보다 낮은 tier** 여야 한다. `validatePolicies()` 가 모듈 로드 시점과 모든 override 적용 후에 이 불변식을 검사한다. 사용자가 잘못 설정하면 snapshot 을 복원해 defaults 로 부팅한다 — **설정 오류가 워크플로우를 죽이지 않는다.**
 
 ---
 
-## 3. INFORM — 알려줌
+## 3. INFORM — 알아야 할 것을 준다
+
+정보 부족은 겉보기에 능력 부족과 구분되지 않는다.
 
 ### 3.1 세 채널
-
-정보 부족은 능력 부족과 구분되지 않는다.
 
 | 채널 | 비유 | 구현 |
 |---|---|---|
 | 정적 문서 | 부서 매뉴얼 | `agents/*.md`, `stages/*.md`, `references/` |
-| 동적 컨텍스트 | 사내 인트라넷 | MCP 스킬 (lazy connect) |
-| 이벤트 리마인더 | 모니터 포스트잇 | `session-start.sh` |
+| 동적 컨텍스트 | 사내 인트라넷 | 리서치 MCP skill (lazy connect) |
+| 이벤트 리마인더 | 모니터에 붙인 포스트잇 | `session-start.sh` |
 
-### 3.2 60줄 황금률
+### 3.2 짧게 쓴다
 
-긴 문서는 컨텍스트만 차지한다. Anthropic 권장대로 각 에이전트 명세와 stage 명세를 짧게 유지하고, **금지 + 대안** 을 짝지어 쓴다. 금지만 쓰면 다른 잘못된 길로 우회한다.
+긴 문서는 컨텍스트만 차지한다. 각 에이전트 명세와 stage 명세를 짧게 유지하고, **금지 옆에는 반드시 대안**을 쓴다.
 
-### 3.3 MCP 스킬 lazy connect
+### 3.3 MCP 는 필요할 때만 연결한다
 
-전체 도구를 항상 로드하면 컨텍스트가 빠르게 찬다. 필요할 때만 연결한다.
+전체 도구를 항상 로드하면 컨텍스트가 금방 찬다. 각 리서치 skill 의 MCP 서버는 SKILL.md frontmatter 에 embedded 로 선언되어 **skill 을 로드하기 전에는 스폰되지 않는다.**
 
-| 스킬 | 소비자 |
+| skill | 소비자 |
 |---|---|
-| `jira-research` | planner |
-| `confluence-research` | planner |
+| `jira-research` · `confluence-research` · `github-oss-research` | planner |
 | `bitbucket-research` | planner, publisher |
-| `github-oss-research` | planner |
-| `bamboo-ci` | (선택) |
-| `makdoong2-team` | 진입점 |
+| `bamboo-ci` | 선택 |
 
-engineer 는 스킬을 로드하지 않는다. 관여하지 않는 단계는 스킬을 보지 못한다.
+engineer 와 analyzer 는 skill 을 로드하지 않는다. **관여하지 않는 단계의 도구는 보이지도 않는다.**
 
-### 3.4 SCRIPTS_DIR 절대경로 주입
+대가로 순서 의존이 생긴다 — skill 로드 전 `skill_mcp` 를 부르면 "MCP server not found" 만 나오고 어떤 skill 을 로드해야 하는지는 안 알려준다. 그래서 문서(1차)와 훅(2차)으로 정확한 skill 이름을 안내한다 (ARCHITECTURE.md §6.4).
 
-`dispatch_stage`/`dispatch_verifier` 프롬프트 첫 5줄에 `Scripts directory (ABSOLUTE): <경로>` 라인을 주입한다. 서브에이전트가 `$HOME/.config/opencode/scripts/` 나 상대경로를 사용하는 실패 모드를 원천 차단한다. 사용자의 `paths.scripts` override 도 존중된다.
+### 3.4 경로는 절대경로로 못박는다
 
-### 3.5 SessionStart 리마인더
+dispatch 프롬프트 첫 줄들에 `Working directory` / `Scripts directory (ABSOLUTE)` / `Issue` / `Stage spec` 을 절대경로로 주입한다. 서브에이전트가 `$HOME/.config/opencode/scripts/` 나 상대경로를 추측하는 실패 모드를 원천 차단한다.
 
-세션을 잠시 멈추고 돌아오면 진행 상황을 잊는다. `session-start.sh` 가 stdout 으로 재주입한다.
+반대로 **state.json 안의 산출물 경로 필드는 상대경로만** 쓴다. 절대경로로 저장하면 다른 cwd 에서 읽을 때 opencode 의 permission 심사가 무한 대기에 빠진다 (ARCHITECTURE.md §5.3). 규칙이 방향에 따라 다른 이유다.
 
-| 재주입 | 출처 |
-|---|---|
-| 작업 범주 | `.policy.category` |
-| 단계별 done/approved 요약 | `state.json` |
-| `verification_pending=true` 목록 | `state.json` |
-| 최근 3개 이벤트 | `events.ndjson` (tail) |
+### 3.5 세션이 끊겨도 잃지 않게
 
-opencode plugin API 는 SessionStart 이벤트를 노출하지 않으므로 wire-up 은 운영자 책임 (Claude Code `settings.json` hooks 또는 orchestrator 프롬프트 첫 줄).
+세션을 잠시 멈추고 돌아오면 진행 상황을 잊는다. `session-start.sh` 가 작업 범주 · 단계별 done/approved 요약 · `verification_pending` 목록 · 최근 이벤트 3개를 stdout 으로 재주입한다.
 
-### 3.6 이력 로그 (`events.ndjson`)
+opencode plugin API 가 SessionStart 이벤트를 노출하지 않아 wire-up 은 운영자 책임이다 (§6.1).
 
-state.json 은 *현재* 상태만, `events.ndjson` 은 *이력* 만 담는다. 책임 분리.
+### 3.6 현재 상태와 이력을 분리한다
 
-`scripts/log-event.sh` 가 `jq -nc` 로 안전 escape 후 append. append-only 라 손실되지 않는다. 회고 · 디버깅 · 메트릭 집계 데이터 소스.
+`state.json` 은 **지금** 만, `events.ndjson` 은 **지나온 것** 만 담는다. 하나로 합치면 상태 조회가 이력 파싱에 끌려간다. `log-event.sh` 가 `jq -nc` 로 안전 escape 후 append 하며, append-only 라 손실되지 않는다. 회고·디버깅·메트릭의 데이터 소스다.
 
 ### 3.7 Context Rot 대응
 
-컨텍스트가 길어지면 모델 품질이 떨어진다.
+컨텍스트가 길어지면 모델 품질이 떨어진다. 세 가지로 대응한다.
 
-1. **JIT 검색** — 시작 시 모두 넣지 않는다.
-2. **서브에이전트 격리** — 각 단계가 자기 컨텍스트만 본다 (`client.session.create()` 로 새 서브세션).
-3. **컴팩션** — 단계 완료 시 핵심만 요약해 다음 단계로 (부분 적용, §6 한계).
+1. **JIT 검색** — 시작할 때 전부 넣지 않는다.
+2. **서브에이전트 격리** — 각 단계가 자기 컨텍스트만 본다 (매번 새 서브세션).
+3. **컴팩션** — 단계 완료 시 핵심만 다음 단계로. 부분 적용 상태다 (§6.3).
 
 ---
 
-## 4. VERIFY — 검증
+## 4. VERIFY — 정말 했는지 확인한다
 
-### 4.1 세 유형 겹치기
+### 4.1 세 유형을 겹친다
 
-한 가지만으로는 부족하다.
+| 유형 | 구현 | 잡는 것 |
+|---|---|---|
+| 코드 실행 검증 (결정론) | 셸 게이트 + 커버리지 게이트 | 기계적 사실 |
+| 셀프 검증 | 단계별 `self_check` 5체크 | 절차 누락 |
+| 3자 검증 | `makdoong2-verifier` | 자기선언과 실제의 괴리 |
 
-| 유형 | 구현 |
+### 4.2 왜 셸 게이트인가
+
+가장 확실한 검증은 실제로 실행해 보는 것이다. 셸 게이트는 exit code 로만 판정한다.
+
+- LLM 호출 0 → 비용도 지연도 없다
+- 어느 환경에서든 같은 게이트가 같게 동작한다
+- 단일 진실 소스라 의미가 어긋날 위험이 없다
+
+### 4.3 셸이 못 하는 것 — 확장 게이트
+
+셸은 *기계적 사실* 만 안다. "Jira 본문이 템플릿에 맞는가" 같은 *의미적* 판정은 못 한다.
+
+해결: **LLM 이 판정하고, 그 결과를 마커로 남기고, 플러그인은 마커만 결정론적으로 검사한다.** 예를 들어 `1_planning.jira` 는 6항목을 LLM 으로 검사한 뒤 `validation_passed=true` 를 기록하고, 이후 게이트는 그 boolean 만 본다. LLM 비용은 1회, 강제는 매번.
+
+### 4.4 self_check — 단계마다 다른 5체크
+
+각 단계 종료 직전 그 단계의 에이전트가 자기 출력을 5-boolean 으로 검토해 기록한다. **원칙: 단계마다 위험이 다르므로 같은 형식에 다른 의미를 담는다.**
+
+| 단계 | 5체크의 초점 |
 |---|---|
-| 코드 실행 검증 (결정론) | 셸 게이트 10개 + 커버리지 게이트 |
-| 셀프 검증 루프 | 단계별 `self_check` 5체크 |
-| 외부 도구 검증 | smoke-test + gate-policy-test |
-
-### 4.2 결정론 셸 게이트
-
-가장 확실한 검증은 실제 실행이다. 셸 게이트는 exit code 로 통과/차단을 판정한다.
-
-- LLM 호출 0 (비용·지연 없음)
-- 동일 게이트가 다른 환경에서도 동일 동작
-- 단일 진실 소스 (의미 어긋남 위험 없음)
-
-`verify.sh` 가 substage 별로 dispatcher 역할, `stageN-*-verify.sh` 가 실제 검증. `.policy.auto_approve` 마커가 `true` 면 자동 통과, `false` (HITL opt-in) 면 사람 승인 마커를 요구. 기본 흐름은 minor·major 모두 `true` 로 무인 통과한다.
-
-### 4.3 확장 게이트 (LLM 판정 → 결정론 검사)
-
-셸은 *기계적 사실* 만 검증한다. "Jira 본문이 템플릿에 맞는가" 같은 *의미적* 판정은 못 한다.
-
-해결: stage agent 가 LLM 으로 판정 → 결과를 마커로 기록 → 플러그인의 `checkExtensionGates` 가 마커만 결정론적으로 검사.
-
-예: `1_planning.jira` 는 6항목 (`content_template_match` / `content_quality_adequate` / `priority_set` / `assignee_set` / `reporter_set` / `fix_version_handled`) 검사 후 `validation_passed=true` 기록. LLM 비용은 1회만 발생.
-
-### 4.4 Self-Check 5체크
-
-각 단계 종료 직전 stage agent 가 자기 출력을 5-boolean 으로 검토해 `.stages.<N>.self_check` 에 기록. **원칙**: 단계별 위험이 다르므로 동일 형태의 다른 의미를 쓴다.
-
-| 단계 | 5체크 핵심 |
-|---|---|
-| jira | 6항목 검증 / 인터뷰 / RO 보존 |
+| jira | 6항목 검증 / 인터뷰 / 읽기전용 보존 |
 | requirements | 체크리스트 / 충돌 해소 / 사용자 확인 / policy 범주화 / draft 동기화 |
 | scope | 경로 명시 / 테스트 범위 / atomic 분할 / 승인 |
-| dev | 스코프 충족 / 기존 테스트 OK / 신규 테스트 / 시크릿 부재 |
+| dev | 스코프 충족 / 기존 테스트 / 신규 테스트 / 시크릿 부재 |
 | test | 결과 명시 / 커버리지 / attempt 추적 |
 | commit | base_sha / atomic / 메시지 컨벤션 / 스테이징 / 시크릿 스캔 |
 | pr | 템플릿 / 시나리오 매핑 / draft / 제목 형식 |
 | review | 결정 지점 / live 코멘트 / 메트릭 |
 
-자가 검증 실패 자체는 차단하지 않는다. 차단은 verifier 와 사용자 승인이 담당.
+**self_check 실패 자체는 차단하지 않는다.** 자가 신고는 신호일 뿐이고, 차단은 verifier 와 사용자 승인이 담당한다.
 
-### 4.5 Verifier 에이전트
+### 4.5 왜 별도의 verifier 가 필요한가
 
-Planner/Generator/Evaluator 3-Agent 구조의 **Evaluator** 역할. `makdoong2-verifier` (read-only, sonnet-tier) 가 결정론 신호 3개로 판정.
+자기 일을 자기가 검사하면 통과시키는 쪽으로 기운다. Planner / Generator / **Evaluator** 3-Agent 구조의 Evaluator 를 별도 에이전트로 뒀다. 읽기 전용이며 결정론 신호 3개로만 판정한다.
 
-1. `self_check` 5체크 누락 또는 false 1개 이상 → REJECTED
-2. 필수 마커 (`done_at`, `draft_url` 등) 누락 → REJECTED
-3. 안티패턴 (빈 응답 / 테스트 삭제 / `as any` / 인라인 disable / 도구 난사) → REJECTED
+1. `self_check` 5체크가 없거나 하나라도 false → REJECTED
+2. 필수 마커(`done_at`, `draft_url` 등) 누락 → REJECTED
+3. 안티패턴(빈 응답 / 테스트 삭제 / `as any` / 인라인 disable / 도구 난사) → REJECTED
 
-```
-<verifier-verdict>VERIFIED</verifier-verdict>
-```
+**안티-환각 floor**: `<verifier-verdict>` 태그를 못 찾으면 자동 REJECTED. "검증했다고 말했지만 결론이 없는" 무음 통과를 원천 차단한다.
 
-**안티-환각 floor**: 플러그인 정규식이 태그를 못 찾으면 자동 REJECTED. 무음 통과를 원천 차단.
+대가는 비용이다 — 단계당 1콜 추가, 전체의 15% 미만으로 추산한다 (§6.2).
 
-**비용**: 단계당 sonnet 1콜 추가. 전체의 15% 미만으로 추산. 비용 민감 환경은 향후 opt-out (§6 한계).
+### 4.6 완료와 승인을 분리한다
 
-### 4.6 Verification Pending
-
-"다 했다" 거짓 보고 방지를 위해 *완료* 와 *승인* 을 분리.
+"다 했다" 거짓 보고를 막는 핵심은 **완료 선언과 승인을 다른 마커로 두는 것**이다.
 
 | 마커 | 의미 |
 |---|---|
 | `done_at` | 작업 완료 시각 |
 | `verification_pending=true` | 완료 선언 후 검증 대기 |
-| `approved_by_user=true` | 사용자 검토 · 승인 |
+| `approved_by_user=true` | 사람이 검토·승인 |
 | `approved_at` | 승인 시각 |
 
-다음 substage 게이트는 `verification_pending=true` 면 차단. `approved_by_user=true` 로 해소. 타임스탬프는 stuck 감지 데이터로만 사용 (사람 리뷰 속도는 예측 불가하므로 시간 기반 차단은 안 함).
+다음 substage 게이트는 `verification_pending=true` 면 차단하고, `approved_by_user=true` 로만 풀린다. 타임스탬프는 stuck 감지용으로만 쓴다 — 사람의 리뷰 속도는 예측할 수 없으므로 시간 기반 자동 차단은 하지 않는다.
 
 ---
 
-## 5. CORRECT — 수정
+## 5. CORRECT — 틀렸을 때 회복한다
 
-### 5.1 네 패턴
+방지만으로는 부족하다. 회복 경로가 없으면 첫 실패에서 워크플로우가 멈춘다.
 
-방지만으로 부족하다. 회복 경로가 있어야 한다.
+### 5.1 네 가지 회복 패턴
 
 | 패턴 | 구현 |
 |---|---|
 | 감지 → 분석 → 복구 | 게이트 실패 → verifier findings → 재시도/롤백 |
-| 재시도 로직 | 모델 폴백 2-track |
+| 재시도 | 모델 폴백 2-track + stall 자동 재디스패치 |
 | Human-in-the-Loop | `.policy` 기반 조건부 승인 |
-| 가비지 컬렉션 | (미구현, §6) |
+| 무한루프 차단 | REJECTED streak + stall streak 상한 |
 
-**좋은 에러 메시지의 조건**: "무엇이 잘못됐고 어떻게 고칠지" 를 에이전트가 이해할 형태로 제공한다. 예: `guard-bash.sh` 출력은 차단 사유 + 우회 방법을 함께 안내.
+**좋은 에러 메시지의 조건**: "무엇이 잘못됐고 어떻게 고치는지" 를 **에이전트가 이해할 형태로** 준다. `guard-bash.sh` 가 차단 사유와 우회 방법을 함께 출력하는 이유다.
 
-### 5.2 모델 폴백 2-track
+### 5.2 모델 폴백을 왜 2-track 으로
 
-모델은 가끔 실패한다 (rate limit, 5xx, context 초과).
+모델은 가끔 실패한다 (rate limit, 5xx, context 초과). 상황에 따라 필요한 회복이 다르다.
 
-**Track A — in-session**
-- `dispatch_stage` 실패 → `get_fallback_model` 호출 → `dispatch_stage(model_override=...)` 로 새 격리 서브세션 재시도
-- 같은 대화 흐름 유지
+| 상황 | 트랙 | 방식 |
+|---|---|---|
+| 대화형 워크플로우 | **A (in-session)** | `get_fallback_model` → `dispatch_stage(model_override=…)` 로 새 격리 세션 재시도. 대화 흐름이 끊기지 않는다 |
+| 단발 CI 잡 | **B (out-of-session)** | `with-fallback.sh` 가 `opencode run` exit code 를 보고 다음 모델로 재실행 |
 
-**Track B — out-of-conversation**
-- `with-fallback.sh` 래퍼가 `opencode run` exit code 를 보고 재실행
-- `model-chain-cli.ts` 가 동일 체인 정의 JSON 노출
-- 세션이 새로 시작되므로 단발 CI 잡에 적합
+두 트랙 모두 `POLICIES` 를 단일 진실 소스로 참조한다. **SIGINT(130) 는 재시도하지 않는다** — 사용자가 명시적으로 취소한 것을 되살리면 안 된다.
 
-| 상황 | 트랙 |
-|---|---|
-| 대화형 워크플로우 | A 우선 + B 백업 |
-| 단발 CI 잡 | B |
+### 5.3 재시도는 깨끗한 컨텍스트에서 (Ralph Loop)
 
-두 트랙 모두 `POLICIES` 를 단일 진실 소스로 참조. SIGINT(130) 는 retry 안 함 (사용자 cancel 보호).
+같은 세션에서 계속 재시도하면 실패한 추론이 컨텍스트를 오염시켜 같은 실수를 반복한다. `dispatch_stage` 는 매번 **새 격리 서브세션**을 만들고, 이전 실패 요약만 넘긴다.
 
-### 5.3 깨끗한 컨텍스트 재시도 (Ralph Loop)
+여기서 제약이 하나 생긴다 — opencode SDK 는 세션 간 대화 이력 이관을 지원하지 않으므로, **state.json 이 유일한 컨텍스트 승계 수단**이다. state 마커를 성실히 기록하는 규약이 하드룰인 이유다.
 
-같은 세션에서 계속 재시도하면 실패한 추론이 컨텍스트를 오염시킨다. `dispatch_stage` 는 매번 별도 격리 서브세션을 spawn 하며, 재시도 시 이전 실패 요약만 새 세션에 전달한다.
+### 5.4 REJECTED 재작업 — 사유를 반드시 전달한다
 
-### 5.4 Verification Loop
+초기 구현에서는 verifier 가 REJECTED 를 내면 부장님이 그 사유를 다음 dispatch 프롬프트에 재주입해야 했다. 그런데 이 로직이 프롬프트 상의 pseudocode 로만 존재해 실제로는 전달되지 않았고, 서브에이전트가 **사유를 모른 채 같은 실수를 반복**하는 무한 루프가 관측됐다.
 
-완료 선언 후 검증 대기 마커로 완료·승인 분리. 검증 실패 시 단계 되돌리고 재시도.
+그래서 사유 전달을 코드로 옮겼다. verifier 가 REJECTED 시 사유를 state.json 에 기록하고, 다음 `dispatch_stage` 가 그 블록을 프롬프트에 자동 삽입한다. **사람의 지시가 아니라 배관이 사유를 나른다.**
 
-- `verification_pending=true` → 다음 게이트 차단
-- verifier `REJECTED` → `.stages.*.done=false` 되돌리고 재시도 (기본 cap 3회)
-- 3회 초과 → 사용자 에스컬레이션
+### 5.5 무한루프는 두 경로 모두 막는다
 
-### 5.5 Human-in-the-Loop
+재시도는 필요하지만 무한 재시도는 실패다. 두 경로가 대칭으로 막혀 있다.
 
-자동화가 클수록 사람 개입 지점을 신중히 골라야 한다. 모든 단계 물으면 UX 파탄, 한 군데도 안 물으면 위험.
+| 경로 | 신호 | 상한 |
+|---|---|---|
+| 같은 이유로 계속 REJECTED | 사유 hash 의 `same_reason_streak` | 5회 연속 → 중단·보고 |
+| 계속 hang → 재디스패치 | 누적 `hang_history` 길이 | 기본 5회 → 세션 생성 없이 에스컬레이션 |
 
-`.policy` 기반 분류로 major 는 커밋 직전 1곳에 개입 단일화. `change-report.md` 를 자동 생성해 사람이 읽고 승인/거부만 결정한다.
+stall 경로가 별도로 필요했던 이유: 호출 1회 안의 재시도 예산은 부장님이 툴을 다시 부르면 리셋된다. **호출 사이에 보존되는 신호**(state.json 의 `hang_history`)를 상한의 근거로 삼아야 실제로 막힌다.
+
+실측에서 stall 은 primary 와 fallback 양쪽에서 동일하게 발생했다 — **모델 교체는 stall 의 해법이 아니다.** 그래서 이 경로는 폴백이 아니라 사람에게 넘긴다.
+
+### 5.6 사람은 가장 위험한 한 지점에만 부른다
+
+자동화가 클수록 개입 지점을 신중히 골라야 한다. HITL 이 opt-in 된 경우 개입은 **커밋 직전 1곳**에 집중된다. `change-report.md` 를 자동 생성해 사람은 읽고 승인/거부만 결정한다.
 
 | 보고서 섹션 |
 |---|
-| 요구사항 요약 |
-| 변경 내용 |
-| 테스트 결과 |
-| 위험 · 영향 범위 |
-| 커밋 계획 |
+| 요구사항 요약 / 변경 내용 / 테스트 결과 / 위험·영향 범위 / 커밋 계획 |
 
-의사결정 비용을 가장 위험한 지점에 집중시킨다.
+의사결정 비용을 가장 비가역적인 지점에 몰아준다.
 
-### 5.6 비가역 작업 차단
+### 5.7 비가역 작업은 사후 복구가 없다
 
-사후 복구가 불가능하므로 사전 차단이 핵심.
+되돌릴 수 없으므로 사전 차단이 전부다.
 
 | 대상 | 메커니즘 |
 |---|---|
 | `rm -rf` | `guard-bash.sh` |
-| `git push --force` (마커 없이) | `guard-bash.sh` |
+| `git push --force` | `guard-bash.sh` (마커 없으면 차단) |
 | 기타 파괴 명령 | `APPROVED_DESTRUCTIVE` 마커 요구 |
 
-마커는 사용자가 명시적으로 부여한다. 마커는 1회용 — 사용 후 삭제 관례.
+마커는 **사용자가 명시적으로 만들고, 쓰고 나면 지우는 1회용**이다. 상시 존재하면 차단이 무의미해진다.
 
-### 5.7 Hashimoto 원칙 — 실패 → 규칙 누적
+### 5.8 Hashimoto 원칙 — 실패 1건 = 방지책 1줄
 
-> "실패 1건 = 방지책 1줄"
-
-에이전트가 같은 실수를 반복하면 명세에 1줄 추가. 시간이 지나며 가드레일이 강력해진다. 각 `agents/*.md` §"금지" 섹션에 누적.
+에이전트가 같은 실수를 반복하면 명세에 한 줄을 추가한다. 시간이 지날수록 가드레일이 촘촘해진다. 각 `agents/*.md` 의 §금지 섹션이 그 누적물이다.
 
 ---
 
-## 6. 한계 (정직한 명시)
+## 6. 한계 (정직하게)
 
-### 6.1 SessionStart 이벤트 부재
-opencode plugin API 가 SessionStart 를 노출하지 않아 wire-up 은 운영자 책임. 1.5+ 에서 이벤트 추가 시 플러그인이 직접 등록 예정.
-
-### 6.2 opencode plugin API 버전 의존
-1.4.17 기준으로 작성. hook payload 시그니처 변경 시 재검증 필요. `chat.params` 로 `sessionID → agent` 매핑을 우회 조달하는 이유도 hook input 에 agent ID 가 없기 때문.
-
-### 6.3 EDD Eval Baseline 미적용
-`smoke-test.mjs` 는 모델 정책 invariant + 오버라이드 순수성만 검사. 실제 단계 산출물 회귀 게이트는 부재. 향후 `eval/` 디렉토리와 CI 통합 검토.
-
-### 6.4 Verifier 비용 가산
-단계당 sonnet 1콜 추가 (전체 ~15%). 비용 민감 환경용 `verifier.enabled: false` 옵션은 계획 중.
-
-### 6.5 Compaction 정책 부재
-단계 간 명시적 컴팩션 미구현. opencode 런타임 자동 처리에 위임. `handoff_summary` 마커는 미구현.
-
-### 6.6 강격리 샌드박스 부재
-worktree 는 격리 단위지만 OS 수준 격리 아님. FireCracker μVM 등 강격리 미적용. 신뢰할 수 없는 코드 실행에는 별도 검토 필요.
-
-### 6.7 비용 상한 · 루프 탐지 미적용
-단계별 토큰/금액 상한 없음. 동일 파일 5+회 수정 같은 루프 탐지 없음. 향후 LoopDetectionMiddleware 이식.
-
-### 6.8 보안 검증 게이트 부재
-`npm audit` / Snyk / CodeQL 통합 미적용. 향후 test 또는 commit 단계에 게이트 추가.
+| # | 한계 | 현황 |
+|---|---|---|
+| 6.1 | **SessionStart 이벤트 부재** | opencode plugin API 가 노출하지 않아 `session-start.sh` wire-up 은 운영자 책임. 이벤트 추가 시 플러그인이 직접 등록 예정 |
+| 6.2 | **Verifier 비용 가산** | 단계당 1콜 추가 (~15%). 비용 민감 환경용 `verifier.enabled: false` 는 계획 단계 |
+| 6.3 | **Compaction 정책 부재** | 단계 간 명시적 컴팩션 미구현, 런타임 자동 처리에 위임. `handoff_summary` 마커 미구현 |
+| 6.4 | **강격리 샌드박스 부재** | worktree 는 격리 단위지만 OS 수준 격리가 아니다. 신뢰할 수 없는 코드 실행에는 별도 검토 필요 |
+| 6.5 | **EDD Eval Baseline 부재** | `smoke-test.mjs` 는 모델 정책 invariant 와 오버라이드 순수성만 본다. 단계 산출물 회귀 게이트는 없다 |
+| 6.6 | **비용 상한 · 루프 탐지 부재** | 단계별 토큰/금액 상한 없음. 동일 파일 5회+ 수정 같은 루프 탐지 없음 |
+| 6.7 | **보안 검증 게이트 부재** | `npm audit` / Snyk / CodeQL 미통합 |
+| 6.8 | **plugin API 버전 의존** | hook payload 시그니처 변경 시 재검증 필요. `chat.params` 로 `sessionID → agent` 매핑을 우회 조달하는 것도 hook input 에 agent ID 가 없기 때문 |
 
 ---
 
-## 7. 4기둥의 상호작용
+## 7. 4기둥은 순환한다
 
 ```
    Constrain ──────────▶ Inform
@@ -390,43 +353,39 @@ worktree 는 격리 단위지만 OS 수준 격리 아님. FireCracker μVM 등 �
    Correct ◀────────── Verify
 ```
 
-- **Constrain → Inform**: 권한 정보가 에이전트에게 전달된다.
-- **Inform → Verify**: 자가 검증에 필요한 체크리스트가 공급된다.
-- **Verify → Correct**: 검증 실패가 복구 트리거가 된다.
-- **Correct → Constrain**: 실패 패턴이 새 금지 규칙으로 누적된다.
+- **Constrain → Inform**: 무엇이 금지됐는지가 에이전트에게 전달되어야 우회 시도가 줄어든다.
+- **Inform → Verify**: 자가 검증에 필요한 체크리스트가 명세에서 나온다.
+- **Verify → Correct**: 검증 실패가 곧 복구 트리거다.
+- **Correct → Constrain**: 반복된 실패 패턴이 새 금지 규칙으로 굳는다.
 
-### Augment 3-Layer 매핑
+한 바퀴 돌 때마다 가드레일이 조금씩 두꺼워지는 구조다.
+
+### Augment 3-Layer 대응
 
 | Layer | 시점 | 구현 |
 |---|---|---|
-| Constraint Harness | 생성 전 | frontmatter permission + hook |
+| Constraint Harness | 생성 전 | frontmatter permission + 훅 |
 | Feedback Loops | 생성 직후 | `tool.execute.after` → `sync-state.sh` |
 | Quality Gates | 머지 전 | `gates/verify.sh` + 커버리지 게이트 |
 
 ---
 
-## 8. 향후 보강 우선순위
+## 8. 다음 보강 우선순위
 
 | 우선 | 작업 | 기둥 |
 |---|---|---|
 | 1 | EDD Eval Baseline + regression gate | Verify |
 | 2 | Compaction 정책 + `handoff_summary` 마커 | Inform |
-| 3 | Cost Cap + LoopDetectionMiddleware | Constrain |
-| 4 | events.ndjson 기반 메트릭 집계 | Verify |
+| 3 | Cost Cap + Loop Detection | Constrain |
+| 4 | `events.ndjson` 기반 메트릭 집계 | Verify |
 | 5 | 보안 검증 게이트 (npm audit / Snyk) | Verify |
 | 6 | Verifier opt-out 토글 | Correct (비용) |
-| 7 | 단계별 timeout 차등 | Constrain |
-| 8 | 강격리 샌드박스 (μVM) 검토 | Constrain |
+| 7 | 강격리 샌드박스 (μVM) 검토 | Constrain |
 
 ---
 
 ## 9. 참고
 
-- **본 프로젝트**
-  - [ARCHITECTURE.md](./ARCHITECTURE.md) — 어떻게 동작하는가
-  - [AGENTS.md](./AGENTS.md) — 개발 규약
-  - `agents/*.md`, `stages/*.md` — 명세
-- **외부**
-  - Anthropic — Writing Tools for Agents / 3-Agent 패턴
-  - Hamel Husain — Your AI Product Needs Evals
-  - Mitchell Hashimoto (Ghostty) — "실패 1 = 방지 1"
+**이 저장소** — [ARCHITECTURE.md](./ARCHITECTURE.md) (어떻게 동작하는가) · [README.md](./README.md) (어떻게 쓰는가) · [AGENTS.md](./AGENTS.md) (개발 규약) · `agents/*.md`, `stages/*.md` (실제 명세)
+
+**외부** — Anthropic *Writing Tools for Agents* / 3-Agent 패턴 · Hamel Husain *Your AI Product Needs Evals* · Mitchell Hashimoto (Ghostty) "실패 1 = 방지 1"

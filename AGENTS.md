@@ -54,19 +54,19 @@
   - `logger.error(...)`: 즉시 사용자 개입 필요 또는 워크플로우 차단 이벤트.
 - 사용자 로깅 레벨 설정: `makdoong2-team.json .logging.level`. 기본 `error`. 개발·디버깅 시 `debug` 로 승격해서 이벤트 흐름을 관찰한다.
 - **파일 로그는 절대 truncate 하지 않는다 (hardrule)**. `mode="file"` 은 항상 append 하고 `max_bytes` 초과 시에만 `<path>.1` 로 회전한다. 한 호스트의 opencode 프로세스 전부가 같은 파일을 공유하므로 truncate 는 다른 프로세스의 로그를 삭제한다. 세션 구분은 `[pid=N]` 태그로 한다.
-- 로깅 아키텍처 상세: ARCHITECTURE.md §14 참조.
+- 로깅 아키텍처 상세: ARCHITECTURE.md §11 참조.
 
 ### state.json 조작 (hardrule)
 - state.json 은 오직 `scripts/state.sh` (get/set/init/issue/root/append/update/migrate) 를 통해서만 조작한다.
 - `python -c "... open('state.json', 'w') ..."`, `jq ... > state.json`, `sed -i state.json` 등 인터프리터 서브프로세스나 리다이렉트 우회는 `tool.execute.before` 훅이 물리적으로 차단한다 (state.json 경로가 명령에 포함되고 `state.sh` 호출이 아니면 exit).
 - 스키마는 항상 hierarchical: `.stages."<PHASE>".substages."<SUBSTAGE>".<field>`. flat 표기(`"<PHASE>.<SUBSTAGE>"`) 금지. `.policy.auto_approve.*` 만 예외적으로 flat 유지.
-- 상세: ARCHITECTURE.md §15.2 참조.
+- 상세: ARCHITECTURE.md §5.2 참조.
 
 ### 파일 편집 (sealed sub-agent + team-leader)
 - `makdoong2-team-leader` 는 Write/Edit/Patch/Multiedit 툴 부재 → 직접 파일 편집·생성 불가. 모든 파일 조작은 `dispatch_stage` 로 위임.
 - **team-leader 는 git 명령(`commit` / `push` / `add` / `rm` / `worktree`) permission 이 deny** → 3_delivery.* 는 publisher 가 worktree 에서 직접 실행. team-leader 는 오케스트레이션만 수행.
 - Sealed sub-agent (`planner` / `analyzer` / `engineer` / `publisher` / `verifier`) 는 outer-world 위임 툴(`call_omo_agent`, `delegate_task`, `background_task`, `task_*`) 호출 금지. `tool.execute.before` 훅이 런타임 차단.
-- 상세: ARCHITECTURE.md §15.5, §15.6 참조.
+- 상세: ARCHITECTURE.md §4.2 참조.
 
 ### REJECTED verdict 재작업 flow (dispatch_verifier + dispatch_stage 자동 연계)
 - `dispatch_verifier` 가 REJECTED 반환 시 verdict raw 텍스트를 state.json 에 자동 기록: `.stages."<PHASE>".substages."<SUBSTAGE>".last_verdict_reason` / `last_verdict_reason_hash` / `last_verdict_at` / `same_reason_streak` / `rejected_count`.
@@ -80,14 +80,14 @@
 - **`hang_history` 의 read / append / reset 은 모두 `.cwd(args.worktree)` 로 실행한다.** `state.sh root()` 가 cwd 의 git toplevel 을 쓰므로 하나라도 cwd 를 누락하면 서로 다른 state.json 을 읽고 써서 상한 검사가 무력화된다.
 - `escalate: true` 수신 시 재디스패치·모델 교체·stage 건너뛰기 모두 금지. 사용자 에스컬레이션만 허용 (모델 교체로 해소되지 않음이 실측 확인됨).
 - 신규 helper 를 `src/opencode-plugin.ts` 에 **export 하지 않는다**. opencode 로더가 모든 named export 를 plugin factory 로 호출하므로 별도 파일(`src/*.ts`)에 두고 import 한다. `test/plugin-exports-shape.test.mjs` 가 export 집합을 고정한다.
-- 상세: ARCHITECTURE.md §18.5 참조.
+- 상세: ARCHITECTURE.md §10.2 참조.
 - VERIFIED 판정 시 위 필드들이 자동 초기화 (`null` / `0`).
-- 상세: ARCHITECTURE.md §18 참조.
+- 상세: ARCHITECTURE.md §10.1 참조.
 
 ### Worktree 규칙
 - `2_implementation.dev` 진입 시 worktree 는 **메인 repo 의 형제 디렉토리**에 자동 생성된다. 서브디렉토리 배치 금지 (`.gitignore` 누출).
 - 경로 관례: `<parentDir>/<repoName>-<issue>`, 브랜치명 `feature/<issue>`.
-- 상세: ARCHITECTURE.md §15.4 참조.
+- 상세: ARCHITECTURE.md §5.4 참조.
 
 ### 게이트 3중 안전망 (entry / post / verifier — hardrule)
 - **entry gate** (`gates/stage<N>-*-verify.sh`): substage 진입 "전제조건" 만 검사. 완료 조건은 넣지 않는다.
@@ -115,11 +115,11 @@
 - pollSubSession / dispatch_stage 로직 수정 시 특히 `test/poll-sub-session.test.mjs`, `test/dispatch-stage-redispatch.test.mjs` 확장 필수.
 
 ## 릴리즈 프로세스
-- `npm run release:patch|minor|major` — 2회 사용자 승인 게이트를 거쳐 공개 npm registry 배포. 상세: ARCHITECTURE.md §13.7.
+- `npm run release:patch|minor|major` — 2회 사용자 승인 게이트를 거쳐 공개 npm registry 배포. 상세: ARCHITECTURE.md §12.5.
 - `--yes` 플래그는 CI 전용. 대화형에서 사용 금지.
 - `.husky/pre-push` 훅이 `package.json` version 변경 감지 시 자동 publish (동일 승인 게이트).
 
 ## 진단 및 문제 해결
 - `npx makdoong2-team doctor` — 설정 상태 검증 (credential, phantom state key, tmux 버전, 로깅 설정).
 - 서브세션 hang / gone false-positive 관측 시 우선 `logging.level=debug` 로 승격해 `[pollSubSession] GONE_ADMIT`/`GONE_ADMIT_RESET`/`SESSION_GONE` 로그를 수집.
-- 상세 진단 & 복구 절차: ARCHITECTURE.md §16 (pollSubSession), §17 (tmux orphan).
+- 상세 진단 & 복구 절차: ARCHITECTURE.md §8 (서브세션 생존 감지), §9 (tmux pane).
