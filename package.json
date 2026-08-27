@@ -33,6 +33,7 @@
     "dist",
     "src/hooks",
     "agents",
+    "command",
     "gates",
     "stages",
     "references",

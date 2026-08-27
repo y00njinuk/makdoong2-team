@@ -56,6 +56,7 @@ import { injectAllSecrets } from "./mcp-secret-injector.ts";
 import { pollSubSession as pollSubSessionCore, pollOutcomeToLegacy, type PollOutcome } from "./poll-sub-session.ts";
 import { logger } from "./logger.ts";
 import { redactAndTruncate } from "./redact-secrets.ts";
+import { issueReporterSkillLoadViolation, ISSUE_REPORTER_AGENT } from "./issue-reporter-guard.ts";
 
 // All runtime paths come from makdoong2-team.json (paths.* overrides) or are
 // derived from the opencode config dir. No MAKDOONG2 environment variables.
@@ -975,6 +976,10 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     // already omits Task (L1), but sealed workflow is defence in depth — a worker
     // missing here would be caught by nothing at runtime (L2).
     "makdoong2-researcher",
+    // User-only issue reporter. 워크플로우에 참여하지 않지만 outer-world 위임은
+    // 동일하게 금지 — 수집·마스킹·등록 전 과정을 자기 세션에서 완결해야 하며,
+    // 위임하면 마스킹·승인 게이트가 위임처에서 우회될 수 있다.
+    ISSUE_REPORTER_AGENT,
   ]);
 
   // 미래의 oh-my-openagent 위임 툴을 조기 발견하기 위한 이름 패턴.
@@ -1141,6 +1146,21 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
           `[makdoong2-team hook] sealed sub-agent "${agent}" called delegation-like tool "${input.tool}" not in blocklist. ` +
           `Consider adding to OUTER_WORLD_TOOLS if this is a new oh-my-openagent delegation tool.`
         );
+      }
+
+      // ── issue-reporter 스킬 사용자-전용 트리거 강제 ──
+      // makdoong2-issue-reporter 스킬은 사용자의 /makdoong2-issue-reporter
+      // 커맨드(전용 full-permission 에이전트로 라우팅)로만 실행된다. 다른
+      // 에이전트의 skill() 자율 로드는 트리거 정책 위반 — 1차 방어는 SKILL.md
+      // description, 이 블록이 2차(런타임) 방어다.
+      if (toolLower === "skill") {
+        const violation = issueReporterSkillLoadViolation(agent, (output as { args?: unknown }).args);
+        if (violation) {
+          logger.error(
+            `[makdoong2-team hook] BLOCKED: agent "${agent}" attempted autonomous load of user-only skill makdoong2-issue-reporter (sessionID="${sessionID}")`
+          );
+          throw new Error(violation);
+        }
       }
 
       // ── skill_mcp lazy-load 사전 힌트 ──

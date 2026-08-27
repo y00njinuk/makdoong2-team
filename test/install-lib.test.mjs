@@ -39,6 +39,8 @@ describe("install-lib", () => {
       assert.ok(!existsSync(join(configDir, "skills/makdoong2-team")), "makdoong2-team skill NOT deployed (workflow is agent-only)");
       assert.ok(existsSync(join(configDir, "skills/jira-research/SKILL.md")), "research skill deployed to configDir");
       assert.ok(existsSync(join(configDir, "skills/_lib/load-secret.sh")), "_lib helper deployed to configDir");
+      assert.ok(existsSync(join(configDir, "skills/makdoong2-issue-reporter/SKILL.md")), "issue-reporter utility skill deployed to configDir");
+      assert.ok(existsSync(join(configDir, "command/makdoong2-issue-reporter.md")), "issue-reporter command deployed to configDir");
       
       // Exist in pkgRoot (not deployed, stay there): gates, stages, scripts, plugin
       assert.ok(existsSync(join(PKG_ROOT, "gates")), "gates exist in pkgRoot");

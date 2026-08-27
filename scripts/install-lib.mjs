@@ -93,6 +93,11 @@ const TOOL_SEARCH_PLUGIN_PREFIX = "opencode-tool-search";
 // and we need the list to remove them without touching unrelated user scripts.
 const UTIL_SCRIPTS = ["state.sh", "rollback-commits.sh", "wt-sync-ignored.sh", "log-event.sh", "config.sh", "model-policy.mjs"];
 const RESEARCH_SKILLS = ["jira-research", "confluence-research", "bitbucket-research", "github-oss-research", "bamboo-ci"];
+// User-invoked utility skills — workflow 밖의 사용자 전용 도구. issue reporter 는
+// /makdoong2-issue-reporter 커맨드(command/ 배포분)로만 트리거되고, 같은 이름의
+// config command 가 opencode 의 skill-derived command 를 덮어써 전용
+// full-permission 에이전트로 라우팅된다.
+const UTILITY_SKILLS = ["makdoong2-issue-reporter"];
 
 // Stale config-dir artifacts left behind by pre-refactor installs. Removed
 // (with backup) at the start of install() so a re-run cleanly migrates users
@@ -315,8 +320,8 @@ export function install(opts) {
   // Create directory structure — only agents/ and research skills/ are deployed.
   // All other runtime assets (gates, scripts, stages, references) live in the
   // npm module and are referenced via resolvePaths() in src/config.ts.
-  const skillDirs = RESEARCH_SKILLS.map((s) => `skills/${s}`);
-  for (const d of ["agents", ...skillDirs]) {
+  const skillDirs = [...RESEARCH_SKILLS, ...UTILITY_SKILLS].map((s) => `skills/${s}`);
+  for (const d of ["agents", "command", ...skillDirs]) {
     mkdirSync(join(configDir, d), { recursive: true });
   }
 
@@ -352,6 +357,35 @@ export function install(opts) {
     }
   }
   ok("research skills (jira/confluence/bitbucket/github-oss/bamboo)");
+
+  // 2b) Utility skills — user-invoked helpers outside the workflow.
+  for (const skill of UTILITY_SKILLS) {
+    const src = join(pkgRoot, "skills", skill);
+    if (!existsSync(src)) continue;
+    const dst = join(configDir, "skills", skill);
+    mkdirSync(dst, { recursive: true });
+    for (const name of readdirSync(src)) {
+      cpSync(join(src, name), join(dst, name));
+      if (name.endsWith(".sh")) chmodSync(join(dst, name), 0o755);
+    }
+  }
+  ok("utility skills (makdoong2-issue-reporter)");
+
+  // 2c) User commands — /makdoong2-issue-reporter 진입점. opencode 는 스킬을
+  // 자동으로 같은 이름의 커맨드로 노출하지만 그 커맨드에는 agent 필드가 없어
+  // 현재 에이전트(권한 제한된 team-leader 등)로 실행된다. cfg.command 가
+  // skill-derived command 보다 우선하므로, 같은 이름의 command 파일을 배포해
+  // 전용 full-permission 에이전트로 라우팅한다.
+  const commandSrc = join(pkgRoot, "command");
+  if (existsSync(commandSrc)) {
+    const commandDst = join(configDir, "command");
+    mkdirSync(commandDst, { recursive: true });
+    for (const name of readdirSync(commandSrc)) {
+      if (!name.endsWith(".md")) continue;
+      cpSync(join(commandSrc, name), join(commandDst, name));
+    }
+    ok("user commands (/makdoong2-issue-reporter)");
+  }
 
   // 3) Config file — seed from default ONLY if absent (never clobber user edits unless --force)
   const cfgPath = join(configDir, "makdoong2-team.json");
@@ -839,8 +873,10 @@ function removeOpencodeCache(pkgRoot, { ok, skip, warn }) {
  *
  * What is removed (idempotent — absent targets are silently skipped):
  *   1. Agent definitions: agents/makdoong2-*.md
- *   2. Research skill directories: skills/jira-research, confluence-research, bitbucket-research,
- *      and skills/_lib/ (only when it contains solely our files)
+ *   2. Skill directories: research skills (skills/jira-research, confluence-research,
+ *      bitbucket-research, ...), utility skills (skills/makdoong2-issue-reporter),
+ *      skills/_lib/ (only when it contains solely our files), and deployed
+ *      command files (command/makdoong2-*.md)
  *   3. opencode.json: plugin ref, tools keys, alwaysLoad entries (when
  *      opencode-tool-search is configured), pkgRoot/** external_directory entry
  *   4. opencode plugin cache symlinks seeded by seedOpencodeCache()
@@ -888,10 +924,10 @@ export function uninstall(opts) {
     skip("agents/: directory not found");
   }
 
-  // 2) Research skill directories
-  info("Removing research skills...");
+  // 2) Skill directories (research + utility)
+  info("Removing skills...");
   let skillsRemoved = 0;
-  for (const skill of RESEARCH_SKILLS) {
+  for (const skill of [...RESEARCH_SKILLS, ...UTILITY_SKILLS]) {
     const skillDir = join(configDir, "skills", skill);
     if (!existsSync(skillDir)) continue;
     rmSync(skillDir, { recursive: true, force: true });
@@ -909,8 +945,24 @@ export function uninstall(opts) {
       warn("skills/_lib/ contains unrecognised files — leaving in place");
     }
   }
-  if (skillsRemoved > 0) ok(`${skillsRemoved} research skill director(y/ies) removed`);
+  if (skillsRemoved > 0) ok(`${skillsRemoved} skill director(y/ies) removed`);
   else                   skip("skills/: no makdoong2-team skill directories found");
+
+  // 2b) Deployed command files (only ours — makdoong2-*.md)
+  info("Removing command files...");
+  const cmdDir = join(configDir, "command");
+  if (existsSync(cmdDir)) {
+    let cmdRemoved = 0;
+    for (const name of readdirSync(cmdDir)) {
+      if (!name.startsWith("makdoong2-") || !name.endsWith(".md")) continue;
+      rmSync(join(cmdDir, name), { force: true });
+      cmdRemoved++;
+    }
+    if (cmdRemoved > 0) ok(`${cmdRemoved} command file(s) removed from command/`);
+    else               skip("command/: no makdoong2-*.md files found");
+  } else {
+    skip("command/: directory not found");
+  }
 
   // 3) opencode.json
   info("Patching opencode.json...");

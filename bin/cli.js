@@ -122,7 +122,7 @@ function doDoctor(flags) {
   }
 
    // Config dir checks (agents & skills)
-   const configDirChecks = ["agents", "skills/jira-research", "skills/confluence-research", "skills/bitbucket-research", "skills/github-oss-research", "skills/bamboo-ci"];
+   const configDirChecks = ["agents", "skills/jira-research", "skills/confluence-research", "skills/bitbucket-research", "skills/github-oss-research", "skills/bamboo-ci", "skills/makdoong2-issue-reporter", "command/makdoong2-issue-reporter.md"];
    for (const d of configDirChecks) {
      check(existsSync(join(DEST, d)), `${d}/ in config dir`, `${d}/ missing in config dir (run: npx makdoong2-team install)`);
    }

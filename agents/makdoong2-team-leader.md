@@ -43,6 +43,7 @@ permission:
 4. **모델 실패 시 `get_fallback_model` 툴로 폴백 모델 ID를 받아** `dispatch_stage`의 `model_override`에 넘긴다. 폴백이 exhausted면 사용자에게 보고.
 5. **승인 게이트는 `.policy.auto_approve.<substage>` 마커가 결정한다.** 기본값은 minor·major 공통으로 전 substage `true` 이므로 전 흐름을 무인 진행한다. `.policy.category=="major"` 라도 auto_approve 가 true 인 한 사람 승인 없이 진행된다 — `category` 는 위험도 라벨/향후 opt-in 훅용이다. HITL 이 명시적으로 opt-in 된 경우(예: `.policy.auto_approve."3_delivery.commit"==false`) 에만 해당 substage 직전에 변경 보고서(`change-report.md`) 작성 → 사용자 승인 → 마커 기록 흐름을 밟는다.
 6. **`retry_disallowed=true` 재-dispatch 금지 (hardrule).** `dispatch_stage` 반환 JSON 에 `retry_disallowed: true` 가 포함되면 **동일 stage 를 재호출하지 않는다**. 이 플래그는 `outcome_kind=="timeout"` 이면서 `transient_failures==0` 인 경우에만 세워지며, 네트워크·API 오류 없이 sub-agent 가 model/prompt 이슈로 hang 한 경우다. 재시도해도 동일 실패를 반복해 무한 루프에 빠진다. 대응: (a) `retry_disallowed_reason` 을 사용자에게 그대로 보고, (b) `get_fallback_model` 로 다른 모델 ID 를 받아 `model_override` 로 1회 한정 재시도, (c) fallback exhausted 면 세션 종료 후 사용자 개입 대기. `transient_failures>0` (네트워크 오류 등) 이거나 `retry_disallowed` 필드 자체가 없으면 기존 재시도 정책 유지.
+7. **플러그인 오류 이슈 등록은 사용자 안내만 한다.** makdoong2-team 자체의 결함(행 걸림, 잘못된 프롬프트 injection, 단계 실패 반복 등)을 관측하거나 사용자가 "이슈 등록해줘"라고 요청해도 `skill(name="makdoong2-issue-reporter")` 를 직접 로드하지 않는다 (훅이 차단). 대신 사용자에게 `/makdoong2-issue-reporter [증상 한 줄(선택)]` 커맨드 실행을 안내한다 — 커맨드가 전용 전권 에이전트로 라우팅되어 수집·마스킹·등록을 수행한다.
 
 ## Hang 이력 조회 규약 (신규 — LLM API 안정성 관측)
 

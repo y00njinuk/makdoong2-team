@@ -87,6 +87,7 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 | `src/skill-mcp-registry.ts` | SKILL.md frontmatter 스캔 → `mcp_name → skill_name` 룩업 |
 | `src/mcp-secret-injector.ts` | MCP 초기화 전 secret in-place 주입 |
 | `src/verdict-hash.ts` | verdict 사유 hash (streak 판정용) |
+| `src/issue-reporter-guard.ts` | issue-reporter 스킬의 사용자-전용 트리거 판정 (§4.6) |
 | `src/redact-secrets.ts` | 로그·출력 시크릿 마스킹 |
 | `src/session-index.ts` | 세션 ↔ 이슈/스테이지 인덱스 |
 | `src/logger.ts` | level 임계값 + stdin/file 모드 (§11) |
@@ -114,7 +115,8 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 
 | 파일 | 책임 |
 |---|---|
-| `agents/*.md` | 7개 에이전트 frontmatter + 시스템 프롬프트 |
+| `agents/*.md` | 8개 에이전트 frontmatter + 시스템 프롬프트 (워크플로우 7 + issue-reporter) |
+| `command/*.md` | 사용자 커맨드 (`/makdoong2-issue-reporter`) — configDir `command/` 로 배포 |
 | `stages/*.md` | substage 명세 (진입 게이트, 절차, self_check) |
 | `scripts/model-policy.mjs` | `model-fallback-policy.ts` 의 JS 미러 (CLI·smoke-test 공유) |
 | `scripts/install-lib.mjs` | 배포 로직 (`bin/cli.js` + `postinstall.mjs` 공유) |
@@ -229,13 +231,14 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 | `tool.execute.before` | 툴 실행 전 | 부모 세션 캐치 · sealed workflow · leader 하드룰 · `guard-bash.sh` |
 | `tool.execute.after` | 툴 실행 후 | `sync-state.sh` 전달 · skill_mcp 오류 보정 |
 
-### 4.2 `tool.execute.before` 가 하는 5가지
+### 4.2 `tool.execute.before` 가 하는 6가지
 
 1. `dispatch_*` 호출 시 호출자 세션을 `parentSessionByCallID` (callID 별 Map, 스택 폴백) 에 기록 — 자식 세션의 `parentID` 로 전달해 orphan 을 막는다. callID 별로 분리해 두므로 **같은 부모에서 동시 dispatch 해도 parentID 가 섞이지 않는다** (`dispatch_research` 의 병렬 fan-out 이 이 성질에 의존한다)
-2. **Sealed workflow** — sealed sub-agent (planner / analyzer / engineer / publisher / verifier) 가 outer-world 위임 툴 (`call_omo_agent`, `delegate_task`, `background_task`, `task_create|update|get|list`) 호출 시 throw. 알려지지 않은 위임성 이름(`delegate*` / `spawn*` / `background_*`)은 경고 로그
+2. **Sealed workflow** — sealed sub-agent (planner / analyzer / engineer / publisher / verifier / researcher / issue-reporter) 가 outer-world 위임 툴 (`call_omo_agent`, `delegate_task`, `background_task`, `task_create|update|get|list`) 호출 시 throw. 알려지지 않은 위임성 이름(`delegate*` / `spawn*` / `background_*`)은 경고 로그
 3. **Leader 하드룰 1** — 부장님의 `write`/`edit`/`patch`/`multiedit` 호출 시 throw
 4. **Leader 하드룰 2** — 부장님 bash 의 파일 쓰기 리다이렉트 (`>`, `>>`, `tee`, `sed -i`, `python -c open()`, `node -e writeFileSync` 등) 차단. **허용 예외는 `state.sh set` 뿐**
-5. `bash` 툴이면 `guard-bash.sh` 실행 — `rm -rf` / `git push --force` 등은 `APPROVED_DESTRUCTIVE` 마커 없으면 exit 2, `git push` 는 `stage7-pr-verify.sh` 게이트 통과 요구
+5. **Issue-reporter 트리거 강제** — `skill(name="makdoong2-issue-reporter")` 를 전용 에이전트 외의 식별된 에이전트가 호출하면 throw (§4.6)
+6. `bash` 툴이면 `guard-bash.sh` 실행 — `rm -rf` / `git push --force` 등은 `APPROVED_DESTRUCTIVE` 마커 없으면 exit 2, `git push` 는 `stage7-pr-verify.sh` 게이트 통과 요구
 
 **state.json 조작 하드룰**: state.json 은 오직 `state.sh` 로만 조작한다. `jq > state.json`, `sed -i state.json`, `python -c open()` 같은 우회는 이 훅이 즉시 차단한다.
 
@@ -258,6 +261,26 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 ### 4.5 SessionStart (외부 wire-up)
 
 opencode plugin API 가 SessionStart 이벤트를 노출하지 않으므로, `src/hooks/session-start.sh` 는 Claude Code `settings.json` 의 `hooks.SessionStart` 로 등록하거나 부장님 프롬프트 첫 줄에서 호출한다. state 진행 현황 + `verification_pending` 목록 + `events.ndjson` tail 3개를 stdout 으로 재주입한다.
+
+### 4.6 issue-reporter — 사용자-전용 full-permission 스킬
+
+makdoong2-team 자체의 결함을 GitHub 이슈(y00njinuk/makdoong2-team)로 등록하는 트러블슈팅 도구. **skill + agent + command 3종 세트**로 패키징되어 있고, 셋의 이름이 모두 `makdoong2-issue-reporter` 로 일치해야 동작한다.
+
+| 구성요소 | 파일 | 역할 |
+|---|---|---|
+| skill | `skills/makdoong2-issue-reporter/SKILL.md` | 수집 → 이상 지점 포착 → 마스킹 → 중복 확인 → 질의 → 이슈 생성 절차 정의 |
+| agent | `agents/makdoong2-issue-reporter.md` | `mode: all` + bash/write 전권. 임시 페이로드 파일 생성·curl 을 직접 수행 |
+| command | `command/makdoong2-issue-reporter.md` | 사용자 진입점 `/makdoong2-issue-reporter`. `agent:` 필드로 전용 에이전트에 라우팅, `subtask: false` |
+
+**설계 포인트 3가지**:
+
+1. **권한 상승은 에이전트 교체로 달성한다.** team-leader 의 파일 쓰기·git 제한(frontmatter L1 + 훅 L2)은 그대로 두고, 커맨드가 전권 에이전트로 라우팅한다. `mode: all` 에이전트 + `subtask: false` 조합은 opencode 가 **인라인 실행**하므로 직전 대화 컨텍스트를 그대로 보고, 마스킹 최종 승인 같은 사용자 문답도 같은 세션에서 이어진다 (subtask 로 격리하면 둘 다 불가능).
+2. **command 이름 == skill 이름 (hardrule).** opencode 는 스킬을 자동으로 같은 이름의 커맨드로 노출하는데, 그 커맨드에는 `agent` 필드가 없어 현재 에이전트(권한 제한된 team-leader)로 실행된다. cfg.command 가 먼저 채워지고 같은 이름의 skill-derived command 는 건너뛰어지므로, 같은 이름의 command 파일을 배포해 이를 덮어쓴다. 이름이 어긋나면 권한 없는 진입점이 살아남는다 — `test/issue-reporter-guard.test.mjs` 가 일치를 강제한다.
+3. **유일한 트리거는 사용자 직접 호출.** 에이전트가 실패를 관측했다고 자율적으로 이슈를 등록하지 않는다. 1차 방어는 SKILL.md description 의 명시, 2차 방어는 `tool.execute.before` 훅 — 전용 에이전트 외의 식별된 에이전트가 `skill()` 로 로드하면 throw 하고 `/makdoong2-issue-reporter` 실행 안내를 반환한다 (`src/issue-reporter-guard.ts`). agent 미상 세션은 outer-world 가드와 동일하게 passthrough.
+
+issue-reporter 는 SEALED_SUBAGENTS 에도 등록되어 있다 — 워크플로우에 참여하지 않지만, outer-world 로 위임하면 마스킹·사용자 승인 게이트가 위임처에서 우회될 수 있기 때문이다. state.json 은 읽기(`state.sh get`)만 허용한다.
+
+관련: `src/issue-reporter-guard.ts`, `test/issue-reporter-guard.test.mjs`.
 
 ---
 
@@ -666,10 +689,11 @@ tmux list-panes -aF '#{pane_id}\t#{@mdn2_session}' | grep ses_XXX
 ├─ opencode.json               # plugin 배열 + tools 활성화 (CLI 가 패치)
 ├─ makdoong2-team.json         # 단일 설정 파일 (없을 때만 seed)
 ├─ agents/makdoong2-*.md
-└─ skills/{jira,confluence,bitbucket,github-oss}-research, bamboo-ci/
+├─ command/makdoong2-issue-reporter.md   # /makdoong2-issue-reporter 진입점 (§4.6)
+└─ skills/{jira,confluence,bitbucket,github-oss}-research, bamboo-ci/, makdoong2-issue-reporter/
 ```
 
-`install` 이 복사하는 것은 **agents / 리서치 skill / 최초 1회 설정 파일** 뿐이다. `dist`, `gates`, `scripts`, `stages`, `references` 는 npm 모듈 안에 남고 `src/config.ts` 의 `resolvePaths()` 가 경로를 해결한다.
+`install` 이 복사하는 것은 **agents / skill / command / 최초 1회 설정 파일** 뿐이다. `dist`, `gates`, `scripts`, `stages`, `references` 는 npm 모듈 안에 남고 `src/config.ts` 의 `resolvePaths()` 가 경로를 해결한다.
 
 리서치 skill 은 SKILL.md 와 `run-*.sh`, 그리고 skill 간 공유 helper `skills/_lib/load-secret.sh` 가 함께 복사된다.
 

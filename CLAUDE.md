@@ -69,6 +69,11 @@
 - **신규 서브에이전트를 추가하면 `SEALED_SUBAGENTS` 에도 반드시 등록한다.** 프론트매터에서 Task 툴을 빼는 것은 1차 방어일 뿐이고, 이 집합에 빠지면 런타임 2차 방어가 그 에이전트만 통과시킨다.
 - 상세: ARCHITECTURE.md §4.2 참조.
 
+### issue-reporter 스킬 (사용자-전용 트리거 — hardrule)
+- `makdoong2-issue-reporter` 는 **skill + agent + command 3종 세트**다. skill 이름 == command 파일명 == agent 이름이 모두 일치해야 command 가 opencode 의 skill-derived command 를 덮어써 전권(full-permission) 에이전트로 라우팅된다 (`test/issue-reporter-guard.test.mjs` 가 강제).
+- **유일한 트리거는 사용자의 `/makdoong2-issue-reporter` 직접 호출.** team-leader 포함 다른 에이전트가 `skill()` 로 자율 로드하면 `tool.execute.before` 훅이 차단한다. 실패를 관측한 에이전트는 사용자에게 커맨드 실행을 안내만 한다.
+- 상세: ARCHITECTURE.md §4.6 참조.
+
 ### 다출처 병렬 조사 (dispatch_research)
 - `1_planning.requirements` 의 교차 조사는 `dispatch_research` 툴 1회 호출로 소스별 세션을 병렬 spawn 한다. planner 가 `skill_mcp` 를 순차 호출하지 않는다.
 - 병렬화를 프롬프트가 아니라 플러그인 코드에 둔 이유: "병렬로 호출하라" 는 지시는 모델이 순차로 불러도 감지할 방법이 없다.
