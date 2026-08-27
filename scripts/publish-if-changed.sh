@@ -36,24 +36,16 @@ AUTO_YES="${AUTO_YES:-0}"
 HOOK_STDIN="${HOOK_STDIN:-0}"
 SKIP_PUBLISH="${SKIP_PUBLISH:-0}"
 
-confirm() {
-  local message="$1"
-  if [ "$AUTO_YES" = "1" ]; then
-    info "[AUTO_YES=1] 자동 승인: $message"
-    return 0
-  fi
-  if [ ! -t 0 ] && [ ! -e /dev/tty ]; then
-    err "TTY 없음 - 대화형 승인 불가. AUTO_YES=1 명시 필요."
-    return 1
-  fi
-  local reply
-  prompt "$message [y/N]: "
-  read -r reply </dev/tty
-  case "$reply" in
-    [yY]|[yY][eE][sS]) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+# confirm() 은 lib/confirm.sh 공용 구현을 쓴다 (release.sh 와 동일).
+#
+# 주의: 이 스크립트는 pre-push 훅으로 실행되며 stdin 에 ref 정보가 들어온다.
+# STEP 1 의 while 루프가 stdin 을 EOF 까지 읽으므로, 훅 경로에서 confirm 은
+# 항상 2("물어볼 수 없음")를 반환한다. 이는 의도된 동작이다 — 훅이 사람을
+# 붙잡고 묻는 대신 push 를 막고 안내한다. 배포는 release.sh 로 하거나
+# CI 에서는 AUTO_YES=1 을 명시한다.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/confirm.sh"
+
+CONFIRM_AUTO_YES="${AUTO_YES}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -150,7 +142,20 @@ log "=========================================="
 info "이 push에는 다음 버전 변경이 포함되어 있습니다:"
 info "  ${old_version:-<없음>} → ${BOLD}${new_version}${RESET}"
 
-if ! confirm "${BOLD}${YELLOW}이 버전을 공개 npm registry에 배포하시겠습니까?${RESET}"; then
+_rc=0
+confirm "${BOLD}${YELLOW}이 버전을 공개 npm registry에 배포하시겠습니까?${RESET}" || _rc=$?
+if [ "${_rc}" -eq 2 ]; then
+  # 훅 경로에서는 stdin 이 ref 정보로 이미 소진되어 항상 여기로 온다.
+  # 사람을 붙잡고 묻는 대신 push 를 막고 정규 경로를 안내한다.
+  err "pre-push 훅에서는 배포 승인을 받을 수 없다 (stdin 이 ref 정보로 소진됨)."
+  err "선택지:"
+  err "  1) 정규 경로로 배포: npm run release:<patch|minor|major>"
+  err "  2) 이미 배포했다면 그대로 push (registry 확인 후 자동 건너뜀)"
+  err "  3) CI: AUTO_YES=1 git push"
+  err "  4) 배포 없이 push: git push --no-verify (권장하지 않음)"
+  exit 1
+fi
+if [ "${_rc}" -ne 0 ]; then
   err "사용자가 배포를 거부함 - push 차단"
   err "이 버전을 배포하지 않으려면:"
   err "  1) package.json 의 version을 이전 값으로 되돌린 커밋을 추가"
@@ -178,7 +183,14 @@ warn "이제 공개 npm registry (registry.npmjs.org) 에 $new_version 을(를) 
 warn "배포 후에는 동일 버전 재-publish 가 registry에 의해 거부됩니다."
 warn "돌이킬 수 없는 작업입니다."
 
-if ! confirm "${BOLD}${RED}정말 공개 npm registry에 $new_version 을(를) 배포하시겠습니까?${RESET}"; then
+_rc=0
+confirm "${BOLD}${RED}정말 공개 npm registry에 ${new_version} 을(를) 배포하시겠습니까?${RESET}" || _rc=$?
+if [ "${_rc}" -eq 2 ]; then
+  err "최종 배포 승인을 받을 수 없다 (stdin EOF). push 차단."
+  err "정규 경로로 배포하라: npm run release:<patch|minor|major>"
+  exit 1
+fi
+if [ "${_rc}" -ne 0 ]; then
   err "사용자가 최종 배포를 거부함 - push 차단"
   err "다시 시도하려면 git push 를 재실행하세요."
   exit 1

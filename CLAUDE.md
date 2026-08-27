@@ -129,6 +129,9 @@
 
 ## 릴리즈 프로세스
 - `npm run release:patch|minor|major` — 2회 사용자 승인 게이트를 거쳐 공개 npm registry 배포. 상세: ARCHITECTURE.md §12.5.
+- **승인 프롬프트는 stdin 전용 (`scripts/lib/confirm.sh`). `/dev/tty` 를 다시 들이지 말 것** — 제어 터미널이 없는 환경에서 열리지 않아 릴리즈 자체를 막았다. `test/release-confirm.test.mjs` 가 재유입을 차단한다.
+- 터미널이 없으면 파이프로 승인을 전달한다: `printf 'y\ny\n' | npm run release:minor`
+- `confirm()` 의 반환 `2`(물어볼 수 없음)는 `1`(거부)과 **반드시 구별해서** 처리한다. 섞으면 환경 문제가 "사용자가 거부함" 으로 둔갑해 원인이 은폐된다.
 - `--yes` 플래그는 CI 전용. 대화형에서 사용 금지.
 - `.husky/pre-push` 훅이 `package.json` version 변경 감지 시 자동 publish (동일 승인 게이트).
 

@@ -62,21 +62,15 @@ log "프로젝트 루트: $PROJECT_ROOT"
 log "Bump 유형:    $BUMP"
 
 # ---------- 사용자 확인 헬퍼 ----------
-confirm() {
-  local message="$1"
-  if [ "$AUTO_YES" = true ]; then
-    info "[--yes] 자동 승인: $message"
-    return 0
-  fi
+# confirm() 은 lib/confirm.sh 공용 구현을 쓴다. stdin 으로만 읽으므로 터미널이
+# 없는 환경에서도 파이프로 승인을 전달할 수 있다:
+#   printf 'y\ny\n' | npm run release:minor
+# 반환값 2 는 "물어볼 수 없음" 으로, 거부(1)와 반드시 구별해서 처리한다.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/confirm.sh"
 
-  local reply
-  prompt "$message [y/N]: "
-  read -r reply </dev/tty
-  case "$reply" in
-    [yY]|[yY][eE][sS]) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+if [ "$AUTO_YES" = true ]; then
+  CONFIRM_AUTO_YES=1
+fi
 
 # ---------- STEP 1: Pre-flight 체크 ----------
 log "=========================================="
@@ -96,10 +90,13 @@ ok "Working tree clean"
 CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 if [ "$CURRENT_BRANCH" != "master" ] && [ "$CURRENT_BRANCH" != "main" ]; then
   warn "현재 브랜치가 master/main이 아님: $CURRENT_BRANCH"
-  confirm "이 브랜치에서 릴리스를 진행하시겠습니까?" || {
-    err "사용자가 취소함"
-    exit 1
-  }
+  _rc=0
+  confirm "이 브랜치에서 릴리스를 진행하시겠습니까?" || _rc=$?
+  case "${_rc}" in
+    0) ;;
+    2) confirm_unavailable "npm run release:${BUMP}"; exit 1 ;;
+    *) err "사용자가 취소함"; exit 1 ;;
+  esac
 fi
 ok "브랜치: $CURRENT_BRANCH"
 
@@ -173,10 +170,13 @@ log "=========================================="
 log "STEP 4: 버전 bump 승인 (게이트 #1)"
 log "=========================================="
 
-confirm "${BOLD}${YELLOW}버전을 $CURRENT_VERSION → $NEXT_VERSION 로 올리시겠습니까?${RESET}" || {
-  err "사용자가 버전 bump를 거부함. 릴리스 중단."
-  exit 1
-}
+_rc=0
+confirm "${BOLD}${YELLOW}버전을 ${CURRENT_VERSION} → ${NEXT_VERSION} 로 올리시겠습니까?${RESET}" || _rc=$?
+case "${_rc}" in
+  0) ;;
+  2) confirm_unavailable "npm run release:${BUMP}"; exit 1 ;;
+  *) err "사용자가 버전 bump를 거부함. 릴리스 중단."; exit 1 ;;
+esac
 
 # ---------- STEP 5: 버전 bump 실행 ----------
 log "=========================================="
@@ -228,12 +228,27 @@ warn "공개 배포이므로 누구나 설치할 수 있게 됩니다."
 warn "배포 후에는 동일 버전 재-publish 가 registry에 의해 거부됩니다."
 warn "돌이킬 수 없는 작업이므로 신중히 확인하세요."
 
-confirm "${BOLD}${RED}공개 npm registry에 $NEW_TAG 를 배포하시겠습니까?${RESET}" || {
+_rc=0
+confirm "${BOLD}${RED}공개 npm registry에 ${NEW_TAG} 를 배포하시겠습니까?${RESET}" || _rc=$?
+if [ "${_rc}" -eq 2 ]; then
+  # 버전 bump 는 이미 커밋·태그로 남아 있다. 여기서는 confirm_unavailable 의 일반
+  # 안내(파이프로 승인 전달)를 쓰지 않는다 — 그 시점의 복구는 릴리스 재실행이 아니라
+  # 이미 bump 된 버전을 배포하거나 되돌리는 것이고, npm publish 는 승인을 stdin 으로
+  # 받지 않으므로 파이프 안내가 오히려 틀린 지시가 된다.
+  err "최종 배포 승인을 받을 수 없다 — stdin 이 EOF 이거나 닫혀 있다."
+  err "(거부당한 것이 아니라 물어볼 수단이 없었다)"
+  warn "버전 bump는 유지됩니다 (${NEW_TAG})."
+  info "배포하려면:   npm publish && git push origin HEAD --follow-tags"
+  info "되돌리려면:   git tag -d ${NEW_TAG} && git reset --hard HEAD~1"
+  info "처음부터 다시: 위에서 되돌린 뒤 printf 'y\\ny\\n' | npm run release:${BUMP}"
+  exit 1
+fi
+if [ "${_rc}" -ne 0 ]; then
   warn "사용자가 배포를 거부함. 버전 bump는 유지됩니다."
   info "나중에 배포하려면: npm publish && git push origin HEAD --follow-tags"
-  info "취소하려면: git tag -d $NEW_TAG && git reset --hard HEAD~1"
+  info "취소하려면: git tag -d ${NEW_TAG} && git reset --hard HEAD~1"
   exit 0
-}
+fi
 
 # ---------- STEP 8: npm publish ----------
 log "=========================================="

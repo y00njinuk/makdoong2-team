@@ -734,6 +734,32 @@ publish 이전 실패는 자동 롤백된다 (태그 삭제 + `git reset --hard 
 
 **git push 자동 배포**: `.husky/pre-push` 가 `scripts/publish-if-changed.sh` 를 호출해 push 대상 커밋의 `package.json` version 변경을 감지하면 같은 2회 승인 게이트를 밟는다. 이미 registry 에 있는 버전은 skip.
 
+#### 12.5.1 승인 프롬프트는 stdin 전용 (`scripts/lib/confirm.sh`)
+
+두 스크립트가 공유하는 단일 `confirm()` 구현이다. **`/dev/tty` 는 쓰지 않는다.**
+
+이전에는 `read -r reply </dev/tty` 였다. pre-push 훅은 stdin 으로 ref 정보를 받으므로 훅 안에서 프롬프트하려면 /dev/tty 가 필요했고, `release.sh` 가 그 패턴을 그대로 복사했다. 그런데 제어 터미널이 없는 환경(에이전트 셸, 컨테이너, CI)에서는 /dev/tty 열기 자체가 실패한다 — macOS `Device not configured`, Linux `No such device or address`. 릴리즈가 그 환경에서 아예 불가능했다.
+
+실패가 조용했던 것이 더 문제였다. read 가 실패해도 `reply` 는 빈 값이라 `case` 가 `*` 로 떨어져 거부로 처리됐고, 호출부는 `사용자가 거부함` 을 찍었다. **물어보지도 못한 것과 거부당한 것이 구별되지 않아** 진짜 원인이 은폐됐다. `publish-if-changed.sh` 에 있던 `[ ! -e /dev/tty ]` 가드도 무력했다 — 존재와 열 수 있음은 다르고, macOS 에서 /dev/tty 는 존재하지만 열리지 않는다.
+
+현재 계약:
+
+| 반환 | 의미 | 호출부 처리 |
+|---|---|---|
+| `0` | 승인 (`y` / `yes`) | 진행 |
+| `1` | 거부 (그 외 응답) | 사용자 거부로 보고 후 중단 |
+| `2` | **물어볼 수 없음** (stdin EOF) | `confirm_unavailable()` 로 원인·해결책 안내 후 중단 |
+
+`2` 를 `1` 과 반드시 분리해서 처리한다. 터미널에서는 stdin 이 곧 터미널이라 종전과 동일하게 동작하고, 터미널이 없으면 파이프로 승인을 전달한다:
+
+```bash
+printf 'y\ny\n' | npm run release:minor
+```
+
+pre-push 훅 경로는 STEP 1 의 while 루프가 stdin 을 EOF 까지 소진하므로 `confirm` 이 항상 `2` 를 반환한다. **의도된 동작이다** — 훅이 사람을 붙잡고 묻는 대신 push 를 막고 정규 경로(`npm run release:<bump>`)를 안내한다. CI 는 `AUTO_YES=1`.
+
+회귀: `test/release-confirm.test.mjs` (EOF→2 분리, `/dev/tty` 재유입 차단, confirm 중복 정의 차단).
+
 ---
 
 ## 13. 실패 모드와 복구

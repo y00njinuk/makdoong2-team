@@ -39,6 +39,7 @@ const STEPS = [
   "node test/skill-mcp-registry.test.mjs",
   "node --test test/state-write-guard.test.mjs",
   "node --test test/issue-reporter-guard.test.mjs",
+  "node --test test/release-confirm.test.mjs",
   "node --test test/state-sh-schema.test.mjs",
   "node --test test/state-sh-init-review-shape.test.mjs",
   "node --test test/doctor-phantom-scan.test.mjs",
