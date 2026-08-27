@@ -12,7 +12,8 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +22,14 @@ import {
   extractSkillNameFromArgs,
   ISSUE_REPORTER_SKILL_NAME,
   ISSUE_REPORTER_AGENT,
+  APPROVAL_MARKER_SUFFIX,
+  classifyGithubApiCall,
+  isApproveScriptInvocation,
+  referencesApprovalMarker,
+  approvalMarkerPath,
+  approvalMismatch,
+  sha256Hex,
+  parseApprovalMarker,
 } from "../dist/issue-reporter-guard.js";
 import { install, uninstall } from "../scripts/install-lib.mjs";
 
@@ -100,6 +109,177 @@ describe("패키징 정합 — skill / agent / command 3종 세트", () => {
     const sealedBlock = pluginSrc.match(/const SEALED_SUBAGENTS = new Set\(\[[\s\S]*?\]\);/);
     assert.ok(sealedBlock, "SEALED_SUBAGENTS 선언을 찾지 못했다");
     assert.match(sealedBlock[0], /ISSUE_REPORTER_AGENT/);
+  });
+});
+
+describe("classifyGithubApiCall — GitHub 게시 승인 게이트 분류", () => {
+  const AUTH = `-H "Authorization: Bearer $GH_TOKEN"`;
+
+  test("api.github.com 미참조 명령은 none", () => {
+    assert.equal(classifyGithubApiCall("tail -n 500 /var/log/opencode/opencode.log").kind, "none");
+    assert.equal(classifyGithubApiCall("curl -sS https://example.com -d @/tmp/x.json").kind, "none");
+  });
+
+  test("curl GET(중복 검색 -G --data-urlencode 포함)은 read", () => {
+    assert.equal(classifyGithubApiCall(`curl -sS https://api.github.com/repos/y00njinuk/makdoong2-team/labels ${AUTH}`).kind, "read");
+    assert.equal(
+      classifyGithubApiCall(`curl -sS -G https://api.github.com/search/issues ${AUTH} --data-urlencode "q=repo:y00njinuk/makdoong2-team is:open hang"`).kind,
+      "read",
+    );
+  });
+
+  test("skill 7-2 의 정상 이슈 생성 curl 은 mutation·문제 없음", () => {
+    const r = classifyGithubApiCall(
+      `curl -sS -X POST https://api.github.com/repos/y00njinuk/makdoong2-team/issues ${AUTH} -H "Accept: application/vnd.github+json" -d @/tmp/makdoong2-issue/issue-payload.json`,
+    );
+    assert.equal(r.kind, "mutation");
+    assert.deepEqual(r.payloadPaths, ["/tmp/makdoong2-issue/issue-payload.json"]);
+    assert.deepEqual(r.problems, []);
+  });
+
+  test("-X 없이 -d 만 있어도 mutation (curl -d 는 POST 다)", () => {
+    const r = classifyGithubApiCall(`curl -sS https://api.github.com/gists ${AUTH} -d @/tmp/g.json`);
+    assert.equal(r.kind, "mutation");
+    assert.deepEqual(r.problems, []);
+  });
+
+  test("인라인 JSON / stdin(-d @-) / 상대 경로 / 변수 경로는 problems", () => {
+    const inline = classifyGithubApiCall(`curl -X POST https://api.github.com/repos/o/r/labels ${AUTH} -d '{"name":"x"}'`);
+    assert.equal(inline.kind, "mutation");
+    assert.ok(inline.problems.length > 0, "inline JSON must be flagged");
+
+    const rel = classifyGithubApiCall(`curl -X POST https://api.github.com/gists ${AUTH} -d @gist-payload.json`);
+    assert.ok(rel.problems.some((p) => p.includes("절대 경로")), "relative path must be flagged");
+
+    const vars = classifyGithubApiCall(`curl -X POST https://api.github.com/gists ${AUTH} -d @$HOME/p.json`);
+    assert.ok(vars.problems.some((p) => p.includes("변수")), "variable path must be flagged");
+  });
+
+  test("TOCTOU 방어 — 체이닝·리다이렉트가 섞인 쓰기는 problems", () => {
+    const chained = classifyGithubApiCall(
+      `echo '{"title":"evil"}' > /tmp/p.json && curl -X POST https://api.github.com/repos/o/r/issues -d @/tmp/p.json`,
+    );
+    assert.equal(chained.kind, "mutation");
+    assert.ok(chained.problems.some((p) => p.includes("단일 curl")), "chained rewrite must be flagged");
+
+    const piped = classifyGithubApiCall(`cat /tmp/p.json | curl -X POST https://api.github.com/gists -d @/tmp/p.json`);
+    assert.ok(piped.problems.some((p) => p.includes("단일 curl")), "pipe must be flagged");
+  });
+
+  test("curl 이 아닌 클라이언트로 api.github.com 접근은 forbidden-client", () => {
+    assert.equal(classifyGithubApiCall(`node -e "fetch('https://api.github.com/repos/o/r/issues',{method:'POST'})"`).kind, "forbidden-client");
+    assert.equal(classifyGithubApiCall(`wget https://api.github.com/repos/o/r/issues`).kind, "forbidden-client");
+  });
+
+  test("gh CLI 는 URL 문자열이 없어도 forbidden-client (우회 차단)", () => {
+    assert.equal(classifyGithubApiCall(`gh issue create -R y00njinuk/makdoong2-team -t "t" -b "b"`).kind, "forbidden-client");
+    assert.equal(classifyGithubApiCall(`gh api -X POST repos/o/r/issues`).kind, "forbidden-client");
+    assert.equal(classifyGithubApiCall(`gh gist create /tmp/log.txt`).kind, "forbidden-client");
+    // 무관한 명령의 "gh" 부분 문자열은 오탐하지 않는다
+    assert.equal(classifyGithubApiCall(`grep -n "gh issue" notes.md`).kind, "none");
+  });
+
+  test("승인 스크립트 호출·마커 참조 감지", () => {
+    assert.equal(isApproveScriptInvocation("bash /x/scripts/issue-reporter-approve.sh /tmp/p.json"), true);
+    assert.equal(isApproveScriptInvocation("curl -sS https://api.github.com/repos"), false);
+    assert.equal(referencesApprovalMarker("touch /tmp/p.json.approved"), true);
+    assert.equal(referencesApprovalMarker("cat /tmp/p.json"), false);
+  });
+});
+
+describe("승인 마커 — 해시 바인딩", () => {
+  test("approvalMarkerPath 는 payload 경로에 접미사를 붙인다", () => {
+    assert.equal(approvalMarkerPath("/tmp/p.json"), `/tmp/p.json${APPROVAL_MARKER_SUFFIX}`);
+  });
+
+  test("일치하는 해시는 통과, 내용 변경은 불일치 사유 반환", () => {
+    const payload = Buffer.from('{"title":"t","body":"b"}');
+    const marker = `${sha256Hex(payload)}\n# approved-at: 2026-08-27T00:00:00Z\n`;
+    assert.equal(approvalMismatch(payload, marker), null);
+
+    const tampered = Buffer.from('{"title":"t","body":"EVIL"}');
+    assert.match(approvalMismatch(tampered, marker), /변경/);
+  });
+
+  test("형식이 깨진 마커는 거부", () => {
+    assert.match(approvalMismatch(Buffer.from("x"), "not-a-hash\n"), /형식/);
+    assert.equal(parseApprovalMarker("deadbeef"), null);
+  });
+});
+
+describe("issue-reporter-approve.sh — 기능 검증", () => {
+  const APPROVE = join(PKG_ROOT, "scripts/issue-reporter-approve.sh");
+
+  function runApprove(payloadPath, stdinText) {
+    try {
+      const out = execFileSync("bash", [APPROVE, payloadPath], {
+        input: stdinText ?? "",
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      return { code: 0, out };
+    } catch (e) {
+      return { code: e.status ?? -1, out: `${e.stdout ?? ""}${e.stderr ?? ""}` };
+    }
+  }
+
+  test("y 승인 시 payload sha256 이 기록된 마커를 만들고, 원문을 전문 출력한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mkd2-approve-"));
+    try {
+      const payload = join(dir, "issue-payload.json");
+      const content = '{"title":"제목","labels":["bug"],"body":"본문 전체"}';
+      writeFileSync(payload, content);
+
+      const r = runApprove(payload, "y\n");
+      assert.equal(r.code, 0, `approve failed: ${r.out}`);
+      assert.ok(r.out.includes(content), "승인 화면에 payload 원문 전문이 나와야 한다");
+
+      const marker = readFileSync(approvalMarkerPath(payload), "utf8");
+      assert.equal(parseApprovalMarker(marker), sha256Hex(Buffer.from(content)));
+      assert.equal(approvalMismatch(Buffer.from(content), marker), null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("거부(n)·EOF 는 마커를 만들지 않고 실패 종료한다", () => {
+    const dir = mkdtempSync(join(tmpdir(), "mkd2-approve-"));
+    try {
+      const payload = join(dir, "p.json");
+      writeFileSync(payload, "{}");
+
+      assert.notEqual(runApprove(payload, "n\n").code, 0);
+      assert.ok(!existsSync(approvalMarkerPath(payload)), "거부 후 마커가 없어야 한다");
+
+      assert.notEqual(runApprove(payload, null).code, 0);
+      assert.ok(!existsSync(approvalMarkerPath(payload)), "EOF 후 마커가 없어야 한다");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("게시 게이트 배선 — 훅·스크립트·문서 정합", () => {
+  test("플러그인 훅이 게이트 함수들을 배선한다", () => {
+    const src = readFileSync(join(PKG_ROOT, "src/opencode-plugin.ts"), "utf8");
+    for (const sym of ["classifyGithubApiCall", "approvalMismatch", "isApproveScriptInvocation", "referencesApprovalMarker"]) {
+      assert.ok(src.includes(sym), `opencode-plugin.ts 가 ${sym} 를 사용해야 한다`);
+    }
+  });
+
+  test("승인 스크립트가 존재하고 원문 전문 출력 + stdin confirm 을 쓴다", () => {
+    const script = readFileSync(join(PKG_ROOT, "scripts/issue-reporter-approve.sh"), "utf8");
+    assert.match(script, /cat -- "\$\{PAYLOAD\}"/, "payload 원문 전문 출력");
+    assert.match(script, /lib\/confirm\.sh/, "공용 stdin confirm 사용");
+    // 주석의 설명 문구는 허용하고 실제 코드 라인만 검사한다
+    const code = script.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
+    assert.ok(!code.includes("/dev/tty"), "/dev/tty 금지");
+  });
+
+  test("SKILL.md 가 승인 게이트 절차(7-1)를 명시한다", () => {
+    const skillMd = readFileSync(join(PKG_ROOT, "skills/makdoong2-issue-reporter/SKILL.md"), "utf8");
+    assert.match(skillMd, /issue-reporter-approve\.sh/);
+    assert.match(skillMd, /원문 전체를 채팅에 그대로 표시/);
   });
 });
 

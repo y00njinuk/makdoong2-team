@@ -100,7 +100,9 @@ GH_TOKEN="$(grep -oE '(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+' "$PAT_FILE
 1. 첨부 후보 텍스트를 모은 뒤, **첨부 직전에** 마스킹 스캔을 1회 수행한다.
 2. 마스킹 대상 여부가 불확실한 라인은 첨부에서 **제외**한다(포함하고 판단을 미루지 않는다).
 3. 마스킹으로 인해 재현 정보가 소실되는 경우, 소실된 항목을 이슈 본문에 `<마스킹됨: 사유>`로 명시한다.
-4. 이슈 전송 전, 마스킹 결과 요약(무엇을 몇 건 가렸는지)을 사용자에게 제시하고 **최종 확인을 받는다**. 사용자 승인 없이 전송하지 않는다.
+4. 이슈 전송 전, **게시될 원문 전체(제목·라벨·본문 전문)와 마스킹 결과 요약**(무엇을 몇 건 가렸는지)을 사용자에게 제시하고 **최종 확인을 받는다**. 사용자 승인 없이 전송하지 않는다.
+
+> **4번은 프롬프트 규약이 아니라 플러그인 훅이 물리적으로 강제한다.** GitHub 쓰기 API 호출(이슈·코멘트·Gist·라벨)은 payload 파일에 대한 사용자 승인 마커(`<payload>.approved`)가 없거나, 승인 이후 내용이 변경되었으면 훅이 차단한다. 절차는 7장 참조.
 
 스캔 보조:
 
@@ -208,8 +210,10 @@ GitHub REST API의 issue 생성 엔드포인트는 **바이너리 파일 첨부�
 curl -sS -X POST https://api.github.com/gists \
   -H "Authorization: Bearer $GH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
-  -d @gist-payload.json
+  -d @/tmp/makdoong2-issue/gist-payload.json
 ```
+
+> Gist 생성도 GitHub 쓰기이므로 7-1 의 사용자 승인 게이트를 동일하게 거친다 (payload 절대 경로 + 원문 표시 + 승인 마커).
 
 ---
 
@@ -281,8 +285,10 @@ curl -sS -G https://api.github.com/search/issues \
 
 ```bash
 curl -sS -X POST https://api.github.com/repos/y00njinuk/makdoong2-team/issues/<number>/comments \
-  -H "Authorization: Bearer $GH_TOKEN" -d @comment-payload.json
+  -H "Authorization: Bearer $GH_TOKEN" -d @/tmp/makdoong2-issue/comment-payload.json
 ```
+
+> 코멘트 추가도 GitHub 쓰기이므로 7-1 의 사용자 승인 게이트를 동일하게 거친다.
 
 기존 열린 이슈(2026-08-26 기준):
 
@@ -383,11 +389,28 @@ curl -sS -X POST https://api.github.com/repos/y00njinuk/makdoong2-team/issues/<n
 
 ## 7. 이슈 생성
 
+### 7-1. 사용자 승인 게이트 (훅 강제 — 생략 불가)
+
+GitHub 쓰기 호출(이슈·코멘트·Gist·라벨 생성)은 다음 절차를 거쳐야만 훅을 통과한다:
+
+1. payload 를 **리터럴 절대 경로** 파일로 작성한다 (예: `/tmp/makdoong2-issue/issue-payload.json`). 상대 경로·변수 포함 경로는 훅이 거부한다.
+2. **게시될 원문 전체를 채팅에 그대로 표시한다** — 제목, 라벨, 본문 전문. 요약·발췌로 대체하지 않는다.
+3. 사용자에게 승인 스크립트 실행을 안내하고 **대기한다**:
+   ```
+   bash <SCRIPTS_DIR>/issue-reporter-approve.sh /tmp/makdoong2-issue/issue-payload.json
+   ```
+   `<SCRIPTS_DIR>` 는 npm 모듈의 scripts 디렉토리다 (전역 설치 기준 `$(npm root -g)/makdoong2-team/scripts`). 스크립트는 payload 원문을 다시 화면에 보여주고 stdin 으로 승인을 받은 뒤 `<payload>.approved` 마커(sha256)를 기록한다.
+4. 마커가 생긴 뒤 **단일 curl 명령**으로 전송한다. 체이닝(`;`, `&&`, `|`)·리다이렉트·인라인 JSON(`-d '{...}'`)은 훅이 거부한다.
+
+승인은 **1회용**이고 **내용에 바인딩**된다: 전송이 실행되면 마커는 훅이 자동 삭제하며, payload 를 승인 후 수정하면 해시 불일치로 차단된다 (수정했으면 2번부터 재승인). 에이전트가 승인 스크립트를 직접 실행하거나 `.approved` 마커를 조작하는 것은 훅이 차단한다.
+
+### 7-2. 전송
+
 ```bash
 curl -sS -X POST https://api.github.com/repos/y00njinuk/makdoong2-team/issues \
   -H "Authorization: Bearer $GH_TOKEN" \
   -H "Accept: application/vnd.github+json" \
-  -d @issue-payload.json
+  -d @/tmp/makdoong2-issue/issue-payload.json
 ```
 
 `issue-payload.json`은 `title`, `body`, `labels`를 포함한다.
@@ -405,17 +428,20 @@ curl -sS -X POST https://api.github.com/repos/y00njinuk/makdoong2-team/issues \
 curl -sS https://api.github.com/repos/y00njinuk/makdoong2-team/labels \
   -H "Authorization: Bearer $GH_TOKEN"
 
-# 라벨 신규 생성 (사용자 승인 후에만)
+# 라벨 신규 생성 — 다른 쓰기와 동일하게 7-1 승인 게이트를 거친다.
+# 인라인 JSON 은 훅이 거부하므로 라벨도 payload 파일로 전달한다.
 curl -sS -X POST https://api.github.com/repos/y00njinuk/makdoong2-team/labels \
   -H "Authorization: Bearer $GH_TOKEN" \
-  -d '{"name":"severity:blocker","color":"b60205"}'
+  -d @/tmp/makdoong2-issue/label-payload.json
 ```
 
 **본문은 반드시 파일(`-d @file`)로 전달한다.** 코드블록·백틱·개행이 포함되므로 셸 인라인 문자열로 전달하면 깨진다. 전송 후 페이로드 임시 파일은 삭제한다.
 
 ```bash
-shred -u issue-payload.json gist-payload.json 2>/dev/null || rm -f issue-payload.json gist-payload.json
+shred -u /tmp/makdoong2-issue/*-payload.json 2>/dev/null || rm -f /tmp/makdoong2-issue/*-payload.json
 ```
+
+승인 마커(`*.approved`)는 전송 시 훅이 자동 삭제하므로 에이전트가 지우지 않는다 (마커 조작은 훅이 차단).
 
 ---
 

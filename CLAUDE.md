@@ -72,6 +72,7 @@
 ### issue-reporter 스킬 (사용자-전용 트리거 — hardrule)
 - `makdoong2-issue-reporter` 는 **skill + agent + command 3종 세트**다. skill 이름 == command 파일명 == agent 이름이 모두 일치해야 command 가 opencode 의 skill-derived command 를 덮어써 전권(full-permission) 에이전트로 라우팅된다 (`test/issue-reporter-guard.test.mjs` 가 강제).
 - **유일한 트리거는 사용자의 `/makdoong2-issue-reporter` 직접 호출.** team-leader 포함 다른 에이전트가 `skill()` 로 자율 로드하면 `tool.execute.before` 훅이 차단한다. 실패를 관측한 에이전트는 사용자에게 커맨드 실행을 안내만 한다.
+- **GitHub 게시(이슈·코멘트·Gist·라벨)는 사용자가 원문 전체를 보고 승인해야만 가능하다 (훅 강제).** payload 는 리터럴 절대경로 파일 + 단일 curl `-d @file` 형태만 허용되고, 사용자가 `scripts/issue-reporter-approve.sh` 로 승인하면 sha256 마커가 생긴다. 승인은 내용에 바인딩(변경 시 무효)·1회용(전송 시 자동 소멸)이며, 에이전트의 승인 스크립트 실행·마커 조작은 차단된다.
 - 상세: ARCHITECTURE.md §4.6 참조.
 
 ### 다출처 병렬 조사 (dispatch_research)

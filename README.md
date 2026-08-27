@@ -105,7 +105,7 @@ makdoong2-team doctor            # 설치 진단
 
 - 커맨드가 **전용 full-permission 에이전트**(`makdoong2-issue-reporter`)로 라우팅되어, 호출 시점 이전의 로그·프롬프트·세션 컨텍스트를 스스로 수집해 이상 지점을 포착하고 [y00njinuk/makdoong2-team issues](https://github.com/y00njinuk/makdoong2-team/issues) 에 등록한다.
 - **사용자 직접 호출이 유일한 트리거**다. 부장님·막둥이가 실패를 관측했다고 자율적으로 이슈를 만들지 않는다 (훅이 차단).
-- 저장소가 public 이므로 사내 정보는 마스킹 후 첨부되며, **전송 전 마스킹 요약에 대한 사용자 최종 승인**을 반드시 거친다.
+- 저장소가 public 이므로 사내 정보는 마스킹 후 첨부되며, **전송 전 사용자 승인이 훅으로 강제된다**: 에이전트가 게시될 원문 전체를 채팅에 표시한 뒤, 사용자가 직접 `issue-reporter-approve.sh <payload>` 를 실행해 원문을 확인·승인해야만 GitHub 쓰기 호출이 통과된다 (승인은 내용 sha256 에 바인딩, 1회용).
 - PAT 는 `~/.config/opencode/.github` 파일에서 읽는다. 상세: ARCHITECTURE.md §4.6
 
 ---

@@ -280,7 +280,33 @@ makdoong2-team 자체의 결함을 GitHub 이슈(y00njinuk/makdoong2-team)로 �
 
 issue-reporter 는 SEALED_SUBAGENTS 에도 등록되어 있다 — 워크플로우에 참여하지 않지만, outer-world 로 위임하면 마스킹·사용자 승인 게이트가 위임처에서 우회될 수 있기 때문이다. state.json 은 읽기(`state.sh get`)만 허용한다.
 
-관련: `src/issue-reporter-guard.ts`, `test/issue-reporter-guard.test.mjs`.
+#### 4.6.1 GitHub 게시 승인 게이트 (원문 확인 강제)
+
+에이전트가 전권이더라도 **GitHub 에 무엇을 게시하는가**는 사용자가 원문 전체를 보고 승인해야 한다. 채팅 승인은 프롬프트 규약일 뿐이므로 훅이 물리적으로 강제한다:
+
+```
+payload 작성(리터럴 절대경로 JSON)
+  → 에이전트가 원문 전문을 채팅에 표시
+  → 사용자가 직접: bash <SCRIPTS_DIR>/issue-reporter-approve.sh <payload>
+      (스크립트가 원문 전문을 다시 출력 → stdin confirm → <payload>.approved 에 sha256 기록)
+  → 에이전트가 단일 curl -d @<payload> 로 전송
+      (훅: 마커 존재 + 해시 일치 검증 → 통과. 전송 후 마커 자동 삭제 = 1회용)
+```
+
+`tool.execute.before` 가 issue-reporter 의 bash 를 `classifyGithubApiCall()` 로 분류해 강제하는 규칙:
+
+| 시도 | 판정 |
+|---|---|
+| `curl` GET / `-G --data-urlencode` (검색·라벨 조회) | 통과 (읽기) |
+| `curl -X POST/PATCH/PUT/DELETE` 또는 데이터 플래그 | 마커 검증 대상 |
+| 인라인 JSON(`-d '{...}'`) · stdin(`-d @-`) · 상대경로 · 변수 경로 | 차단 — 승인 검증 불가 형태 |
+| 쓰기 명령에 체이닝·리다이렉트·명령 치환 혼합 | 차단 — **TOCTOU 방어** (검증 후 같은 명령 안에서 payload 재작성 → 전송하는 우회를 막는다) |
+| `gh` CLI (`gh issue create` 등) · node/python/wget 로 GitHub 접근 | 차단 — URL 문자열 없이 게시 가능한 클라이언트라 검증 불가 |
+| 에이전트의 승인 스크립트 실행 · `*.approved` 생성/조작 (bash·write 툴 불문) | 차단 — 승인은 사용자 전용 |
+
+승인이 **내용(sha256)에 바인딩**되므로 승인 후 payload 를 수정하면 해시 불일치로 차단되고, 전송이 실행되면 결과와 무관하게 마커가 소멸해 재시도에도 재승인이 필요하다. 승인 스크립트는 stdin confirm(`lib/confirm.sh`)이라 에이전트 셸의 EOF 로는 넘어갈 수 없고, `printf 'y' |` 파이프 우회는 실행 자체를 훅이 막는 것으로 차단한다.
+
+관련: `src/issue-reporter-guard.ts`, `scripts/issue-reporter-approve.sh`, `test/issue-reporter-guard.test.mjs`.
 
 ---
 

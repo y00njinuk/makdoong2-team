@@ -17,7 +17,7 @@
 // Place this file at ~/.config/opencode/plugins/makdoong2-team/src/opencode-plugin.ts
 // (or load the npm package via opencode.json "plugin": ["./plugins/makdoong2-team/src/opencode-plugin.ts"]).
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve as pathResolve, sep as pathSep } from "node:path";
 import type { Plugin } from "@opencode-ai/plugin";
@@ -56,7 +56,17 @@ import { injectAllSecrets } from "./mcp-secret-injector.ts";
 import { pollSubSession as pollSubSessionCore, pollOutcomeToLegacy, type PollOutcome } from "./poll-sub-session.ts";
 import { logger } from "./logger.ts";
 import { redactAndTruncate } from "./redact-secrets.ts";
-import { issueReporterSkillLoadViolation, ISSUE_REPORTER_AGENT } from "./issue-reporter-guard.ts";
+import {
+  issueReporterSkillLoadViolation,
+  ISSUE_REPORTER_AGENT,
+  APPROVAL_MARKER_SUFFIX,
+  APPROVE_SCRIPT_BASENAME,
+  classifyGithubApiCall,
+  isApproveScriptInvocation,
+  referencesApprovalMarker,
+  approvalMarkerPath,
+  approvalMismatch,
+} from "./issue-reporter-guard.ts";
 
 // All runtime paths come from makdoong2-team.json (paths.* overrides) or are
 // derived from the opencode config dir. No MAKDOONG2 environment variables.
@@ -1182,6 +1192,24 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         }
       }
 
+      // ── Issue-reporter: 승인 마커는 어떤 툴로도 만들 수 없다 ──
+      // 마커(<payload>.approved)는 오직 사용자가 issue-reporter-approve.sh 를
+      // 직접 실행해서만 생긴다. write/edit 툴로 마커를 위조하면 게시 게이트가
+      // 무력화되므로 경로에 마커 접미사가 보이면 즉시 차단한다.
+      if (agent === ISSUE_REPORTER_AGENT && (LEADER_FORBIDDEN_TOOLS.has(toolLower) || WRITE_TOOLS.has(toolLower))) {
+        // filePath 인자뿐 아니라 인자 전체를 검사한다 — apply_patch 는 파일 경로가
+        // 패치 본문 안에 들어 있어 filePath 추출로는 마커 위조를 잡을 수 없다.
+        let argsSerialized = "";
+        try { argsSerialized = JSON.stringify((output as { args?: unknown }).args ?? ""); } catch { /* ignore */ }
+        if (referencesApprovalMarker(argsSerialized)) {
+          logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter가 ${input.tool} 인자에서 승인 마커 경로 참조.`);
+          throw new Error(
+            `[makdoong2-team issue-reporter 게시 게이트] 승인 마커(*${APPROVAL_MARKER_SUFFIX})는 에이전트가 생성·수정할 수 없다. ` +
+            `사용자가 'bash ${SCRIPTS_DIR}/${APPROVE_SCRIPT_BASENAME} <payload>' 를 직접 실행해야만 승인이 성립한다.`
+          );
+        }
+      }
+
       // ── Leader hardrule 1: 직접 파일 편집·생성 금지 (write/edit/patch/multiedit) ──
       if (agent === "makdoong2-team-leader" && LEADER_FORBIDDEN_TOOLS.has(toolLower)) {
         logger.error(`[makdoong2-team hook] BLOCKED: team-leader가 ${input.tool} 툴 호출을 시도했다.`);
@@ -1234,6 +1262,75 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         );
       }
 
+      // ── Issue-reporter 게시 게이트: GitHub 쓰기는 사용자 승인 원문만 ──
+      // 정책·마커 계약 상세: src/issue-reporter-guard.ts 상단 주석.
+      if (agent === ISSUE_REPORTER_AGENT) {
+        const approveHint =
+          `승인 절차: 에이전트가 payload 원문 전체를 채팅에 표시한 뒤, 사용자가 직접\n` +
+          `  bash ${SCRIPTS_DIR}/${APPROVE_SCRIPT_BASENAME} </absolute/path/payload.json>\n` +
+          `를 실행한다 (스크립트가 원문을 다시 보여주고 stdin 승인 후 <payload>${APPROVAL_MARKER_SUFFIX} 마커 기록). ` +
+          `이 승인은 1회용이고 payload 내용이 바뀌면 무효다.`;
+
+        if (isApproveScriptInvocation(cmd)) {
+          logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter가 승인 스크립트 실행 시도. cmd="${redactAndTruncate(cmd, 200)}"`);
+          throw new Error(
+            `[makdoong2-team issue-reporter 게시 게이트] ${APPROVE_SCRIPT_BASENAME} 는 사용자 전용이다. ` +
+            `에이전트가 실행하면 승인의 의미가 사라진다. 사용자에게 실행을 안내하고 대기하라.\n${approveHint}`
+          );
+        }
+        if (referencesApprovalMarker(cmd)) {
+          logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter bash가 승인 마커를 참조. cmd="${redactAndTruncate(cmd, 200)}"`);
+          throw new Error(
+            `[makdoong2-team issue-reporter 게시 게이트] 승인 마커(*${APPROVAL_MARKER_SUFFIX})는 에이전트가 ` +
+            `생성·수정·삭제·열람할 수 없다. 마커 검증과 소멸은 훅이 수행한다.\n${approveHint}`
+          );
+        }
+
+        const call = classifyGithubApiCall(cmd);
+        if (call.kind === "forbidden-client") {
+          logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter가 비-curl 클라이언트로 GitHub API 접근. cmd="${redactAndTruncate(cmd, 200)}"`);
+          throw new Error(`[makdoong2-team issue-reporter 게시 게이트] ${call.reason}\n${approveHint}`);
+        }
+        if (call.kind === "mutation") {
+          if (call.problems.length > 0) {
+            logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 형식 위반: ${call.problems.join(" / ")}`);
+            throw new Error(
+              `[makdoong2-team issue-reporter 게시 게이트] GitHub 쓰기 호출 형식 위반:\n` +
+              call.problems.map((p) => `  - ${p}`).join("\n") + `\n${approveHint}`
+            );
+          }
+          for (const payloadPath of call.payloadPaths) {
+            if (!existsSync(payloadPath)) {
+              throw new Error(
+                `[makdoong2-team issue-reporter 게시 게이트] payload 파일이 없다: ${payloadPath}\n${approveHint}`
+              );
+            }
+            const markerPath = approvalMarkerPath(payloadPath);
+            if (!existsSync(markerPath)) {
+              logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 — 승인 마커 없음: ${markerPath}`);
+              throw new Error(
+                `[makdoong2-team issue-reporter 게시 게이트] 사용자 승인이 없다.\n` +
+                `게시하려는 원문(${payloadPath})을 채팅에 전문 표시한 뒤, 사용자에게 아래 실행을 안내하고 대기하라:\n` +
+                `  bash ${SCRIPTS_DIR}/${APPROVE_SCRIPT_BASENAME} ${payloadPath}`
+              );
+            }
+            const mismatch = approvalMismatch(
+              readFileSync(payloadPath),
+              readFileSync(markerPath, "utf8"),
+            );
+            if (mismatch !== null) {
+              logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 — ${mismatch} (${payloadPath})`);
+              throw new Error(
+                `[makdoong2-team issue-reporter 게시 게이트] ${mismatch}.\n` +
+                `현재 원문을 다시 채팅에 전문 표시하고 재승인을 받아라:\n` +
+                `  bash ${SCRIPTS_DIR}/${APPROVE_SCRIPT_BASENAME} ${payloadPath}`
+              );
+            }
+            logger.debug(`[makdoong2-team hook] issue-reporter 게시 승인 확인: ${payloadPath} (marker hash 일치)`);
+          }
+        }
+      }
+
       const hookIssue = sessionIssue.get(sessionID ?? "") ?? "";
       const r = await runScript(HOOKS_DIR, "guard-bash.sh", cmd, hookIssue);
       if (!r.ok) {
@@ -1254,6 +1351,30 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         const cur = sessionActiveToolCount.get(afterSessionID) ?? 0;
         if (cur <= 1) sessionActiveToolCount.delete(afterSessionID);
         else sessionActiveToolCount.set(afterSessionID, cur - 1);
+      }
+
+      // ── Issue-reporter 승인 마커 1회용 소멸 ──
+      // GitHub 쓰기 명령이 "실행"되고 나면 결과와 무관하게 마커를 삭제한다.
+      // 성공: 재게시에는 새 승인이 필요하다. 실패(네트워크 등): 같은 원문이라도
+      // 재시도 전에 재승인을 받는다 — 마커를 남겨두면 실패를 빌미로 승인 한 번에
+      // 여러 번의 전송 시도가 가능해지므로 엄격한 쪽을 택했다.
+      if (toolLowerAfter === "bash") {
+        const afterAgent = afterSessionID
+          ? (sessionAgent.get(afterSessionID) ?? pendingDispatch.get(afterSessionID)?.agent)
+          : undefined;
+        if (afterAgent === ISSUE_REPORTER_AGENT) {
+          const afterCmd = (input.args as { command?: string })?.command ?? "";
+          const afterCall = classifyGithubApiCall(afterCmd);
+          if (afterCall.kind === "mutation") {
+            for (const payloadPath of afterCall.payloadPaths) {
+              const markerPath = approvalMarkerPath(payloadPath);
+              if (existsSync(markerPath)) {
+                rmSync(markerPath, { force: true });
+                logger.debug(`[makdoong2-team hook] issue-reporter 승인 마커 소멸(1회용): ${markerPath}`);
+              }
+            }
+          }
+        }
       }
 
       if (afterSessionID && WRITE_TOOLS.has(toolLowerAfter)) {
