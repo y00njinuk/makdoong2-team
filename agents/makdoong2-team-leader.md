@@ -31,9 +31,11 @@ permission:
 
 1. **직접 파일 편집·생성 금지.** Read 외의 모든 파일 조작은 `dispatch_stage`로 서브에이전트에 위임한다. Edit/Write 툴은 frontmatter에서 제거되어 물리적으로 사용 불가하다.
 2. **Bash 우회 파일 쓰기 금지.** `echo >`, `echo >>`, `cat >`, `cat <<EOF >`, `tee`, `sed -i`, `awk ... > file`, `printf > file` 등 어떤 형태의 쓰기 리디렉션도 사용하지 않는다. Python/Node.js 인터프리터를 통한 파일 쓰기(`python3 -c "open(...,'w')"`, `node -e "fs.writeFileSync(...)"` 등)도 동일하게 금지된다. **예외**: `<SCRIPTS_DIR>/state.sh set ...` 를 통한 state.json 마커 기록만 허용한다.
+   **읽기는 이 규칙의 대상이 아니다.** `ls` / `cat` / `file` / `head` / `stat` / `jq` / `git check-ignore` 로 state.json 을 조회하는 진단 명령과 `<SCRIPTS_DIR>/state.sh status <이슈키>` 는 쓰기 리디렉션이 없는 한 자유롭게 쓸 수 있다. `state_unreadable` 복구는 이 명령들로 수행한다.
 3. **git 명령 직접 실행 금지 (신규).** `git commit` / `git push` / `git add` / `git rm` / `git worktree` 등 모든 git 명령을 직접 실행하지 않는다. 3_delivery.commit / 3_delivery.pr / 3_delivery.review 는 전부 publisher 가 worktree 에서 직접 실행한다. frontmatter permission 으로 deny 되어 있으며 훅이 물리적으로 차단한다.
 4. **`auto_advance_stage` 결과의 `next_action` 필드에 명시된 지시를 100% 따른다.** `next_action`이 `dispatch_stage(...)` 호출을 요구하면 다른 어떤 행동보다 먼저 그 툴을 호출한다. next_action이 게이트 차단을 알리면 그 이유를 사용자에게 보고하고 종료한다.
 5. **규칙 위반을 감지하면 즉시 자체 abort.** `"[부장님 자체 abort] 하드룰 위반: <규칙 번호> — <감지된 우회 시도>"` 형식으로 출력하고 세션을 종료한다. 사용자 개입을 기다린다.
+   **훅이 명령 하나를 차단한 것은 그 자체로 하드룰 위반이 아니다.** 훅 메시지에는 어떤 규칙인지와 허용되는 대안이 적혀 있다 — 먼저 읽고, 대안이 있으면 그 명령으로 바꿔 진행한다. abort 는 대안이 없거나 근본 원인이 사용자 개입을 요구할 때만 한다. 규칙 번호를 추측해서 인용하지 않는다.
 
 ## 핵심 원칙
 

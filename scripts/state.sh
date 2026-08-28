@@ -7,8 +7,10 @@
 #   state.sh root                                  # 현재 컨텍스트의 git toplevel 출력 (worktree-local)
 #   state.sh issue                                 # 현재 브랜치에서 이슈키 추출 (없으면 빈 값)
 #   state.sh init    <issue> [worktree]            # state.json 최초 생성 (이미 있으면 auto-migrate)
+#   state.sh status  <issue>                       # 존재/유효성/스키마 진단 (읽기 전용, exit 0=정상)
 #   state.sh get     <issue> <jq-path>             # 값 조회. 예: '.stages."3_delivery".substages."commit".done'
 #   state.sh set     <issue> <jq-path> <json-value># 값 설정. 문자열은 '"pass"' 형태로 전달
+#   state.sh append  <issue> <jq-path> <json-value># 배열 끝에 항목 추가 (없으면 [] 로 시작)
 #   state.sh migrate <issue>                       # legacy stage key → 계층형 substages 이관 (idempotent)
 #
 # ── 스키마 규약 (hardrule) ──
@@ -44,6 +46,17 @@ issue() {
   git rev-parse --abbrev-ref HEAD 2>/dev/null | grep -oE '[A-Z]+-[0-9]+' | head -n1 || true
 }
 sp()    { echo "$(root)/.makdoong2-team/$1/state.json"; }
+
+# usage_die <시그니처> [부연 설명...]
+# `${2:?}` 가 뱉는 raw bash 에러(`line 127: 2: parameter null or not set`)는 복구
+# 작업 중인 에이전트에게 아무것도 알려주지 못한다. 대신 무엇을 어떻게 부를지 적는다.
+usage_die() {
+  echo "usage: state.sh $1" >&2
+  shift
+  local line
+  for line in "$@"; do echo "  ${line}" >&2; done
+  exit 64
+}
 
 # ── phantom-key guard ──
 # jq path 안에 `.stages."<PHASE>.<SUBSTAGE>"` 형태 (dot 포함 stage-id 를 단일 키로
@@ -123,8 +136,46 @@ JSON
       "$0" migrate "$ISSUE" >/dev/null 2>&1 || true
     fi
     echo "$P" ;;
+  status)
+    # 승인된 읽기 전용 진단. state_unreadable 복구 절차의 1단계다 (ARCHITECTURE.md §5.5).
+    # stdout 은 key=value 한 줄씩 — 에이전트가 파싱하기 쉽고 사람이 읽을 수도 있다.
+    # exit 0 = 존재 && 판독 가능, exit 1 = 그 외 (어느 쪽인지는 exists/readable 이 말한다).
+    ISSUE="${1:-}"
+    [ -n "${ISSUE}" ] || usage_die "status <issue>" \
+      "예: state.sh status PROJ-12345" \
+      "출력: path / exists / readable / issue / worktree / phantom_keys / next"
+    SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+    P="$(sp "${ISSUE}")"
+    echo "path=${P}"
+    if [ ! -f "${P}" ]; then
+      echo "exists=false"
+      echo "readable=false"
+      echo "next=bash ${SELF_DIR}/wt-sync-ignored.sh $(root) ${ISSUE}  # worktree 동기화 누락이면"
+      echo "next=bash ${SELF_DIR}/state.sh init ${ISSUE} $(root)  # 신규 생성이면"
+      exit 1
+    fi
+    echo "exists=true"
+    if ! jq empty "${P}" 2>/dev/null; then
+      echo "readable=false"
+      echo "next=JSON 이 손상되었습니다. 자동 복구하지 말고 사용자에게 에스컬레이션하세요."
+      exit 1
+    fi
+    echo "readable=true"
+    echo "issue=$(jq -r '.issue // "null"' "${P}")"
+    echo "worktree=$(jq -r '.worktree // "null"' "${P}")"
+    echo "stages=$(jq -r '(.stages // {}) | keys | join(",") // "none"' "${P}")"
+    PHANTOM="$(jq -r '[(.stages // {}) | keys[] | select(test("\\."))] | join(",")' "${P}")"
+    echo "phantom_keys=${PHANTOM:-none}"
+    if [ -n "${PHANTOM}" ]; then
+      echo "next=bash ${SELF_DIR}/state.sh migrate ${ISSUE}  # flat/phantom 키 정규화"
+    fi
+    ;;
   get)
-    ISSUE="${1:?}"; Q="${2:?}"; P="$(sp "$ISSUE")"
+    ISSUE="${1:-}"; Q="${2:-}"
+    [ -n "${ISSUE}" ] && [ -n "${Q}" ] || usage_die "get <issue> <jq-path>" \
+      "예: state.sh get PROJ-1 '.stages.\"1_planning\".substages.\"jira\".done'" \
+      "파일 존재·유효성 확인은 state.sh status <issue> 를 쓴다."
+    P="$(sp "${ISSUE}")"
     check_flat_stage_notation "$Q"
     # Semantics contract (rely on this in all gate scripts):
     #   * always print exactly one line = the value (jq -r style: null/false/0/{}/"str")
@@ -142,16 +193,31 @@ JSON
     if OUT="$(jq -r "$Q" "$P" 2>/dev/null)"; then
       printf '%s\n' "$OUT"
     else
+      # stdout 계약(정확히 한 줄 "null" + exit 1)은 그대로 두고, 원인만 stderr 로
+      # 알린다. 종전에는 "파일 부재" 와 "jq 경로 오류" 가 똑같이 null 로만 보여서
+      # 복구 작업 중인 에이전트가 어느 쪽인지 알 수 없었다.
+      if [ ! -f "${P}" ]; then
+        echo "[state.sh] state.json 없음: ${P} — 'state.sh status ${ISSUE}' 로 확인하세요." >&2
+      else
+        echo "[state.sh] jq 평가 실패 (경로 오류 또는 JSON 손상): ${Q}" >&2
+      fi
       echo "null"; exit 1
     fi
     ;;
   set)
-    ISSUE="${1:?}"; Q="${2:?}"; V="${3:?}"; P="$(sp "$ISSUE")"
+    ISSUE="${1:-}"; Q="${2:-}"; V="${3:-}"
+    [ -n "${ISSUE}" ] && [ -n "${Q}" ] && [ -n "${V}" ] || usage_die "set <issue> <jq-path> <json-value>" \
+      "예: state.sh set PROJ-1 '.stages.\"1_planning\".substages.\"jira\".done' true" \
+      "문자열 값은 '\"pass\"' 처럼 JSON 리터럴로 전달한다."
+    P="$(sp "${ISSUE}")"
     check_flat_stage_notation "$Q"
     tmp="$(mktemp)"; jq "$Q = $V" "$P" > "$tmp" && mv "$tmp" "$P"
     echo "state[$ISSUE] $Q = $V" ;;
   append)
-    ISSUE="${1:?}"; Q="${2:?}"; V="${3:?}"; P="$(sp "$ISSUE")"
+    ISSUE="${1:-}"; Q="${2:-}"; V="${3:-}"
+    [ -n "${ISSUE}" ] && [ -n "${Q}" ] && [ -n "${V}" ] || usage_die "append <issue> <jq-path> <json-value>" \
+      "예: state.sh append PROJ-1 '.stages.\"2_implementation\".substages.\"dev\".hang_history' '{\"at\":\"…\"}'"
+    P="$(sp "${ISSUE}")"
     check_flat_stage_notation "$Q"
     tmp="$(mktemp)"
     jq --argjson entry "$V" "$Q = ((($Q) // []) + [\$entry])" "$P" > "$tmp" && mv "$tmp" "$P"
@@ -188,5 +254,5 @@ JSON
       | move("3_delivery.review";       "3_delivery"; "review")
     ' "$P" > "$tmp" && mv "$tmp" "$P"
     echo "migrated[$ISSUE] $P" ;;
-  *) echo "usage: state.sh {root|issue|init|get|set|append|migrate} ..." >&2; exit 64 ;;
+  *) echo "usage: state.sh {root|issue|init|status|get|set|append|migrate} ..." >&2; exit 64 ;;
 esac

@@ -27,6 +27,7 @@ import { computeVerdictHash } from "./verdict-hash.js";
 import { nextModel, applyConfigOverrides, POLICIES } from "./model-fallback-policy.ts";
 import { agentForStage, STAGE_SPEC_FILES, type Stage } from "./agent-stage-config.ts";
 import { shouldEscalateStall } from "./stall-escalation.ts";
+import { buildStateWriteBlockMessage, classifyStateJsonAccess, STATE_SH_CALL_RE } from "./state-access-guard.ts";
 import {
   RESEARCH_SOURCES,
   DEFAULT_RESEARCH_TIMEOUT_MINUTES,
@@ -350,9 +351,13 @@ async function createWorktree(
 }
 
 export function looksLikeFileWrite(cmd: string): boolean {
-  if (/\.makdoong2-team\/[^/\s]+\/state\.json/.test(cmd) && !/state\.sh\s+(get|set|init)/.test(cmd)) return true;
+  // state.json 은 전용 분류기가 판정한다. 읽기 전용 진단(ls/file/head/cat)을 여기서
+  // 다시 "파일 쓰기" 로 잡으면 universal 훅을 고쳐도 leader 는 하드룰 2 로 막힌다.
+  const stateAccess = classifyStateJsonAccess(cmd);
+  if (stateAccess.kind === "write") return true;
+  if (stateAccess.kind !== "unrelated") return false;
   if (/^\s*(git\s+(commit|push|add|rm|status|log|diff|show|branch|checkout|fetch|worktree|config|remote))/i.test(cmd)) return false;
-  if (/state\.sh\s+(set|init|get|issue|root|update)/.test(cmd)) return false;
+  if (STATE_SH_CALL_RE.test(cmd)) return false;
   if (/(^|[|&;])\s*(tee|dd)\b/.test(cmd)) return true;
   if (/\bsed\b[^|;&]*\s-i(?:\b|['"])/.test(cmd)) return true;
   if (/\bawk\b[^|;&]*?(?<![0-9])>\s*(?![&/])\S/.test(cmd)) return true;
@@ -365,9 +370,10 @@ export function looksLikeFileWrite(cmd: string): boolean {
   return false;
 }
 
+// 판정 본체는 src/state-access-guard.ts 에 있다 (플러그인 로더가 이 파일의 모든
+// named export 를 factory 로 호출하므로 신규 helper 는 여기 두지 않는다).
 export function looksLikeSealedStateWrite(cmd: string): boolean {
-  return /\.makdoong2-team\/[^/\s]+\/state\.json/.test(cmd)
-    && !/state\.sh\s+(get|set|init|issue|root|update)/.test(cmd);
+  return classifyStateJsonAccess(cmd).kind === "write";
 }
 
 export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktree }) => {
@@ -1247,12 +1253,20 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
 
       // ── Universal state.json hardrule: agent 식별 결과와 무관하게 차단 ──
       // sessionAgent map race, primary/outer session, undefined agent 모두 포함.
-      if (looksLikeSealedStateWrite(cmd)) {
-        logger.error(`[makdoong2-team hook] BLOCKED: state.json 우회 조작 시도 (agent="${agent ?? "unknown"}"). cmd="${redactAndTruncate(cmd, 200)}"`);
-        throw new Error(
-          `[makdoong2-team state hardrule] state.json 은 오직 state.sh (get/set/init/append/update/migrate) 로만 조작할 수 있다.\n` +
-          `직접 편집 (python -c open, node -e writeFileSync, sed -i, jq > , tee, cat > , echo > 등)은 workflow 정합성을 훼손하므로 금지된다.\n` +
-          `caller agent="${agent ?? "unknown"}"`
+      // 차단 대상은 *쓰기* 뿐이다 — 읽기 전용 진단까지 막으면 state_unreadable
+      // 복구 절차(next_action)를 수행할 수단이 사라진다 (issue #5).
+      const stateAccess = classifyStateJsonAccess(cmd);
+      if (stateAccess.kind === "write") {
+        logger.error(
+          `[makdoong2-team hook] BLOCKED: state.json 쓰기 우회 시도 (agent="${agent ?? "unknown"}", ` +
+          `reason="${stateAccess.reason}"). cmd="${redactAndTruncate(cmd, 200)}"`,
+        );
+        throw new Error(buildStateWriteBlockMessage(stateAccess.reason, agent));
+      }
+      if (stateAccess.kind === "read-only") {
+        logger.debug(
+          `[makdoong2-team hook] state.json 읽기 전용 진단 허용 (agent="${agent ?? "unknown"}", ` +
+          `readers=${stateAccess.readers.join(",")})`,
         );
       }
 
@@ -3030,8 +3044,11 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 `state.json 을 판독할 수 없습니다. worktree cwd 기준 예상 경로: ${expectedPath}. ` +
                 `주요 원인: (1) wt-sync-ignored.sh 로 worktree 동기화 미수행, (2) 다른 cwd(main repo)에서 state.json 을 조작하여 worktree 사본과 불일치, (3) state.json 손상.`,
               next_action:
-                `state.json 존재/유효성을 먼저 확인하세요. 필요 시 'bash ${SCRIPTS_DIR}/wt-sync-ignored.sh ${effectiveCwd} ${args.issue}' 로 재동기화하거나, ` +
+                `① 먼저 'bash ${SCRIPTS_DIR}/state.sh status ${args.issue}' 로 존재/유효성을 확인하세요 ` +
+                `(승인된 읽기 명령입니다 — 훅이 차단하지 않습니다). ` +
+                `② exists=false 면 'bash ${SCRIPTS_DIR}/wt-sync-ignored.sh ${effectiveCwd} ${args.issue}' 로 재동기화하거나, ` +
                 `'bash ${SCRIPTS_DIR}/state.sh init ${args.issue} ${effectiveCwd}' 로 초기화하세요. ` +
+                `③ readable=false (JSON 손상) 면 사용자에게 에스컬레이션하세요. ` +
                 `근본 원인이 해소되기 전에는 dispatch_stage 를 호출하지 마세요.`,
             });
           }

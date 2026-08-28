@@ -240,7 +240,7 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 5. **Issue-reporter 트리거 강제** — `skill(name="makdoong2-issue-reporter")` 를 전용 에이전트 외의 식별된 에이전트가 호출하면 throw (§4.6)
 6. `bash` 툴이면 `guard-bash.sh` 실행 — `rm -rf` / `git push --force` 등은 `APPROVED_DESTRUCTIVE` 마커 없으면 exit 2, `git push` 는 `stage7-pr-verify.sh` 게이트 통과 요구
 
-**state.json 조작 하드룰**: state.json 은 오직 `state.sh` 로만 조작한다. `jq > state.json`, `sed -i state.json`, `python -c open()` 같은 우회는 이 훅이 즉시 차단한다.
+**state.json 조작 하드룰**: state.json **쓰기**는 오직 `state.sh` 로만 한다. `jq > state.json`, `sed -i state.json`, `python -c open()`, `git add state.json` 같은 우회는 이 훅이 즉시 차단한다. **읽기 전용 진단(`ls` / `file` / `head` / `cat` / `jq` / `git check-ignore`)은 차단하지 않는다** — 막으면 `state_unreadable` 복구 절차 자체가 불가능해진다 (§5.5).
 
 ### 4.3 2중 방어
 
@@ -425,6 +425,43 @@ if [[ "$REL" == /* ]]; then ABS="$REL"; else ABS="$(bash <SCRIPTS_DIR>/state.sh 
 - **형제 디렉토리 하드룰**: `stage4-dev-verify.sh` ~ `stage7-pr-verify.sh` 의 `assert_worktree_sibling()` 이 `dirname(worktree) == dirname(main repo)` 를 검증한다. 서브디렉토리 배치는 메인 repo `.gitignore` 누출을 유발하므로 금지
 - **동기화**: `wt-sync-ignored.sh <worktree> <issue>` (forward) / `--reverse`. 해당 이슈 디렉토리만 복사하고 다른 이슈, `target/`, `node_modules/` 는 제외한다 — cross-issue state 오염 방지
 - **복구**: 잘못된 위치의 worktree 는 `git worktree remove <경로>` + `state.sh set <issue> '.worktree' 'null'` 후 `auto_advance_stage` 재호출
+
+### 5.5 읽기는 막지 않는다 — `state.sh status` 와 state_unreadable 복구
+
+state.json 하드룰이 지키는 것은 **쓰기 경로**다. 읽기는 스키마 정합성에 영향을 주지 않으므로 차단하지 않는다.
+
+이 구분이 없던 동안, `auto_advance_stage` 가 `state_unreadable` 을 반환하며 "존재/유효성을 먼저 확인하라" 고 안내하면 — 그 확인 명령(`ls` / `file` / `head`)이 같은 훅에 "우회 조작 시도" 로 막혔다. leader 는 안내받은 복구 명령을 한 줄도 실행하지 못한 채, 차단을 leader 하드룰 2(bash 파일 쓰기) 위반으로 오인해 자체 abort 했다. 워크플로우는 시작조차 되지 않았다.
+
+**판정** (`src/state-access-guard.ts` — `classifyStateJsonAccess`):
+
+| 순서 | 조건 | 판정 |
+|---|---|---|
+| 1 | 명령에 `.makdoong2-team/<이슈>/state.json` 이 없음 | `unrelated` |
+| 2 | 쓰기 지표 (리디렉션, `tee`, `sed -i`, 인터프리터 `-c/-e`, `cp/mv/rm/truncate`, git 쓰기 서브커맨드, 편집기) | `write` — **차단** |
+| 3 | 승인된 `state.sh <서브커맨드>` 호출 | `approved-helper` |
+| 4 | state.json 을 언급하는 **모든** 세그먼트가 읽기 전용 allowlist (`ls`/`cat`/`file`/`head`/`stat`/`jq`/`grep`/`git check-ignore` …) | `read-only` |
+| 5 | 그 외 | `write` — **차단** |
+
+2번이 3번보다 먼저인 것이 계약이다 — `state.sh get … ; rm …/state.json` 같은 밀수를 막는다. 4번이 allowlist 인 것도 계약이다: 오탐(읽기를 막음)에는 `state.sh status` 라는 우회로가 있지만 미탐(쓰기를 허용)에는 복구 수단이 없다. **애매하면 차단**한다.
+
+**두 훅이 함께 움직여야 한다.** universal state 훅(`looksLikeSealedStateWrite`)과 leader 하드룰 2(`looksLikeFileWrite`)가 모두 같은 분류기를 쓴다. 한쪽만 고치면 leader 는 여전히 막힌다 — 실제로 그 상태였다.
+
+**`state.sh status <이슈>`** — 승인된 읽기 전용 진단. `state_unreadable` 복구의 1단계이며 `next_action` 이 이 명령을 지목한다.
+
+```
+path=/w/.makdoong2-team/PROJ-1/state.json
+exists=true            # 파일 부재와 JSON 손상을 구분한다
+readable=true          # jq 로 파싱 가능
+issue=PROJ-1
+worktree=/w
+stages=1_planning,2_implementation,3_delivery
+phantom_keys=none      # flat 표기 오염 감지 (§5.2)
+next=…                 # 정상이 아닐 때만, 실행할 복구 명령
+```
+
+exit 0 = 존재 && 판독 가능, exit 1 = 그 외. `state.sh get` 은 값 조회 전용이라 부재와 `null` 값을 stdout 으로 구분하지 못한다(exit code 만 다름) — 존재 확인에는 `status` 를 쓴다.
+
+**회귀 방지**: `test/state-access-guard.test.mjs` (분류 계약 + 두 훅 일치 + 서브커맨드 목록 정합성), `test/state-sh-schema.test.mjs` (`status` 출력, usage).
 
 ---
 

@@ -57,10 +57,13 @@
 - 로깅 아키텍처 상세: ARCHITECTURE.md §11 참조.
 
 ### state.json 조작 (hardrule)
-- state.json 은 오직 `scripts/state.sh` (get/set/init/issue/root/append/update/migrate) 를 통해서만 조작한다.
-- `python -c "... open('state.json', 'w') ..."`, `jq ... > state.json`, `sed -i state.json` 등 인터프리터 서브프로세스나 리다이렉트 우회는 `tool.execute.before` 훅이 물리적으로 차단한다 (state.json 경로가 명령에 포함되고 `state.sh` 호출이 아니면 exit).
+- state.json **쓰기**는 오직 `scripts/state.sh` (root/issue/init/status/get/set/append/migrate) 를 통해서만 한다.
+- `python -c "... open('state.json', 'w') ..."`, `jq ... > state.json`, `sed -i state.json`, `cp`/`mv`/`rm`, `git add state.json` 등 인터프리터 서브프로세스나 리다이렉트 우회는 `tool.execute.before` 훅이 물리적으로 차단한다.
+- **읽기는 차단하지 않는다.** `ls` / `cat` / `file` / `head` / `stat` / `jq` / `git check-ignore` 로 state.json 을 조회하는 진단 명령은 통과한다. 존재·유효성 확인은 `bash <SCRIPTS_DIR>/state.sh status <이슈키>` 를 쓴다 (exists / readable / phantom_keys / next 를 key=value 로 보고). 읽기까지 막으면 `state_unreadable` 이 안내하는 복구 절차를 수행할 수단이 사라진다.
+- 판정은 `src/state-access-guard.ts` 의 `classifyStateJsonAccess` 하나가 하고, universal state 훅과 leader 하드룰 2 가 **둘 다** 이것을 쓴다. 한쪽만 고치면 leader 는 여전히 막힌다. 애매한 명령은 차단이 기본값이다 — 읽기 오탐에는 `state.sh status` 우회로가 있지만 쓰기 미탐에는 복구 수단이 없다.
+- 서브커맨드 목록을 늘릴 때는 `state.sh` 의 case, `STATE_SH_SUBCOMMANDS`, usage 한 줄을 함께 고친다 (`test/state-access-guard.test.mjs` 가 세 곳의 정합성을 강제한다).
 - 스키마는 항상 hierarchical: `.stages."<PHASE>".substages."<SUBSTAGE>".<field>`. flat 표기(`"<PHASE>.<SUBSTAGE>"`) 금지. `.policy.auto_approve.*` 만 예외적으로 flat 유지.
-- 상세: ARCHITECTURE.md §5.2 참조.
+- 상세: ARCHITECTURE.md §5.2 (스키마) / §5.5 (읽기 허용 · `state.sh status` · 복구) 참조.
 
 ### 파일 편집 (sealed sub-agent + team-leader)
 - `makdoong2-team-leader` 는 Write/Edit/Patch/Multiedit 툴 부재 → 직접 파일 편집·생성 불가. 모든 파일 조작은 `dispatch_stage` 로 위임.

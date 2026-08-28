@@ -281,6 +281,143 @@ describe("state.sh — init auto-migrates existing contaminated state", () => {
   });
 });
 
+describe("state.sh status — 승인된 읽기 전용 진단 (issue #5)", () => {
+  function kv(stdout) {
+    // next= 는 여러 줄 나올 수 있으므로 배열로 모은다.
+    const out = {};
+    for (const line of stdout.split("\n")) {
+      const i = line.indexOf("=");
+      if (i < 0) continue;
+      const k = line.slice(0, i), v = line.slice(i + 1);
+      if (k === "next") (out.next ??= []).push(v);
+      else out[k] = v;
+    }
+    return out;
+  }
+
+  test("파일 부재를 exists=false + exit 1 로 명시한다", () => {
+    const wt = makeWorktree();
+    try {
+      const r = stateSh(wt, "status", "TEST-MISSING");
+      assert.equal(r.code, 1, "부재는 exit 1");
+      const s = kv(r.stdout);
+      assert.equal(s.exists, "false");
+      assert.equal(s.readable, "false");
+      assert.match(s.path, /\.makdoong2-team\/TEST-MISSING\/state\.json$/);
+      assert.ok(s.next.some(n => n.includes("state.sh init")), "복구 명령을 제시해야 한다");
+      assert.ok(s.next.some(n => n.includes("wt-sync-ignored.sh")));
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  test("정상 파일은 exit 0 과 핵심 필드를 보고한다", () => {
+    const wt = makeWorktree();
+    try {
+      stateSh(wt, "init", "TEST-1", wt);
+      const r = stateSh(wt, "status", "TEST-1");
+      assert.equal(r.code, 0, `stderr=${r.stderr}`);
+      const s = kv(r.stdout);
+      assert.equal(s.exists, "true");
+      assert.equal(s.readable, "true");
+      assert.equal(s.issue, "TEST-1");
+      assert.equal(s.worktree, wt);
+      assert.equal(s.stages, "1_planning,2_implementation,3_delivery");
+      assert.equal(s.phantom_keys, "none");
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  test("손상된 JSON 은 exists=true + readable=false 로 구분된다", () => {
+    const wt = makeWorktree();
+    try {
+      stateSh(wt, "init", "TEST-1", wt);
+      writeFileSync(statePath(wt, "TEST-1"), "{ not json");
+      const r = stateSh(wt, "status", "TEST-1");
+      assert.equal(r.code, 1);
+      const s = kv(r.stdout);
+      assert.equal(s.exists, "true", "부재와 손상은 구분되어야 한다");
+      assert.equal(s.readable, "false");
+      assert.ok(s.next.some(n => n.includes("에스컬레이션")), "손상은 자동 복구 대상이 아니다");
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  test("phantom(flat) 키를 찾아 migrate 를 안내한다", () => {
+    const wt = makeWorktree();
+    try {
+      stateSh(wt, "init", "TEST-1", wt);
+      const s0 = readState(wt, "TEST-1");
+      s0.stages["1_planning.jira"] = { done: true };
+      writeState(wt, "TEST-1", s0);
+      const r = stateSh(wt, "status", "TEST-1");
+      assert.equal(r.code, 0);
+      const s = kv(r.stdout);
+      assert.equal(s.phantom_keys, "1_planning.jira");
+      assert.ok(s.next.some(n => n.includes("state.sh migrate")));
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  test("인자 없이 부르면 raw bash 에러 대신 usage 를 낸다", () => {
+    const wt = makeWorktree();
+    try {
+      const r = stateSh(wt, "status");
+      assert.equal(r.code, 64);
+      assert.match(r.stderr, /usage: state\.sh status <issue>/);
+      assert.doesNotMatch(r.stderr, /parameter null or not set/);
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("state.sh get/set/append — 인자 누락 시 usage (issue #5 부수 관찰)", () => {
+  test("get 은 jq-path 누락 시 usage + status 안내", () => {
+    const wt = makeWorktree();
+    try {
+      stateSh(wt, "init", "TEST-1", wt);
+      const r = stateSh(wt, "get", "TEST-1");
+      assert.equal(r.code, 64);
+      assert.match(r.stderr, /usage: state\.sh get <issue> <jq-path>/);
+      assert.match(r.stderr, /state\.sh status/);
+      assert.doesNotMatch(r.stderr, /parameter null or not set/);
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  test("get 은 파일 부재를 stderr 로 알리되 stdout 계약은 유지한다", () => {
+    const wt = makeWorktree();
+    try {
+      const r = stateSh(wt, "get", "TEST-MISSING", ".issue");
+      assert.equal(r.code, 1);
+      assert.equal(r.stdout, "null", "stdout 은 정확히 한 줄 null 이어야 한다");
+      assert.match(r.stderr, /state\.json 없음/);
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  test("set / append 도 usage 로 실패한다", () => {
+    const wt = makeWorktree();
+    try {
+      stateSh(wt, "init", "TEST-1", wt);
+      const s = stateSh(wt, "set", "TEST-1", ".foo");
+      assert.equal(s.code, 64);
+      assert.match(s.stderr, /usage: state\.sh set/);
+      const a = stateSh(wt, "append", "TEST-1", ".foo");
+      assert.equal(a.code, 64);
+      assert.match(a.stderr, /usage: state\.sh append/);
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("state.sh root — worktree-local behavior", () => {
   function makeMainWithCommit() {
     const main = mkdtempSync(join(tmpdir(), "makdoong2-main-"));
