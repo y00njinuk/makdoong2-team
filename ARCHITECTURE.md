@@ -269,44 +269,71 @@ makdoong2-team 자체의 결함을 GitHub 이슈(y00njinuk/makdoong2-team)로 �
 | 구성요소 | 파일 | 역할 |
 |---|---|---|
 | skill | `skills/makdoong2-issue-reporter/SKILL.md` | 수집 → 이상 지점 포착 → 마스킹 → 중복 확인 → 질의 → 이슈 생성 절차 정의 |
-| agent | `agents/makdoong2-issue-reporter.md` | `mode: all` + bash/write 전권. 임시 페이로드 파일 생성·curl 을 직접 수행 |
+| agent | `agents/makdoong2-issue-reporter.md` | `mode: subagent` + `hidden: true` (목록 비노출) + bash/write 전권. 임시 페이로드 파일 생성·curl 을 직접 수행 |
 | command | `command/makdoong2-issue-reporter.md` | 사용자 진입점 `/makdoong2-issue-reporter`. `agent:` 필드로 전용 에이전트에 라우팅, `subtask: false` |
 
 **설계 포인트 3가지**:
 
-1. **권한 상승은 에이전트 교체로 달성한다.** team-leader 의 파일 쓰기·git 제한(frontmatter L1 + 훅 L2)은 그대로 두고, 커맨드가 전권 에이전트로 라우팅한다. `mode: all` 에이전트 + `subtask: false` 조합은 opencode 가 **인라인 실행**하므로 직전 대화 컨텍스트를 그대로 보고, 마스킹 최종 승인 같은 사용자 문답도 같은 세션에서 이어진다 (subtask 로 격리하면 둘 다 불가능).
+1. **권한 상승은 에이전트 교체로 달성하되, 그 에이전트는 목록에 띄우지 않는다.** team-leader 의 파일 쓰기·git 제한(frontmatter L1 + 훅 L2)은 그대로 두고, 커맨드가 전권 에이전트로 라우팅한다. 진입점은 커맨드 하나여야 하므로 에이전트는 `mode: subagent` + `hidden: true` 로 **사용자 선택 목록(primary)과 `@` 멘션·task 자동완성 양쪽에서 감춘다**. opencode 의 노출 필터는 일관되게 `mode !== "subagent" && hidden !== true` 다.
+
+   그러면서도 **인라인 실행은 유지된다**: opencode 의 subtask 판정은 `mode === "subagent" && subtask !== false || subtask === true` 이므로, 커맨드의 `subtask: false` 가 `mode: subagent` 를 이겨 자식 세션을 만들지 않고 현재 세션의 에이전트를 전환한다. 덕분에 직전 대화 컨텍스트를 그대로 보고, 마스킹 최종 확인 같은 사용자 문답도 같은 세션에서 이어진다. **`subtask: false` 를 빼면 격리되어 둘 다 잃는다.**
+
+   목록에서 감추는 것과 부를 수 없는 것은 다르다 — opencode 의 `task` 툴은 `subagent_type` 의 mode 를 검사하지 않아 이름만 알면 spawn 된다. 그 간극은 `tool.execute.before` 의 `issueReporterTaskSpawnViolation` 이 닫는다.
 2. **command 이름 == skill 이름 (hardrule).** opencode 는 스킬을 자동으로 같은 이름의 커맨드로 노출하는데, 그 커맨드에는 `agent` 필드가 없어 현재 에이전트(권한 제한된 team-leader)로 실행된다. cfg.command 가 먼저 채워지고 같은 이름의 skill-derived command 는 건너뛰어지므로, 같은 이름의 command 파일을 배포해 이를 덮어쓴다. 이름이 어긋나면 권한 없는 진입점이 살아남는다 — `test/issue-reporter-guard.test.mjs` 가 일치를 강제한다.
 3. **유일한 트리거는 사용자 직접 호출.** 에이전트가 실패를 관측했다고 자율적으로 이슈를 등록하지 않는다. 1차 방어는 SKILL.md description 의 명시, 2차 방어는 `tool.execute.before` 훅 — 전용 에이전트 외의 식별된 에이전트가 `skill()` 로 로드하면 throw 하고 `/makdoong2-issue-reporter` 실행 안내를 반환한다 (`src/issue-reporter-guard.ts`). agent 미상 세션은 outer-world 가드와 동일하게 passthrough.
 
 issue-reporter 는 SEALED_SUBAGENTS 에도 등록되어 있다 — 워크플로우에 참여하지 않지만, outer-world 로 위임하면 마스킹·사용자 승인 게이트가 위임처에서 우회될 수 있기 때문이다. state.json 은 읽기(`state.sh get`)만 허용한다.
 
+**PAT 부재는 실패가 아니라 요청 사유다.** 토큰은 `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/.github` 에서 읽는데, 파일이 없거나 토큰 패턴을 추출하지 못하면 조용히 종료하지 않는다. 수집·분석은 그대로 끝내고, 등록 직전에 발급 URL(fine-grained / classic)과 **최소 권한**(fine-grained: Issues Read and write, classic: `public_repo`, Gist 를 쓸 때만 각각 Gists / `gist` 추가), 저장 명령(`chmod 600` 포함)을 제시하며 사용자에게 발급을 요청하고 대기한다. 발급·저장 주체는 사용자이고 에이전트는 토큰 값을 재출력하지 않는다. `401`/`403` 도 같은 경로를 타되 받은 상태 코드와 `message` 를 덧붙여 재발급을 요청한다. 사용자가 거부하면 본문 전체를 마크다운으로 출력해 수동 등록으로 넘긴다. 절차 원문은 SKILL.md §1.1, 회귀는 `test/issue-reporter-guard.test.mjs` → "PAT 부재 — 토큰 발급 요청 절차".
+
 #### 4.6.1 GitHub 게시 승인 게이트 (원문 확인 강제)
 
-에이전트가 전권이더라도 **GitHub 에 무엇을 게시하는가**는 사용자가 원문 전체를 보고 승인해야 한다. 채팅 승인은 프롬프트 규약일 뿐이므로 훅이 물리적으로 강제한다:
+에이전트가 전권이더라도 **GitHub 에 무엇을 게시하는가**는 사용자가 원문 전체를 보고 승인해야 한다. 승인은 **세션 안의 yes/no 질문**으로 받고, 그 질문이 형식적 절차로 전락하지 않도록 두 조각을 각각 코드가 강제한다.
+
+| 조각 | 무엇을 보장하나 | 누가 강제하나 |
+|---|---|---|
+| **(가) 의사표시** | 사용자가 실제로 "예" 라고 답했다 | 에이전트 frontmatter 의 `"*-d @/*": "ask"`. opencode 가 bash 툴 실행 전에 permission 프롬프트를 띄우고(`$ <명령 전문>` + Allow once / Allow always / Reject), 거부하면 tool 이 실행되지 않는다 |
+| **(나) 정보에 근거한 동의** | 사용자가 본 원문 == 전송되는 원문 | 전송 전 단독 `cat <payload>` 의 sha256 을 `tool.execute.after` 가 기록하고, `tool.execute.before` 가 전송 직전 현재 파일과 대조한다 |
+
+(나)가 따로 필요한 이유는 permission 프롬프트에 **curl 명령만 보이고 본문은 파일 안에 있기 때문**이다. 프롬프트만으로는 무엇이 게시되는지 알 수 없으므로, 세션에 출력된 원문을 동의의 근거로 삼는다.
+
+**패턴과 허용 표기는 한 쌍이다 (hardrule).** 프롬프트는 frontmatter 패턴이 명령 문자열에 매치될 때만 뜨므로, 훅이 허용하는 전송 표기가 그 패턴에 걸리지 않으면 **질문 없이 게시된다**. 그래서 `classifyGithubApiCall` 은 payload 표기를 정확히 `-d @/절대경로` 하나로 고정하고(`APPROVABLE_PAYLOAD_RE`), 의미가 같은 `--data @file`·`--data-binary @file`·`-d=@file` 을 전부 problems 로 차단한다. 한쪽을 고치면 반드시 다른 쪽도 고쳐야 하며, `test/issue-reporter-guard.test.mjs` 의 "frontmatter 의 ask 패턴과 훅이 허용하는 표기가 한 쌍이다" 가 이를 강제한다.
+
+> **플러그인 훅으로 승인을 가로챌 수 없다.** `@opencode-ai/plugin` 타입에는 `"permission.ask"` 훅이 선언되어 있지만, 실행 중인 opencode 1.18.23 바이너리의 훅 트리거 목록(`chat.*`, `command.execute.before`, `tool.definition`, `tool.execute.before/after`, `shell.env`, `file.open`, `tab.new`, `experimental.*`)에 **존재하지 않는다** — 1.18.15 타입에만 남은 잔재다. 승인 여부를 플러그인이 코드로 결정할 방법은 없고, frontmatter 패턴이 유일한 수단이다. 또한 permission 이 `allow` 로 해석되면 요청 객체 자체가 만들어지지 않으므로(`Permission.ask` 는 ask 가 하나도 없으면 즉시 return), 훅이 있었더라도 개입 지점이 없다.
+
+**규칙 순서 주의.** opencode 의 `Permission.evaluate` 는 매치되는 규칙 중 **마지막**을 채택한다(`findLast`). 패턴은 glob 이 아니라 `*`→`.*` 정규식 전체 매치다. 따라서 frontmatter 에서 `"*": "allow"` 를 위에, `"*-d @/*": "ask"` 를 아래에 두어야 하며 순서를 뒤집으면 승인 질문이 사라진다.
 
 ```
 payload 작성(리터럴 절대경로 JSON)
-  → 에이전트가 원문 전문을 채팅에 표시
-  → 사용자가 직접: bash <SCRIPTS_DIR>/issue-reporter-approve.sh <payload>
-      (스크립트가 원문 전문을 다시 출력 → stdin confirm → <payload>.approved 에 sha256 기록)
+  → 에이전트가 단독 `cat <payload>` 로 원문 전문을 세션에 표시
+      (훅: 그 시점의 sha256 을 표시 증명으로 기록)
   → 에이전트가 단일 curl -d @<payload> 로 전송
-      (훅: 마커 존재 + 해시 일치 검증 → 통과. 전송 후 마커 자동 삭제 = 1회용)
+      → opencode 가 사용자에게 게시 여부를 묻는다 (yes/no)  ← 승인의 의사표시
+      → 훅: 형식 검증 + 표시 증명 해시 일치 → 통과
+      → 전송 후 표시 증명 폐기 = 1회용
 ```
 
 `tool.execute.before` 가 issue-reporter 의 bash 를 `classifyGithubApiCall()` 로 분류해 강제하는 규칙:
 
 | 시도 | 판정 |
 |---|---|
-| `curl` GET / `-G --data-urlencode` (검색·라벨 조회) | 통과 (읽기) |
-| `curl -X POST/PATCH/PUT/DELETE` 또는 데이터 플래그 | 마커 검증 대상 |
+| `curl` GET / `-G --data-urlencode` (검색·라벨 조회) | 통과 (읽기). ask 패턴에 걸리지 않아 사용자를 묻지 않는다 |
+| `curl -X POST/PATCH/PUT/DELETE` 또는 데이터 플래그 | 표시 증명 검증 대상 + 사용자 yes/no |
 | 인라인 JSON(`-d '{...}'`) · stdin(`-d @-`) · 상대경로 · 변수 경로 | 차단 — 승인 검증 불가 형태 |
+| `--data @file` · `--data-binary @file` · `-d=@file` | 차단 — 의미는 같지만 ask 패턴에 매치되지 않아 질문 없이 전송된다 |
 | 쓰기 명령에 체이닝·리다이렉트·명령 치환 혼합 | 차단 — **TOCTOU 방어** (검증 후 같은 명령 안에서 payload 재작성 → 전송하는 우회를 막는다) |
 | `gh` CLI (`gh issue create` 등) · node/python/wget 로 GitHub 접근 | 차단 — URL 문자열 없이 게시 가능한 클라이언트라 검증 불가 |
-| 에이전트의 승인 스크립트 실행 · `*.approved` 생성/조작 (bash·write 툴 불문) | 차단 — 승인은 사용자 전용 |
+| 표시 없이 전송 · 표시 후 payload 변경 | 차단 — 사용자가 보지 못한 내용은 게시되지 않는다 |
 
-승인이 **내용(sha256)에 바인딩**되므로 승인 후 payload 를 수정하면 해시 불일치로 차단되고, 전송이 실행되면 결과와 무관하게 마커가 소멸해 재시도에도 재승인이 필요하다. 승인 스크립트는 stdin confirm(`lib/confirm.sh`)이라 에이전트 셸의 EOF 로는 넘어갈 수 없고, `printf 'y' |` 파이프 우회는 실행 자체를 훅이 막는 것으로 차단한다.
+**읽기를 `allow` 로 내리는 것은 편의가 아니라 게이트 설계의 일부다.** 중복 검색·라벨 조회까지 매번 물으면 승인 프롬프트가 일상이 되어 사용자가 습관적으로 승인하게 되고, 정작 게시 시점의 "예" 가 의미를 잃는다.
 
-관련: `src/issue-reporter-guard.ts`, `scripts/issue-reporter-approve.sh`, `test/issue-reporter-guard.test.mjs`.
+표시 증명은 **프로세스 메모리에만** 둔다. 디스크에 남기면 이전 마커 방식과 같은 "파일로 존재하는 승인" 이 되어 위조 표면이 다시 생긴다. `cat` 을 단독 실행으로 제한하는 것도 같은 이유다 — `cat p; echo x > p` 를 허용하면 사용자가 본 내용과 파일에 남는 내용이 갈라진다. write 계열 툴이 표시된 payload 를 건드리면 훅이 증명을 즉시 폐기한다.
+
+**남아 있는 취약점: "Allow always".** 승인 프롬프트의 세 번째 선택지는 매치된 패턴을 세션 `approved` 목록에 `allow` 로 추가하고, 그 규칙은 agent 규칙보다 **뒤에** 병합되어 이긴다. 즉 사용자가 한 번 "always" 를 고르면 남은 세션 동안 (가)가 사라진다. 플러그인이 막을 수단은 없다 — 프롬프트 UI 도, 세션 approved 목록도 훅이 닿지 않는다. 완화는 두 가지뿐이다: 에이전트가 안내할 때 "Allow once" 를 고르도록 명시하고(`agents/makdoong2-issue-reporter.md` 하드룰 2-3), (나)는 그와 무관하게 매 전송마다 재표시를 요구하므로 **무엇이 게시되는지는 여전히 사용자가 본다**.
+
+> **2026-08 변경**: 이전에는 사용자가 별도 셸에서 `scripts/issue-reporter-approve.sh <payload>` 를 직접 실행해 `<payload>.approved` 마커(sha256)를 만드는 방식이었다. 그 한 번의 실행이 (가)와 (나)를 동시에 만족시켰지만, 세션을 벗어나 터미널을 오가야 했다. 승인을 세션 안의 질문으로 옮기면서 (가)는 opencode permission 으로, (나)는 표시 증명으로 나누어 넘겼다. 스크립트와 마커 계약은 제거되었다.
+
+관련: `src/issue-reporter-guard.ts`, `test/issue-reporter-guard.test.mjs`.
 
 ---
 

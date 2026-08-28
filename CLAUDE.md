@@ -72,7 +72,10 @@
 ### issue-reporter 스킬 (사용자-전용 트리거 — hardrule)
 - `makdoong2-issue-reporter` 는 **skill + agent + command 3종 세트**다. skill 이름 == command 파일명 == agent 이름이 모두 일치해야 command 가 opencode 의 skill-derived command 를 덮어써 전권(full-permission) 에이전트로 라우팅된다 (`test/issue-reporter-guard.test.mjs` 가 강제).
 - **유일한 트리거는 사용자의 `/makdoong2-issue-reporter` 직접 호출.** team-leader 포함 다른 에이전트가 `skill()` 로 자율 로드하면 `tool.execute.before` 훅이 차단한다. 실패를 관측한 에이전트는 사용자에게 커맨드 실행을 안내만 한다.
-- **GitHub 게시(이슈·코멘트·Gist·라벨)는 사용자가 원문 전체를 보고 승인해야만 가능하다 (훅 강제).** payload 는 리터럴 절대경로 파일 + 단일 curl `-d @file` 형태만 허용되고, 사용자가 `scripts/issue-reporter-approve.sh` 로 승인하면 sha256 마커가 생긴다. 승인은 내용에 바인딩(변경 시 무효)·1회용(전송 시 자동 소멸)이며, 에이전트의 승인 스크립트 실행·마커 조작은 차단된다.
+- **에이전트는 어떤 목록에도 노출되지 않는다.** `mode: subagent` + `hidden: true` 로 primary 선택 목록과 `@` 멘션·task 자동완성에서 모두 감춘다. 커맨드의 **`subtask: false` 는 필수** — 이게 빠지면 `mode: subagent` 가 자식 세션으로 격리시켜 직전 대화 컨텍스트를 잃는다. 목록에서 감추는 것만으로는 부족해서(`task` 툴은 mode 를 검사하지 않는다) `issueReporterTaskSpawnViolation` 이 spawn 을 런타임 차단한다.
+- **GitHub 게시(이슈·코멘트·Gist·라벨)는 사용자가 원문 전체를 보고 세션 안에서 승인해야만 가능하다.** 승인은 두 조각이다: (가) 의사표시 — frontmatter 의 `"*-d @/*": "ask"` 가 띄우는 opencode permission 프롬프트의 yes/no, (나) 정보에 근거한 동의 — 전송 전 단독 `cat <payload>` 의 sha256 을 훅이 기록하고 전송 직전 대조한다. 표시 없이 전송하거나 표시 후 내용을 바꾸면 차단되고, 증명은 전송 시 폐기되는 1회용이다.
+- **frontmatter 의 ask 패턴과 훅이 허용하는 payload 표기(`-d @/절대경로`)는 한 쌍이다.** 프롬프트는 패턴이 명령에 매치될 때만 뜨므로, 표기를 늘리면(`--data @file` 등) 질문 없이 게시되는 경로가 생긴다. 한쪽만 고치지 말 것. opencode 규칙은 `findLast` 라 **넓은 규칙을 위, 좁은 규칙을 아래**에 둔다.
+- **플러그인 훅으로 승인을 가로챌 수 없다.** `@opencode-ai/plugin` 타입의 `permission.ask` 는 1.18.23 런타임에 존재하지 않는 잔재다. 승인 제어 수단은 frontmatter 패턴뿐이다.
 - 상세: ARCHITECTURE.md §4.6 참조.
 
 ### 다출처 병렬 조사 (dispatch_research)

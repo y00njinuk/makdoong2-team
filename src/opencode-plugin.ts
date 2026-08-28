@@ -58,14 +58,12 @@ import { logger } from "./logger.ts";
 import { redactAndTruncate } from "./redact-secrets.ts";
 import {
   issueReporterSkillLoadViolation,
+  issueReporterTaskSpawnViolation,
   ISSUE_REPORTER_AGENT,
-  APPROVAL_MARKER_SUFFIX,
-  APPROVE_SCRIPT_BASENAME,
   classifyGithubApiCall,
-  isApproveScriptInvocation,
-  referencesApprovalMarker,
-  approvalMarkerPath,
-  approvalMismatch,
+  payloadDisplayPaths,
+  displayMismatch,
+  sha256Hex,
 } from "./issue-reporter-guard.ts";
 
 // All runtime paths come from makdoong2-team.json (paths.* overrides) or are
@@ -842,6 +840,17 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   //    Primary agent(team-leader)만 직접 파일 쓰기를 차단하기 위한 최소 필요 조건.
   const sessionAgent = new Map<string, string>();
 
+  // ── issue-reporter 원문 표시 증명 (payload 절대경로 → 표시 시점 sha256) ──────
+  // GitHub 게시 승인의 "정보에 근거한 동의" 쪽 절반이다. permission 프롬프트에는
+  // curl 명령만 보이고 본문은 파일 안에 있으므로, 사용자가 실제로 무엇을 보았는지는
+  // 세션에 출력된 원문으로만 확인된다. 에이전트가 단일 `cat <payload>` 를 실행하면
+  // tool.execute.after 가 그 시점의 해시를 여기 기록하고, 전송 시 현재 파일과
+  // 대조한다. 표시 이후 내용이 바뀌면 차단된다.
+  //
+  // 프로세스 메모리에만 둔다 — 승인은 이 세션의 이 대화에 묶여야 하고, 디스크에
+  // 남기면 예전 마커 방식과 같은 "파일로 존재하는 승인" 이 되어 위조 표면이 생긴다.
+  const issueReporterShownPayloads = new Map<string, string>();
+
   // ── sessionID → Jira Issue Key 매핑 ─────────────────────────────────────────
   // 모든 워크플로우는 Jira Issue Key를 중심으로 설계된다. dispatch_stage /
   // dispatch_verifier / auto_advance_stage 는 항상 args.issue 를 명시적으로
@@ -1173,6 +1182,19 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         }
       }
 
+      // ── issue-reporter 는 task 로 spawn 할 수 없다 ──
+      // frontmatter 의 mode/hidden 은 "목록에서 감추기" 일 뿐이고, opencode 의 task 툴은
+      // subagent_type 의 mode 를 검사하지 않는다. 이름만 알면 부를 수 있으므로 여기서 막는다.
+      if (toolLower === "task") {
+        const taskViolation = issueReporterTaskSpawnViolation((output as { args?: unknown }).args);
+        if (taskViolation) {
+          logger.error(
+            `[makdoong2-team hook] BLOCKED: agent "${agent ?? "unknown"}" attempted task spawn of ${ISSUE_REPORTER_AGENT} (sessionID="${sessionID}")`
+          );
+          throw new Error(taskViolation);
+        }
+      }
+
       // ── skill_mcp lazy-load 사전 힌트 ──
       // opencode 는 skill 이 로드되기 전에 skill_mcp 를 호출하면
       // "MCP server not found" 로 튕기지만 정작 어떤 skill 을 로드해야 하는지는
@@ -1192,21 +1214,20 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         }
       }
 
-      // ── Issue-reporter: 승인 마커는 어떤 툴로도 만들 수 없다 ──
-      // 마커(<payload>.approved)는 오직 사용자가 issue-reporter-approve.sh 를
-      // 직접 실행해서만 생긴다. write/edit 툴로 마커를 위조하면 게시 게이트가
-      // 무력화되므로 경로에 마커 접미사가 보이면 즉시 차단한다.
+      // ── Issue-reporter: payload 를 고쳐 쓰면 표시 증명이 무효가 된다 ──
+      // 마커 파일 방식과 달리 표시 증명은 프로세스 메모리에 있어 위조할 수 없다.
+      // 다만 사용자에게 보여준 뒤 파일만 바꿔치기하는 경로가 남으므로, write 계열
+      // 툴이 표시된 payload 를 건드리면 그 증명을 즉시 폐기한다 (재표시 필요).
       if (agent === ISSUE_REPORTER_AGENT && (LEADER_FORBIDDEN_TOOLS.has(toolLower) || WRITE_TOOLS.has(toolLower))) {
         // filePath 인자뿐 아니라 인자 전체를 검사한다 — apply_patch 는 파일 경로가
-        // 패치 본문 안에 들어 있어 filePath 추출로는 마커 위조를 잡을 수 없다.
+        // 패치 본문 안에 들어 있어 filePath 추출로는 대상 파일을 알 수 없다.
         let argsSerialized = "";
         try { argsSerialized = JSON.stringify((output as { args?: unknown }).args ?? ""); } catch { /* ignore */ }
-        if (referencesApprovalMarker(argsSerialized)) {
-          logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter가 ${input.tool} 인자에서 승인 마커 경로 참조.`);
-          throw new Error(
-            `[makdoong2-team issue-reporter 게시 게이트] 승인 마커(*${APPROVAL_MARKER_SUFFIX})는 에이전트가 생성·수정할 수 없다. ` +
-            `사용자가 'bash ${SCRIPTS_DIR}/${APPROVE_SCRIPT_BASENAME} <payload>' 를 직접 실행해야만 승인이 성립한다.`
-          );
+        for (const shownPath of [...issueReporterShownPayloads.keys()]) {
+          if (argsSerialized.includes(shownPath)) {
+            issueReporterShownPayloads.delete(shownPath);
+            logger.debug(`[makdoong2-team hook] issue-reporter 표시 증명 폐기(${input.tool} 이 payload 를 수정): ${shownPath}`);
+          }
         }
       }
 
@@ -1262,29 +1283,16 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         );
       }
 
-      // ── Issue-reporter 게시 게이트: GitHub 쓰기는 사용자 승인 원문만 ──
-      // 정책·마커 계약 상세: src/issue-reporter-guard.ts 상단 주석.
+      // ── Issue-reporter 게시 게이트: GitHub 쓰기는 사용자가 본 원문만 ──
+      // 승인의 의사표시는 opencode permission 프롬프트(세션 내 yes/no)가 받는다.
+      // 여기서 강제하는 것은 나머지 절반 — 형식(검증 가능한 형태)과 표시 증명
+      // (사용자가 본 원문 == 전송되는 원문). 계약 상세: src/issue-reporter-guard.ts 상단.
       if (agent === ISSUE_REPORTER_AGENT) {
         const approveHint =
-          `승인 절차: 에이전트가 payload 원문 전체를 채팅에 표시한 뒤, 사용자가 직접\n` +
-          `  bash ${SCRIPTS_DIR}/${APPROVE_SCRIPT_BASENAME} </absolute/path/payload.json>\n` +
-          `를 실행한다 (스크립트가 원문을 다시 보여주고 stdin 승인 후 <payload>${APPROVAL_MARKER_SUFFIX} 마커 기록). ` +
-          `이 승인은 1회용이고 payload 내용이 바뀌면 무효다.`;
-
-        if (isApproveScriptInvocation(cmd)) {
-          logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter가 승인 스크립트 실행 시도. cmd="${redactAndTruncate(cmd, 200)}"`);
-          throw new Error(
-            `[makdoong2-team issue-reporter 게시 게이트] ${APPROVE_SCRIPT_BASENAME} 는 사용자 전용이다. ` +
-            `에이전트가 실행하면 승인의 의미가 사라진다. 사용자에게 실행을 안내하고 대기하라.\n${approveHint}`
-          );
-        }
-        if (referencesApprovalMarker(cmd)) {
-          logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter bash가 승인 마커를 참조. cmd="${redactAndTruncate(cmd, 200)}"`);
-          throw new Error(
-            `[makdoong2-team issue-reporter 게시 게이트] 승인 마커(*${APPROVAL_MARKER_SUFFIX})는 에이전트가 ` +
-            `생성·수정·삭제·열람할 수 없다. 마커 검증과 소멸은 훅이 수행한다.\n${approveHint}`
-          );
-        }
+          `승인 절차: ① payload 를 리터럴 절대경로 JSON 파일로 쓴다 → ② 'cat <payload>' 로 원문 전체를\n` +
+          `세션에 표시한다 (체이닝 없이 단독 실행 — 이 출력이 사용자가 보는 원문이고 훅이 해시를 기록한다) →\n` +
+          `③ 단일 curl -d @<payload> 로 전송하면 opencode 가 사용자에게 게시 여부를 묻는다 (yes/no).\n` +
+          `표시 이후 payload 를 고치면 증명이 무효가 되므로 ②부터 다시 한다.`;
 
         const call = classifyGithubApiCall(cmd);
         if (call.kind === "forbidden-client") {
@@ -1305,28 +1313,19 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 `[makdoong2-team issue-reporter 게시 게이트] payload 파일이 없다: ${payloadPath}\n${approveHint}`
               );
             }
-            const markerPath = approvalMarkerPath(payloadPath);
-            if (!existsSync(markerPath)) {
-              logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 — 승인 마커 없음: ${markerPath}`);
-              throw new Error(
-                `[makdoong2-team issue-reporter 게시 게이트] 사용자 승인이 없다.\n` +
-                `게시하려는 원문(${payloadPath})을 채팅에 전문 표시한 뒤, 사용자에게 아래 실행을 안내하고 대기하라:\n` +
-                `  bash ${SCRIPTS_DIR}/${APPROVE_SCRIPT_BASENAME} ${payloadPath}`
-              );
-            }
-            const mismatch = approvalMismatch(
+            const mismatch = displayMismatch(
               readFileSync(payloadPath),
-              readFileSync(markerPath, "utf8"),
+              issueReporterShownPayloads.get(payloadPath),
             );
             if (mismatch !== null) {
               logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 — ${mismatch} (${payloadPath})`);
               throw new Error(
                 `[makdoong2-team issue-reporter 게시 게이트] ${mismatch}.\n` +
-                `현재 원문을 다시 채팅에 전문 표시하고 재승인을 받아라:\n` +
-                `  bash ${SCRIPTS_DIR}/${APPROVE_SCRIPT_BASENAME} ${payloadPath}`
+                `게시될 원문을 세션에 그대로 표시하라 (단독 실행):\n` +
+                `  cat ${payloadPath}\n${approveHint}`
               );
             }
-            logger.debug(`[makdoong2-team hook] issue-reporter 게시 승인 확인: ${payloadPath} (marker hash 일치)`);
+            logger.debug(`[makdoong2-team hook] issue-reporter 표시 증명 확인: ${payloadPath} (hash 일치)`);
           }
         }
       }
@@ -1353,24 +1352,33 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         else sessionActiveToolCount.set(afterSessionID, cur - 1);
       }
 
-      // ── Issue-reporter 승인 마커 1회용 소멸 ──
-      // GitHub 쓰기 명령이 "실행"되고 나면 결과와 무관하게 마커를 삭제한다.
-      // 성공: 재게시에는 새 승인이 필요하다. 실패(네트워크 등): 같은 원문이라도
-      // 재시도 전에 재승인을 받는다 — 마커를 남겨두면 실패를 빌미로 승인 한 번에
-      // 여러 번의 전송 시도가 가능해지므로 엄격한 쪽을 택했다.
+      // ── Issue-reporter 표시 증명 기록·소멸 ──
+      // 기록: 단독 `cat <payload>` 가 실행되면 그 시점의 파일 해시를 남긴다. 이
+      // 출력이 사용자가 세션에서 실제로 본 원문이고, 게시 게이트가 전송 직전에
+      // 같은 해시인지 대조한다.
+      // 소멸: GitHub 쓰기가 "실행"되고 나면 결과와 무관하게 증명을 폐기한다.
+      // 성공이면 재게시에 새 승인이 필요하고, 실패(네트워크 등)여도 재시도 전에
+      // 다시 보여주고 다시 묻는다 — 증명을 남겨두면 실패를 빌미로 승인 한 번에
+      // 여러 번의 전송이 가능해지므로 엄격한 쪽을 택했다.
       if (toolLowerAfter === "bash") {
         const afterAgent = afterSessionID
           ? (sessionAgent.get(afterSessionID) ?? pendingDispatch.get(afterSessionID)?.agent)
           : undefined;
         if (afterAgent === ISSUE_REPORTER_AGENT) {
           const afterCmd = (input.args as { command?: string })?.command ?? "";
+          for (const shownPath of payloadDisplayPaths(afterCmd)) {
+            try {
+              issueReporterShownPayloads.set(shownPath, sha256Hex(readFileSync(shownPath)));
+              logger.debug(`[makdoong2-team hook] issue-reporter 표시 증명 기록: ${shownPath}`);
+            } catch {
+              // 읽을 수 없으면 표시가 성립하지 않은 것이다 — 기록하지 않는다.
+            }
+          }
           const afterCall = classifyGithubApiCall(afterCmd);
           if (afterCall.kind === "mutation") {
             for (const payloadPath of afterCall.payloadPaths) {
-              const markerPath = approvalMarkerPath(payloadPath);
-              if (existsSync(markerPath)) {
-                rmSync(markerPath, { force: true });
-                logger.debug(`[makdoong2-team hook] issue-reporter 승인 마커 소멸(1회용): ${markerPath}`);
+              if (issueReporterShownPayloads.delete(payloadPath)) {
+                logger.debug(`[makdoong2-team hook] issue-reporter 표시 증명 소멸(1회용): ${payloadPath}`);
               }
             }
           }

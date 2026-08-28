@@ -10,7 +10,8 @@ makdoong2-team 플러그인의 결함을 재현 가능한 형태로 GitHub 이�
 ## 트리거 & 실행 컨텍스트 (hardrule)
 
 - **유일한 트리거는 사용자의 직접 호출** — `/makdoong2-issue-reporter [보충 설명]` 커맨드. 커맨드 frontmatter 의 `agent` 필드가 전용 에이전트 `makdoong2-issue-reporter` 로 라우팅한다.
-- **전용 에이전트는 전권(full-permission) 으로 실행된다** — bash 전체 allow, 파일 쓰기 allow. team-leader 의 파일 쓰기·git 제한이 적용되지 않으므로 아래 절차의 임시 파일 생성(`issue-payload.json` 등)과 curl 호출을 그대로 수행할 수 있다.
+- **전용 에이전트는 전권(full-permission) 으로 실행된다** — bash 전체 allow, 파일 쓰기 allow. team-leader 의 파일 쓰기·git 제한이 적용되지 않으므로 아래 절차의 임시 파일 생성(`issue-payload.json` 등)과 curl 호출을 그대로 수행할 수 있다. 예외는 GitHub 게시 하나뿐이고, 그건 7-1 의 사용자 승인을 거친다.
+- **에이전트는 목록에 노출되지 않는다** — `mode: subagent` + `hidden: true` 라 사용자가 고르는 primary 목록에도, `@` 멘션·task 자동완성에도 뜨지 않는다. `task` 툴로 spawn 하는 것도 훅이 차단한다. 위 커맨드가 유일한 진입점이다.
 - **다른 에이전트의 자율 로드 금지** — team-leader·sealed 서브에이전트가 `skill(name="makdoong2-issue-reporter")` 를 호출하면 플러그인 `tool.execute.before` 훅이 차단한다. 실패를 관측한 에이전트는 스킬을 로드하는 대신 사용자에게 `/makdoong2-issue-reporter` 실행을 안내한다.
 - 인라인 실행이므로 현재 세션의 직전 대화 턴을 그대로 볼 수 있다. 4장(항목 확정)과 2.3(마스킹 최종 확인)의 사용자 문답도 같은 세션에서 이어서 진행한다.
 
@@ -47,10 +48,14 @@ PAT는 opencode config 디렉토리의 `.github` 파일에 기록되어 있다. 
 
 ```bash
 PAT_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/opencode/.github"
-test -r "$PAT_FILE" || { echo "PAT 파일 없음 또는 읽기 권한 없음: $PAT_FILE"; exit 1; }
+GH_TOKEN=""
+if [ -r "$PAT_FILE" ]; then
+  GH_TOKEN="$(grep -oE '(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+' "$PAT_FILE" | head -n1)"
+fi
+test -n "$GH_TOKEN" || echo "NO_TOKEN"
 ```
 
-파일 포맷은 다음 중 하나일 수 있으므로 순서대로 판별한다.
+파일 포맷은 다음 중 하나일 수 있으므로 위 grep 이 모두 수용한다.
 
 | 포맷 | 예시 | 추출 방법 |
 |---|---|---|
@@ -58,15 +63,45 @@ test -r "$PAT_FILE" || { echo "PAT 파일 없음 또는 읽기 권한 없음: $P
 | `KEY=VALUE` | `GITHUB_TOKEN=ghp_xxx` | `=` 우측 값 |
 | INI/JSON | `{"token": "ghp_xxx"}` | 해당 키 값 |
 
-```bash
-GH_TOKEN="$(grep -oE '(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+' "$PAT_FILE" | head -n1)"
-```
+### 1.1 토큰이 없을 때 — 사용자에게 발급을 요청한다 (중단하지 않는다)
+
+**파일이 없거나, 있어도 토큰을 추출하지 못했으면 조용히 종료하지 않는다.** 수집·분석은 그대로
+끝내고(3~6장), 등록 직전에 사용자에게 **토큰 발급을 요청한 뒤 대기**한다. 아래 안내를 그대로 제시한다.
+
+> `$PAT_FILE` 에서 GitHub 토큰을 찾지 못했습니다. 이슈를 등록하려면 PAT 가 필요합니다.
+> 아래 중 하나로 발급한 뒤 파일에 저장해 주세요.
+>
+> **A. Fine-grained token** (권장) — https://github.com/settings/personal-access-tokens/new
+> - Repository access: `y00njinuk/makdoong2-team` 만 선택
+> - Repository permissions → **Issues: Read and write**
+> - (증거를 Gist 로 올릴 경우에만) Account permissions → **Gists: Read and write**
+>
+> **B. Classic token** — https://github.com/settings/tokens/new
+> - scope: **`public_repo`** (Gist 사용 시 `gist` 추가)
+>
+> 저장:
+> ```bash
+> mkdir -p "$(dirname "$PAT_FILE")"
+> printf '%s\n' '<발급받은-토큰>' > "$PAT_FILE"
+> chmod 600 "$PAT_FILE"
+> ```
+> 저장하셨으면 알려주세요. 다시 읽어서 등록을 진행합니다.
+
+규칙:
+
+- **토큰 발급·저장은 사용자가 한다.** 에이전트가 토큰을 만들거나 대신 파일에 쓰지 않으며,
+  사용자가 붙여넣은 토큰 값을 채팅에 다시 출력하지 않는다.
+- 사용자가 저장을 알리면 파일을 **다시 읽어** 토큰을 얻고 등록을 이어간다. 여전히 없으면 한 번 더
+  경로·형식을 확인해 알려주고, 그래도 실패하면 아래 수동 등록 대체 경로로 넘어간다.
+- 사용자가 발급을 거부하거나 지금은 못 하겠다고 하면, 이슈 본문 전체를 마크다운으로 출력해
+  https://github.com/y00njinuk/makdoong2-team/issues/new 에서 수동 등록할 수 있게 한다.
+- `401`/`403` 응답도 같은 절차를 적용한다 — 토큰이 만료·폐기되었거나 권한(scope)이 부족한
+  경우이므로, 위 안내에 **어떤 상태 코드와 `message` 를 받았는지** 덧붙여 재발급을 요청한다.
 
 **제약 사항**
 - 토큰 값은 대화 출력, 이슈 본문, 로그 어디에도 그대로 노출하지 않는다. 마스킹(`ghp_****`)만 허용.
 - `curl` 사용 시 `-H "Authorization: Bearer $GH_TOKEN"` 형태로 환경변수를 통해 전달하고, 커맨드 문자열에 토큰을 직접 문자열로 박지 않는다.
 - 토큰 파일 내용을 그대로 출력하거나 다른 경로로 복사하지 않는다.
-- 토큰이 없거나 401/403이 반환되면 이슈 생성을 중단하고, 본문 전체를 마크다운으로 출력해 사용자가 수동 등록할 수 있게 한다.
 
 ---
 
@@ -102,7 +137,7 @@ GH_TOKEN="$(grep -oE '(ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]+' "$PAT_FILE
 3. 마스킹으로 인해 재현 정보가 소실되는 경우, 소실된 항목을 이슈 본문에 `<마스킹됨: 사유>`로 명시한다.
 4. 이슈 전송 전, **게시될 원문 전체(제목·라벨·본문 전문)와 마스킹 결과 요약**(무엇을 몇 건 가렸는지)을 사용자에게 제시하고 **최종 확인을 받는다**. 사용자 승인 없이 전송하지 않는다.
 
-> **4번은 프롬프트 규약이 아니라 플러그인 훅이 물리적으로 강제한다.** GitHub 쓰기 API 호출(이슈·코멘트·Gist·라벨)은 payload 파일에 대한 사용자 승인 마커(`<payload>.approved`)가 없거나, 승인 이후 내용이 변경되었으면 훅이 차단한다. 절차는 7장 참조.
+> **4번은 프롬프트 규약이 아니라 플러그인 훅이 물리적으로 강제한다.** GitHub 쓰기 API 호출(이슈·코멘트·Gist·라벨)은 ① 사용자가 세션 내 승인 프롬프트에서 yes 로 답하고 ② payload 원문이 세션에 표시된 그대로일 때만 통과한다. 표시 이후 내용이 바뀌었으면 훅이 차단한다. 절차는 7장 참조.
 
 스캔 보조:
 
@@ -213,7 +248,7 @@ curl -sS -X POST https://api.github.com/gists \
   -d @/tmp/makdoong2-issue/gist-payload.json
 ```
 
-> Gist 생성도 GitHub 쓰기이므로 7-1 의 사용자 승인 게이트를 동일하게 거친다 (payload 절대 경로 + 원문 표시 + 승인 마커).
+> Gist 생성도 GitHub 쓰기이므로 7-1 의 사용자 승인 게이트를 동일하게 거친다 (payload 절대 경로 + `cat` 원문 표시 + 세션 내 yes/no).
 
 ---
 
@@ -394,15 +429,15 @@ curl -sS -X POST https://api.github.com/repos/y00njinuk/makdoong2-team/issues/<n
 GitHub 쓰기 호출(이슈·코멘트·Gist·라벨 생성)은 다음 절차를 거쳐야만 훅을 통과한다:
 
 1. payload 를 **리터럴 절대 경로** 파일로 작성한다 (예: `/tmp/makdoong2-issue/issue-payload.json`). 상대 경로·변수 포함 경로는 훅이 거부한다.
-2. **게시될 원문 전체를 채팅에 그대로 표시한다** — 제목, 라벨, 본문 전문. 요약·발췌로 대체하지 않는다.
-3. 사용자에게 승인 스크립트 실행을 안내하고 **대기한다**:
+2. **게시될 원문 전체를 세션에 그대로 표시한다** — 제목, 라벨, 본문 전문. 요약·발췌로 대체하지 않는다. 표시는 **체이닝 없는 단독 `cat`** 이어야 한다:
+   ```bash
+   cat /tmp/makdoong2-issue/issue-payload.json
    ```
-   bash <SCRIPTS_DIR>/issue-reporter-approve.sh /tmp/makdoong2-issue/issue-payload.json
-   ```
-   `<SCRIPTS_DIR>` 는 npm 모듈의 scripts 디렉토리다 (전역 설치 기준 `$(npm root -g)/makdoong2-team/scripts`). 스크립트는 payload 원문을 다시 화면에 보여주고 stdin 으로 승인을 받은 뒤 `<payload>.approved` 마커(sha256)를 기록한다.
-4. 마커가 생긴 뒤 **단일 curl 명령**으로 전송한다. 체이닝(`;`, `&&`, `|`)·리다이렉트·인라인 JSON(`-d '{...}'`)은 훅이 거부한다.
+   훅이 이 시점의 sha256 을 **표시 증명**으로 기록한다. `;`·`&&`·`|`·리다이렉트·`$()` 가 섞이면 증명으로 인정되지 않는다 — 사용자가 본 내용과 파일에 남는 내용이 갈라질 수 있기 때문이다. 가독성을 위해 `jq` 렌더링을 덧붙이는 것은 자유지만, 증명은 `cat` 원문에서만 나온다.
+3. **사용자에게 게시 여부를 묻는다 (yes/no).** 4번의 curl 을 호출하면 opencode 가 세션 안에서 승인 프롬프트를 띄우므로, 별도 스크립트를 실행시키지 않는다. 질문은 한 문장으로 명확히 한다 — 예: "위 원문 그대로 public 저장소에 이슈로 등록할까요? (yes/no)". 프롬프트에서 **"Allow once" 를 고르도록 안내한다** — "Allow always" 는 남은 세션 동안 승인 질문 자체를 없앤다. 사용자가 거부하면 전송하지 않고 무엇을 고칠지 확인한다.
+4. **단일 curl 명령**으로 전송하며, payload 표기는 정확히 **`-d @/절대경로`** (공백 하나, 등호·따옴표 없이) 여야 한다. 이 표기가 곧 3번의 승인 프롬프트를 띄우는 조건이므로, 같은 의미의 `--data @file`·`--data-binary @file`·`-d=@file` 은 **질문 없이 전송되어** 훅이 거부한다. 체이닝(`;`, `&&`, `|`)·리다이렉트·인라인 JSON(`-d '{...}'`)·`gh` CLI 도 거부된다.
 
-승인은 **1회용**이고 **내용에 바인딩**된다: 전송이 실행되면 마커는 훅이 자동 삭제하며, payload 를 승인 후 수정하면 해시 불일치로 차단된다 (수정했으면 2번부터 재승인). 에이전트가 승인 스크립트를 직접 실행하거나 `.approved` 마커를 조작하는 것은 훅이 차단한다.
+승인은 **1회용**이고 **사용자가 본 원문에 바인딩**된다: 전송이 실행되면 표시 증명은 훅이 자동 폐기하고(성공·실패 무관), 표시 이후 payload 를 수정하면 해시 불일치로 차단된다 (수정했으면 2번부터 다시). 승인 자체는 opencode permission 프롬프트에서만 나오므로 에이전트가 스스로 만들어낼 수 있는 경로가 없다.
 
 ### 7-2. 전송
 
@@ -441,7 +476,7 @@ curl -sS -X POST https://api.github.com/repos/y00njinuk/makdoong2-team/labels \
 shred -u /tmp/makdoong2-issue/*-payload.json 2>/dev/null || rm -f /tmp/makdoong2-issue/*-payload.json
 ```
 
-승인 마커(`*.approved`)는 전송 시 훅이 자동 삭제하므로 에이전트가 지우지 않는다 (마커 조작은 훅이 차단).
+표시 증명은 전송 시 훅이 자동 폐기한다. 재전송(같은 원문이라도)에는 2번의 재표시와 3번의 재승인이 다시 필요하다.
 
 ---
 

@@ -12,24 +12,20 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   issueReporterSkillLoadViolation,
+  issueReporterTaskSpawnViolation,
   extractSkillNameFromArgs,
   ISSUE_REPORTER_SKILL_NAME,
   ISSUE_REPORTER_AGENT,
-  APPROVAL_MARKER_SUFFIX,
   classifyGithubApiCall,
-  isApproveScriptInvocation,
-  referencesApprovalMarker,
-  approvalMarkerPath,
-  approvalMismatch,
+  payloadDisplayPaths,
+  displayMismatch,
   sha256Hex,
-  parseApprovalMarker,
 } from "../dist/issue-reporter-guard.js";
 import { install, uninstall } from "../scripts/install-lib.mjs";
 
@@ -97,11 +93,21 @@ describe("패키징 정합 — skill / agent / command 3종 세트", () => {
     assert.match(commandMd, /^subtask: false$/m);
   });
 
-  test("agent frontmatter — mode all + bash/write 전권", () => {
+  test("agent frontmatter — 목록 비노출(subagent+hidden) + bash/write 전권", () => {
     assert.match(agentMd, new RegExp(`^name: ${ISSUE_REPORTER_AGENT}$`, "m"));
-    assert.match(agentMd, /^mode: all$/m);
+    // mode: all 이면 사용자가 고를 수 있는 primary 목록에 뜬다. 진입점은 커맨드 하나뿐이어야 한다.
+    assert.match(agentMd, /^mode: subagent$/m);
+    assert.match(agentMd, /^hidden: true$/m);
+    assert.ok(!/^mode: all$/m.test(agentMd), "mode: all 은 primary 선택 목록에 노출된다");
     assert.match(agentMd, /"\*": "allow"/);
     assert.match(agentMd, /"\*\*\/\*": "allow"/);
+  });
+
+  test("command 의 subtask:false 가 subagent 를 인라인으로 전환한다", () => {
+    // opencode: subtask = (mode==="subagent" && subtask!==false) || subtask===true.
+    // subtask:false 를 빼면 mode:subagent 는 자식 세션으로 격리되어 직전 대화 컨텍스트를 잃는다.
+    assert.match(commandMd, /^subtask: false$/m);
+    assert.match(commandMd, new RegExp(`^agent: ${ISSUE_REPORTER_AGENT}$`, "m"));
   });
 
   test("agent 는 SEALED_SUBAGENTS 에 등록되어 있다 (CLAUDE.md hardrule)", () => {
@@ -109,6 +115,37 @@ describe("패키징 정합 — skill / agent / command 3종 세트", () => {
     const sealedBlock = pluginSrc.match(/const SEALED_SUBAGENTS = new Set\(\[[\s\S]*?\]\);/);
     assert.ok(sealedBlock, "SEALED_SUBAGENTS 선언을 찾지 못했다");
     assert.match(sealedBlock[0], /ISSUE_REPORTER_AGENT/);
+  });
+});
+
+describe("PAT 부재 — 토큰 발급 요청 절차", () => {
+  const skillMd = readFileSync(join(PKG_ROOT, "skills/makdoong2-issue-reporter/SKILL.md"), "utf8");
+
+  test("토큰을 못 찾으면 종료하지 않고 사용자에게 발급을 요청한다", () => {
+    assert.match(skillMd, /토큰이 없을 때 — 사용자에게 발급을 요청한다/);
+    assert.match(skillMd, /조용히 종료하지 않는다/);
+    // 예전 동작(즉시 exit 1)이 남아 있으면 안내가 무의미해진다.
+    assert.ok(
+      !/PAT 파일 없음 또는 읽기 권한 없음.*exit 1/.test(skillMd),
+      "파일 부재 시 즉시 exit 하는 스니펫이 남아 있으면 안 된다",
+    );
+  });
+
+  test("발급 안내가 실제 발급 URL 과 최소 권한을 제시한다", () => {
+    assert.match(skillMd, /github\.com\/settings\/personal-access-tokens\/new/);
+    assert.match(skillMd, /github\.com\/settings\/tokens\/new/);
+    assert.match(skillMd, /Issues: Read and write/);
+    assert.match(skillMd, /public_repo/);
+    assert.match(skillMd, /chmod 600/);
+  });
+
+  test("401/403 도 같은 재발급 요청 경로를 탄다", () => {
+    assert.match(skillMd, /`401`\/`403` 응답도 같은 절차를 적용한다/);
+  });
+
+  test("토큰 발급·저장 주체는 사용자이고 값은 재출력하지 않는다", () => {
+    assert.match(skillMd, /토큰 발급·저장은 사용자가 한다/);
+    assert.match(skillMd, /채팅에 다시 출력하지 않는다/);
   });
 });
 
@@ -179,107 +216,107 @@ describe("classifyGithubApiCall — GitHub 게시 승인 게이트 분류", () =
     assert.equal(classifyGithubApiCall(`grep -n "gh issue" notes.md`).kind, "none");
   });
 
-  test("승인 스크립트 호출·마커 참조 감지", () => {
-    assert.equal(isApproveScriptInvocation("bash /x/scripts/issue-reporter-approve.sh /tmp/p.json"), true);
-    assert.equal(isApproveScriptInvocation("curl -sS https://api.github.com/repos"), false);
-    assert.equal(referencesApprovalMarker("touch /tmp/p.json.approved"), true);
-    assert.equal(referencesApprovalMarker("cat /tmp/p.json"), false);
-  });
 });
 
-describe("승인 마커 — 해시 바인딩", () => {
-  test("approvalMarkerPath 는 payload 경로에 접미사를 붙인다", () => {
-    assert.equal(approvalMarkerPath("/tmp/p.json"), `/tmp/p.json${APPROVAL_MARKER_SUFFIX}`);
+describe("표시 증명 — 사용자가 본 원문에 대한 바인딩", () => {
+  test("단독 cat 만 표시로 인정한다", () => {
+    assert.deepEqual(payloadDisplayPaths("cat /tmp/makdoong2-issue/issue-payload.json"), [
+      "/tmp/makdoong2-issue/issue-payload.json",
+    ]);
+    assert.deepEqual(payloadDisplayPaths("cat -- /tmp/p.json"), ["/tmp/p.json"]);
+    assert.deepEqual(payloadDisplayPaths(`cat "/tmp/p.json"`), ["/tmp/p.json"]);
   });
 
-  test("일치하는 해시는 통과, 내용 변경은 불일치 사유 반환", () => {
+  test("체이닝·리다이렉트·치환이 섞이면 표시로 인정하지 않는다", () => {
+    // 사용자가 본 내용과 파일에 남는 내용이 갈라지는 형태는 증거가 될 수 없다.
+    assert.deepEqual(payloadDisplayPaths("cat /tmp/p.json; echo evil > /tmp/p.json"), []);
+    assert.deepEqual(payloadDisplayPaths("cat /tmp/p.json && curl ..."), []);
+    assert.deepEqual(payloadDisplayPaths("cat /tmp/p.json | head -5"), []);
+    assert.deepEqual(payloadDisplayPaths("cat $(echo /tmp/p.json)"), []);
+  });
+
+  test("상대 경로·비-cat 명령은 표시가 아니다", () => {
+    assert.deepEqual(payloadDisplayPaths("cat p.json"), []);
+    assert.deepEqual(payloadDisplayPaths("jq . /tmp/p.json"), []);
+    assert.deepEqual(payloadDisplayPaths("curl -sS https://api.github.com/x"), []);
+  });
+
+  test("표시한 원문과 같으면 통과, 표시 후 변경은 차단", () => {
     const payload = Buffer.from('{"title":"t","body":"b"}');
-    const marker = `${sha256Hex(payload)}\n# approved-at: 2026-08-27T00:00:00Z\n`;
-    assert.equal(approvalMismatch(payload, marker), null);
+    const shown = sha256Hex(payload);
+    assert.equal(displayMismatch(payload, shown), null);
 
     const tampered = Buffer.from('{"title":"t","body":"EVIL"}');
-    assert.match(approvalMismatch(tampered, marker), /변경/);
+    assert.match(displayMismatch(tampered, shown), /변경/);
   });
 
-  test("형식이 깨진 마커는 거부", () => {
-    assert.match(approvalMismatch(Buffer.from("x"), "not-a-hash\n"), /형식/);
-    assert.equal(parseApprovalMarker("deadbeef"), null);
-  });
-});
-
-describe("issue-reporter-approve.sh — 기능 검증", () => {
-  const APPROVE = join(PKG_ROOT, "scripts/issue-reporter-approve.sh");
-
-  function runApprove(payloadPath, stdinText) {
-    try {
-      const out = execFileSync("bash", [APPROVE, payloadPath], {
-        input: stdinText ?? "",
-        encoding: "utf8",
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-      return { code: 0, out };
-    } catch (e) {
-      return { code: e.status ?? -1, out: `${e.stdout ?? ""}${e.stderr ?? ""}` };
-    }
-  }
-
-  test("y 승인 시 payload sha256 이 기록된 마커를 만들고, 원문을 전문 출력한다", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mkd2-approve-"));
-    try {
-      const payload = join(dir, "issue-payload.json");
-      const content = '{"title":"제목","labels":["bug"],"body":"본문 전체"}';
-      writeFileSync(payload, content);
-
-      const r = runApprove(payload, "y\n");
-      assert.equal(r.code, 0, `approve failed: ${r.out}`);
-      assert.ok(r.out.includes(content), "승인 화면에 payload 원문 전문이 나와야 한다");
-
-      const marker = readFileSync(approvalMarkerPath(payload), "utf8");
-      assert.equal(parseApprovalMarker(marker), sha256Hex(Buffer.from(content)));
-      assert.equal(approvalMismatch(Buffer.from(content), marker), null);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("거부(n)·EOF 는 마커를 만들지 않고 실패 종료한다", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mkd2-approve-"));
-    try {
-      const payload = join(dir, "p.json");
-      writeFileSync(payload, "{}");
-
-      assert.notEqual(runApprove(payload, "n\n").code, 0);
-      assert.ok(!existsSync(approvalMarkerPath(payload)), "거부 후 마커가 없어야 한다");
-
-      assert.notEqual(runApprove(payload, null).code, 0);
-      assert.ok(!existsSync(approvalMarkerPath(payload)), "EOF 후 마커가 없어야 한다");
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
+  test("표시된 적이 없으면 차단한다", () => {
+    assert.match(displayMismatch(Buffer.from("{}"), undefined), /표시된 적이 없다/);
   });
 });
 
-describe("게시 게이트 배선 — 훅·스크립트·문서 정합", () => {
+describe("게시 게이트 배선 — 훅·문서 정합", () => {
+  const pluginSrc = readFileSync(join(PKG_ROOT, "src/opencode-plugin.ts"), "utf8");
+
   test("플러그인 훅이 게이트 함수들을 배선한다", () => {
-    const src = readFileSync(join(PKG_ROOT, "src/opencode-plugin.ts"), "utf8");
-    for (const sym of ["classifyGithubApiCall", "approvalMismatch", "isApproveScriptInvocation", "referencesApprovalMarker"]) {
-      assert.ok(src.includes(sym), `opencode-plugin.ts 가 ${sym} 를 사용해야 한다`);
+    for (const sym of ["classifyGithubApiCall", "displayMismatch", "payloadDisplayPaths"]) {
+      assert.ok(pluginSrc.includes(sym), `opencode-plugin.ts 가 ${sym} 를 사용해야 한다`);
     }
   });
 
-  test("승인 스크립트가 존재하고 원문 전문 출력 + stdin confirm 을 쓴다", () => {
-    const script = readFileSync(join(PKG_ROOT, "scripts/issue-reporter-approve.sh"), "utf8");
-    assert.match(script, /cat -- "\$\{PAYLOAD\}"/, "payload 원문 전문 출력");
-    assert.match(script, /lib\/confirm\.sh/, "공용 stdin confirm 사용");
-    // 주석의 설명 문구는 허용하고 실제 코드 라인만 검사한다
-    const code = script.split("\n").filter((l) => !l.trim().startsWith("#")).join("\n");
-    assert.ok(!code.includes("/dev/tty"), "/dev/tty 금지");
+  test("frontmatter 의 ask 패턴과 훅이 허용하는 표기가 한 쌍이다", () => {
+    // 승인 프롬프트는 frontmatter 패턴이 명령 문자열에 매치될 때만 뜬다. 훅이 허용하는
+    // 전송 표기가 그 패턴에 걸리지 않으면 질문 없이 게시된다 — 둘은 함께 움직여야 한다.
+    const agentMd = readFileSync(join(PKG_ROOT, "agents/makdoong2-issue-reporter.md"), "utf8");
+    assert.match(agentMd, /"\*-d @\/\*": "ask"/);
+
+    const guardSrc = readFileSync(join(PKG_ROOT, "src/issue-reporter-guard.ts"), "utf8");
+    assert.match(guardSrc, /APPROVABLE_PAYLOAD_RE/);
+
+    // 읽기(-G 검색)는 패턴에 걸리지 않아야 한다 — 매번 물으면 승인이 일상이 된다.
+    const askPattern = /(^|\s)-d @\/[^\s'"]+(\s|$)/;
+    assert.ok(!askPattern.test(`curl -sS -G https://api.github.com/search/issues --data-urlencode "q=repo:x is:issue"`));
+    assert.ok(askPattern.test(`curl -sS -X POST https://api.github.com/repos/o/r/issues -d @/tmp/p.json`));
+  });
+
+  test("승인 프롬프트를 못 띄우는 payload 표기는 차단한다", () => {
+    const base = "curl -sS -X POST https://api.github.com/repos/o/r/issues";
+    for (const flag of ["--data", "--data-binary", "--data-raw", "--json"]) {
+      const r = classifyGithubApiCall(`${base} ${flag} @/tmp/p.json`);
+      assert.equal(r.kind, "mutation");
+      assert.ok(
+        r.problems.some((p) => p.includes("-d @/절대경로")),
+        `${flag} @file 은 승인 프롬프트를 띄우지 못하므로 차단돼야 한다`,
+      );
+    }
+    // 정상 표기는 문제 없음
+    assert.deepEqual(classifyGithubApiCall(`${base} -d @/tmp/p.json`).problems, []);
+  });
+
+  test("task 툴로 issue-reporter 를 spawn 할 수 없다", () => {
+    // mode/hidden 은 목록에서 감출 뿐이고 task 툴은 mode 를 검사하지 않는다.
+    const msg = issueReporterTaskSpawnViolation({ subagent_type: ISSUE_REPORTER_AGENT, prompt: "x" });
+    assert.ok(msg, "spawn 시도는 차단돼야 한다");
+    assert.match(msg, /\/makdoong2-issue-reporter/);
+    assert.equal(issueReporterTaskSpawnViolation({ arguments: { subagent_type: ISSUE_REPORTER_AGENT } }) !== null, true);
+    assert.equal(issueReporterTaskSpawnViolation({ subagent_type: "makdoong2-engineer" }), null);
+    assert.equal(issueReporterTaskSpawnViolation(undefined), null);
+    assert.ok(pluginSrc.includes("issueReporterTaskSpawnViolation"), "훅이 배선되어야 한다");
+  });
+
+  test("승인 셸 스크립트 방식은 제거되었다", () => {
+    assert.ok(
+      !existsSync(join(PKG_ROOT, "scripts/issue-reporter-approve.sh")),
+      "승인은 세션 내 질문으로 받는다 — 별도 승인 스크립트가 남아 있으면 안 된다",
+    );
+    assert.ok(!pluginSrc.includes(".approved"), "마커 계약의 잔재가 남아 있으면 안 된다");
   });
 
   test("SKILL.md 가 승인 게이트 절차(7-1)를 명시한다", () => {
     const skillMd = readFileSync(join(PKG_ROOT, "skills/makdoong2-issue-reporter/SKILL.md"), "utf8");
-    assert.match(skillMd, /issue-reporter-approve\.sh/);
-    assert.match(skillMd, /원문 전체를 채팅에 그대로 표시/);
+    assert.match(skillMd, /원문 전체를 세션에 그대로 표시한다/);
+    assert.match(skillMd, /yes\/no/);
+    assert.ok(!skillMd.includes("issue-reporter-approve.sh"), "제거된 스크립트를 안내하면 안 된다");
   });
 });
 

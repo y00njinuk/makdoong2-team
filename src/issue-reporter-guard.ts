@@ -24,24 +24,33 @@ export const ISSUE_REPORTER_AGENT = "makdoong2-issue-reporter";
 // ── GitHub 게시 승인 게이트 ──────────────────────────────────────────────
 //
 // 정책: issue-reporter 가 GitHub 에 무엇이든 게시(이슈·코멘트·Gist·라벨)하려면
-// 사용자가 게시될 "원문 전체"를 보고 명시적으로 승인해야 한다. 채팅 승인은
-// 프롬프트 수준 규약일 뿐이라 강제가 아니다 — 여기의 계약이 물리적 강제다:
+// 사용자가 게시될 "원문 전체"를 보고 명시적으로 승인해야 한다. 승인은 두 조각이
+// 함께 성립해야 유효하며, 어느 쪽도 프롬프트 규약이 아니라 코드가 강제한다:
 //
-//   1. 에이전트는 payload 를 "리터럴 절대 경로" 파일로 만들어 -d @<path> 로만
-//      전달할 수 있다 (인라인 -d '{...}', 변수 경로, curl 외 HTTP 클라이언트 금지).
-//   2. 사용자가 scripts/issue-reporter-approve.sh <payload> 를 "직접" 실행한다.
-//      스크립트는 payload 원문 전체를 화면에 출력한 뒤 stdin 으로 승인을 받고,
-//      payload 의 sha256 을 <payload>.approved 마커에 기록한다.
-//   3. tool.execute.before 훅이 GitHub 쓰기 호출 시 마커의 해시와 현재 payload
-//      내용을 대조한다. 승인 후 1바이트라도 바뀌면 차단 — 승인은 특정 원문에
-//      바인딩되고, 다른 내용으로 바꿔치기할 수 없다.
-//   4. 전송이 실행되면 훅(after)이 마커를 삭제한다. 승인은 1회용이다.
-//   5. 에이전트 자신의 승인 스크립트 실행·마커 생성/조작은 훅이 차단한다.
-//      승인 스크립트는 stdin confirm 이라 에이전트 셸에서는 EOF 로도 못 넘어가지만,
-//      printf 'y' 파이프 우회가 가능하므로 실행 자체를 막는 것이 1차다.
+//   (가) 의사표시 — opencode permission 프롬프트의 yes/no.
+//        에이전트 frontmatter 가 api.github.com 접근을 "ask" 로 올리고,
+//        plugin 의 permission.ask 훅이 쓰기(mutation)에 대해 status 를 "ask" 로
+//        고정한다 (읽기는 "allow" 로 내려 사용자를 성가시게 하지 않는다).
+//        사용자가 거부하면 tool 은 실행되지 않는다.
+//   (나) 정보에 근거한 동의 — "사용자가 본 원문" == "전송되는 원문".
+//        permission 프롬프트에는 curl 명령만 보이고 본문은 파일 안에 있으므로,
+//        프롬프트만으로는 무엇이 게시되는지 알 수 없다. 그래서 에이전트는 전송 전에
+//        payload 를 세션에서 `cat` 으로 그대로 출력해야 하고, 훅이 그 시점의
+//        sha256 을 기록한다. 전송 시 기록된 해시와 현재 파일이 다르면 차단된다.
+//
+// 이 조합은 2026-08 이전의 "issue-reporter-approve.sh + <payload>.approved 마커"
+// 방식을 대체한다. 마커 방식은 사용자가 별도 셸에서 스크립트를 직접 실행해야 했고,
+// 그 실행이 곧 (가)와 (나)를 동시에 만족시켰다. 승인을 세션 안의 질문으로 옮기면서
+// (가)는 opencode permission 으로, (나)는 표시 해시로 각각 넘겼다.
+//
+// 형식 제약은 그대로다 — 에이전트는 payload 를 "리터럴 절대 경로" 파일로 만들어
+// 단일 curl 의 -d @<path> 로만 전달할 수 있다 (인라인 -d '{...}', 변수 경로,
+// 체이닝, curl 외 HTTP 클라이언트 금지). 이것이 없으면 훅이 무엇이 전송되는지
+// 검증할 수 없고, (나)의 해시 대조도 우회된다.
 
-export const APPROVAL_MARKER_SUFFIX = ".approved";
-export const APPROVE_SCRIPT_BASENAME = "issue-reporter-approve.sh";
+/** 표시 증명으로 인정되는 명령의 형태: 체이닝 없는 단일 `cat <절대경로>`. */
+const DISPLAY_CAT_RE = /(?:^|\s)cat\s+(?:--\s+)?(["']?)(\/[^"'\s]+)\1(?:\s|$)/g;
+const SHELL_COMPOSITION_RE = /[;|<>\n`]|\$\(|&&|\s&(\s|$)/;
 
 /** GitHub API 호출 분류 결과 */
 export type GithubApiCall =
@@ -53,6 +62,17 @@ export type GithubApiCall =
 const MUTATION_METHOD_RE = /(?:-X|--request)[= ]*['"]?(POST|PATCH|PUT|DELETE)\b/i;
 const DATA_FLAG_RE = /(^|[\s'"])(-d|--data|--data-binary|--data-raw|--data-urlencode|--json|-F|--form)([= ]|$)/;
 const PAYLOAD_AT_RE = /(?:-d|--data|--data-binary|--data-raw|--json)[= ]+@(["']?)([^"'\s]+)\1/g;
+
+/**
+ * 승인 프롬프트를 띄우는 유일한 형식: `-d @<절대경로>` (등호·따옴표 없이 공백 하나).
+ *
+ * 게시 승인의 의사표시는 opencode 의 bash permission 프롬프트가 받는데, 그 프롬프트는
+ * 에이전트 frontmatter 의 `"*-d @/*": "ask"` 패턴이 명령 문자열에 매치될 때만 뜬다.
+ * 그래서 `--data @/x` 나 `-d=@/x` 처럼 같은 의미의 다른 표기를 허용하면 **질문 없이
+ * 전송되는 경로**가 생긴다. 의미가 아니라 표기에 승인이 걸려 있으므로, 표기를 하나로
+ * 고정하고 나머지는 차단한다. 이 상수를 고칠 때는 frontmatter 패턴도 같이 고쳐야 한다.
+ */
+const APPROVABLE_PAYLOAD_RE = /(^|\s)-d @\/[^\s'"]+(\s|$)/;
 
 /**
  * issue-reporter 의 bash 명령을 GitHub API 관점에서 분류한다.
@@ -106,6 +126,13 @@ export function classifyGithubApiCall(cmd: string): GithubApiCall {
       "payload 는 반드시 파일로 전달한다: -d @</absolute/path/payload.json>. " +
       "인라인 JSON(-d '{...}')과 stdin(-d @-)은 승인 검증이 불가능해 금지된다.",
     );
+  } else if (!APPROVABLE_PAYLOAD_RE.test(cmd)) {
+    // 같은 의미라도 표기가 다르면 승인 프롬프트가 뜨지 않는다 — APPROVABLE_PAYLOAD_RE 주석 참조.
+    problems.push(
+      "payload 표기는 정확히 `-d @/절대경로` 여야 한다 (공백 하나, 등호·따옴표 없이). " +
+      "--data / --data-binary / --data-raw / --json / -d=@ 형태는 사용자 승인 프롬프트를 " +
+      "띄우지 못해 질문 없이 전송되므로 금지된다.",
+    );
   }
   for (const p of payloadPaths) {
     if (!p.startsWith("/")) {
@@ -130,44 +157,39 @@ export function classifyGithubApiCall(cmd: string): GithubApiCall {
   return { kind: "mutation", payloadPaths, problems };
 }
 
-/** 승인 스크립트 호출 여부 — 에이전트에게는 실행이 금지된다 (사용자 전용). */
-export function isApproveScriptInvocation(cmd: string): boolean {
-  return cmd.includes("issue-reporter-approve");
-}
-
-/** 승인 마커 경로 참조 여부 — 에이전트의 bash/write 에서 일절 금지된다. */
-export function referencesApprovalMarker(text: string): boolean {
-  return text.includes(APPROVAL_MARKER_SUFFIX);
-}
-
-/** payload 파일 경로 → 승인 마커 경로 */
-export function approvalMarkerPath(payloadPath: string): string {
-  return `${payloadPath}${APPROVAL_MARKER_SUFFIX}`;
-}
-
 export function sha256Hex(content: string | Buffer): string {
   return createHash("sha256").update(content).digest("hex");
 }
 
-/** 마커 파일 내용에서 해시를 파싱한다. 첫 줄이 64자리 hex 가 아니면 null. */
-export function parseApprovalMarker(markerContent: string): string | null {
-  const first = markerContent.split("\n")[0]?.trim().toLowerCase() ?? "";
-  return /^[0-9a-f]{64}$/.test(first) ? first : null;
+/**
+ * 이 명령이 "원문 표시" 로 인정되는 절대 경로들을 돌려준다.
+ *
+ * 인정 조건은 **체이닝·리다이렉트·명령 치환이 없는 단일 `cat <절대경로>`** 다.
+ * 좁게 잡은 이유는 표시가 증거이기 때문이다 — `cat p; echo x > p` 를 허용하면
+ * 사용자가 본 내용과 파일에 남는 내용이 갈라져 (나) 불변 조건이 깨진다.
+ * jq 등으로 예쁘게 렌더링하는 것은 막지 않지만, 해시 증명으로 인정되지 않는다
+ * (렌더링은 원문이 아니다).
+ */
+export function payloadDisplayPaths(cmd: string): string[] {
+  if (SHELL_COMPOSITION_RE.test(cmd)) return [];
+  const paths: string[] = [];
+  for (const m of cmd.matchAll(DISPLAY_CAT_RE)) paths.push(m[2]);
+  return paths;
 }
 
 /**
- * 승인 검증: 마커의 해시가 현재 payload 내용과 일치하는가.
+ * 표시 증명 검증: 사용자가 본 원문의 해시가 지금 전송하려는 payload 와 같은가.
  * 불일치 사유를 문자열로 반환하고, 유효하면 null.
  */
-export function approvalMismatch(
+export function displayMismatch(
   payloadContent: Buffer,
-  markerContent: string,
+  shownHash: string | undefined,
 ): string | null {
-  const recorded = parseApprovalMarker(markerContent);
-  if (recorded === null) return "승인 마커 형식이 잘못됐다 (첫 줄이 sha256 hex 가 아님)";
-  const actual = sha256Hex(payloadContent);
-  if (actual !== recorded) {
-    return "payload 내용이 승인 이후 변경됐다 — 승인은 특정 원문에 바인딩되며, 변경된 내용은 재승인이 필요하다";
+  if (!shownHash) {
+    return "이 payload 의 원문이 세션에 표시된 적이 없다 — 사용자는 무엇이 게시되는지 볼 수 없었다";
+  }
+  if (sha256Hex(payloadContent) !== shownHash) {
+    return "표시 이후 payload 내용이 변경됐다 — 승인은 사용자가 본 원문에 바인딩되며, 변경된 내용은 재표시·재승인이 필요하다";
   }
   return null;
 }
@@ -183,6 +205,36 @@ export function extractSkillNameFromArgs(args: unknown): string | undefined {
     if (typeof inner === "string" && inner.length > 0) return inner;
   }
   return undefined;
+}
+
+/**
+ * task 툴 호출이 issue-reporter 를 서브에이전트로 spawn 하려 하면 차단 사유를,
+ * 아니면 null 을 반환한다.
+ *
+ * 이 에이전트의 진입점은 `/makdoong2-issue-reporter` 커맨드 하나뿐이다. frontmatter 의
+ * `mode: subagent` + `hidden: true` 는 선택·자동완성 목록에서 감출 뿐이고, opencode 의
+ * task 툴은 **subagent_type 의 mode 를 검사하지 않으므로** 이름만 알면 spawn 된다.
+ * 목록에 없는 것과 부를 수 없는 것은 다르다 — 그 간극을 여기서 닫는다.
+ *
+ * spawn 을 막아야 하는 이유는 격리 그 자체다. task 로 띄운 자식 세션은 직전 대화
+ * 컨텍스트를 보지 못해 수집이 반쪽이 되고, 사용자 승인 프롬프트도 그 세션에서 뜬다.
+ * 무엇보다 "사용자가 직접 부른다" 는 트리거 정책이 우회된다.
+ */
+export function issueReporterTaskSpawnViolation(args: unknown): string | null {
+  if (!args || typeof args !== "object") return null;
+  const direct = (args as { subagent_type?: unknown }).subagent_type;
+  const nested = (args as { arguments?: { subagent_type?: unknown } }).arguments?.subagent_type;
+  const target = typeof direct === "string" ? direct : typeof nested === "string" ? nested : undefined;
+  if (target !== ISSUE_REPORTER_AGENT) return null;
+  return (
+    `[makdoong2-team issue-reporter trigger violation]\n` +
+    `"${ISSUE_REPORTER_AGENT}" 는 task 툴로 spawn 할 수 없다.\n\n` +
+    `이 에이전트는 사용자가 /makdoong2-issue-reporter 커맨드를 실행할 때만, 현재 세션 안에서 ` +
+    `인라인으로 전환되어 동작한다. 자식 세션으로 격리하면 직전 대화 컨텍스트를 잃어 증거 수집이 ` +
+    `불완전해지고, 사용자 직접 호출이라는 트리거 정책도 우회된다.\n\n` +
+    `**올바른 절차:** 사용자에게 다음 실행을 안내하라:\n` +
+    `    /makdoong2-issue-reporter [증상 한 줄 설명(선택)]`
+  );
 }
 
 /**
