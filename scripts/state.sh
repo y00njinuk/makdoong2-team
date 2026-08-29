@@ -28,6 +28,10 @@
 # 의존: jq
 set -euo pipefail
 
+# 플러그인 자기 상태 디렉터리를 git exclude 에 등록하기 위한 공용 헬퍼 (issue #6-②).
+# shellcheck source=lib/git-exclude.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/git-exclude.sh"
+
 root()  {
   # 호출 컨텍스트의 git toplevel 을 반환한다.
   # - main repo에서 호출: main repo 경로
@@ -92,6 +96,12 @@ case "$cmd" in
   init)
     ISSUE="${1:?issue required}"; WT="${2:-$(root)}"
     P="$(sp "$ISSUE")"; mkdir -p "$(dirname "$P")"
+    # 상태 디렉터리를 만드는 바로 그 자리에서 git exclude 에 등록한다. 여기서 하지
+    # 않으면 `git status` 가 플러그인 자신의 파일을 보고하고, "git status 청결" 을
+    # 요구하는 2_implementation.analysis verifier 가 항상 REJECTED 를 낸다 (issue #6-②).
+    # 이 시점(main repo)은 worktree 생성 전이라 wt-sync-ignored.sh 가 아직 돌지 않는다.
+    ADDED_EXCLUDE="$(ensure_git_exclude_lines "$(root)" "${MAKDOONG2_STATE_DIR_PATTERN}")"
+    [ "${ADDED_EXCLUDE}" = "0" ] || echo "[state.sh] .git/info/exclude += ${MAKDOONG2_STATE_DIR_PATTERN}" >&2
     if [ ! -f "$P" ]; then
       cat > "$P" <<JSON
 {

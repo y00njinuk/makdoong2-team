@@ -133,9 +133,76 @@ describe("gate — requirements 품질 게이트 (ambiguity score + spec_hash)",
       stateSh(wt, "set", "TEST-1", `${REQ}.spec_hash`, JSON.stringify("deadbeef"));
       const r = verifyScope(wt, "TEST-1");
       assert.equal(r.code, 2, `expected BLOCKED, got ${r.code}\nstderr=${r.stderr}`);
-      assert.match(r.stderr, /확정 명세 파일 없음/);
+      assert.match(r.stderr, /마커는 있으나 파일이 없다/);
     } finally {
       rmSync(wt, { recursive: true, force: true });
     }
+  });
+});
+
+describe("gate — draft_path 마커 누락 진단 (issue #6-①)", () => {
+  // 게이트는 spec_hash 가 있으면 draft_path 마커를 하드 요구하는데, 종전 메시지는
+  // "확정 명세 파일 없음" 하나로 뭉뚱그려서 파일은 멀쩡히 있고 마커만 빠진 흔한
+  // 경우에 무엇을 해야 하는지 알 수 없었다. 실제로 워크플로우가 여기서 정지했다.
+  test("마커만 없고 파일은 있으면 — 파일 존재를 알리고 복구 3단계를 제시한다", () => {
+    const wt = makeWorktree();
+    try {
+      setupRequirementsDone(wt, "TEST-D1");
+      const rel = makeDraft(wt, "TEST-D1", "spec body\n");
+      stateSh(wt, "set", "TEST-D1", `${REQ}.spec_hash`, `"${sha256Of(wt, rel)}"`);
+      // draft_path 는 기록하지 않는다 — #6-① 의 상태 그대로.
+      const r = verifyScope(wt, "TEST-D1");
+      assert.notEqual(r.code, 0, "draft_path 마커가 없으면 차단되어야 한다");
+      assert.match(r.stderr, /draft_path 마커가 없다/);
+      assert.match(r.stderr, /파일은 .*requirements-draft\.md 에 있다/);
+      assert.match(r.stderr, /sha256sum/, "해시 대조 절차를 제시해야 한다");
+      assert.match(r.stderr, /state\.sh set/, "마커 기록 명령을 제시해야 한다");
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  test("마커도 파일도 없으면 — 재작업을 지시한다 (복구 절차가 아니라)", () => {
+    const wt = makeWorktree();
+    try {
+      setupRequirementsDone(wt, "TEST-D2");
+      stateSh(wt, "set", "TEST-D2", `${REQ}.spec_hash`, '"deadbeef"');
+      const r = verifyScope(wt, "TEST-D2");
+      assert.notEqual(r.code, 0);
+      assert.match(r.stderr, /draft_path 마커도 확정 명세 파일도 없다/);
+      assert.match(r.stderr, /재작업/);
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+});
+
+describe("스펙 정합 — draft_path 는 게이트·self_check·verifier 세 곳에 모두 있어야 한다 (issue #6-①)", () => {
+  // 세 곳 중 하나만 빠지면 substage 가 done=true + VERIFIED 로 끝난 뒤 다음 게이트가
+  // 하드 차단하는 정지가 재현된다. 한 곳만 고치는 수정을 막기 위한 테스트다.
+  const gate = readFileSync(join(REPO_ROOT, "gates/stage3-scope-verify.sh"), "utf8");
+  const stageSpec = readFileSync(join(REPO_ROOT, "stages/02-requirements.md"), "utf8");
+  const verifier = readFileSync(join(REPO_ROOT, "agents/makdoong2-verifier.md"), "utf8");
+
+  test("게이트가 draft_path 를 요구한다", () => {
+    assert.match(gate, /draft_path/);
+  });
+
+  test("stage spec 의 self_check 이 draft_recorded 를 포함한다", () => {
+    assert.match(stageSpec, /"draft_recorded":\s*true/, "self_check JSON 에 draft_recorded 가 없다");
+    assert.match(stageSpec, /\|\s*9\s*\|.*draft_path/, "자가검증 표에 draft_path 행이 없다");
+    // 항목 수 문구와 표 행 수가 어긋나면 planner 가 표를 끝까지 읽지 않는다.
+    assert.match(stageSpec, /다음 9항목을 자체 확인/);
+  });
+
+  test("verifier 가 파일 존재가 아니라 마커를 검사한다", () => {
+    assert.match(verifier, /2-4\. 1_planning\.requirements 전용: draft_path 마커 재검증/);
+    assert.match(verifier, /requirements\.draft_path_missing/);
+    // "requirements-draft.md 존재" 만 보던 종전 기준이 남아 있으면 마커 누락을 통과시킨다.
+    assert.ok(
+      !/`requirements`: `done=true`.*`requirements-draft\.md` 존재/.test(verifier),
+      "파일 존재만 보는 종전 기준이 남아 있다",
+    );
   });
 });

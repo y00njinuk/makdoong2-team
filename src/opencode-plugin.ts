@@ -27,7 +27,13 @@ import { computeVerdictHash } from "./verdict-hash.js";
 import { nextModel, applyConfigOverrides, POLICIES } from "./model-fallback-policy.ts";
 import { agentForStage, STAGE_SPEC_FILES, type Stage } from "./agent-stage-config.ts";
 import { shouldEscalateStall } from "./stall-escalation.ts";
-import { buildStateWriteBlockMessage, classifyStateJsonAccess, STATE_SH_CALL_RE } from "./state-access-guard.ts";
+import {
+  buildStateWriteBlockMessage,
+  classifyStateJsonAccess,
+  looksLikeRedirection,
+  STATE_SH_CALL_RE,
+  stripQuotedSpans,
+} from "./state-access-guard.ts";
 import {
   RESEARCH_SOURCES,
   DEFAULT_RESEARCH_TIMEOUT_MINUTES,
@@ -358,12 +364,22 @@ export function looksLikeFileWrite(cmd: string): boolean {
   if (stateAccess.kind !== "unrelated") return false;
   if (/^\s*(git\s+(commit|push|add|rm|status|log|diff|show|branch|checkout|fetch|worktree|config|remote))/i.test(cmd)) return false;
   if (STATE_SH_CALL_RE.test(cmd)) return false;
+
+  // 리디렉션 계열은 인용 구간을 지운 문자열로 판정한다 — 따옴표 안의 `>` 는
+  // 셸 메타문자가 아니라 리터럴이다. `jq -e '… length >= 1'` 같은 읽기 전용
+  // 술어가 "파일 쓰기" 로 잡혀 analyzer 가 자기 산출물을 검증하지 못했다 (issue #6-③).
+  const bare = stripQuotedSpans(cmd);
+  // 셸 인라인 스크립트는 인용 구간이 사라지면 내부 리디렉션이 보이지 않는다 → 통째로 차단.
+  // 스크립트 파일 실행(`bash <SCRIPTS_DIR>/state.sh …`)은 `-c` 가 없어 매치되지 않는다.
+  if (/\b(?:ba|z|k|da)?sh\b\s+-\w*c\b/.test(cmd)) return true;
+  if (/(^|[|&;\s(`{])eval\s/.test(cmd)) return true;
+
   if (/(^|[|&;])\s*(tee|dd)\b/.test(cmd)) return true;
   if (/\bsed\b[^|;&]*\s-i(?:\b|['"])/.test(cmd)) return true;
-  if (/\bawk\b[^|;&]*?(?<![0-9])>\s*(?![&/])\S/.test(cmd)) return true;
-  if (/(^|[|;&\s])(cat|printf|echo)\b[^|;&]*?(<<\S+.*?)?(?<![0-9])>\s*(?![&/])\S/.test(cmd)) return true;
-  if (/(^|[|&;\s])>\s*(?!&|\/dev\/(?:null|stderr|stdout|tty)\b)\S/.test(cmd)) return true;
-  if (/(^|[|&;\s])>>\s*(?!\/dev\/(?:null|stderr|stdout|tty)\b)\S/.test(cmd)) return true;
+  if (/\bawk\b[^|;&]*?(?<![0-9])>\s*(?![&/])\S/.test(bare)) return true;
+  if (/(^|[|;&\s])(cat|printf|echo)\b[^|;&]*?(<<\S+.*?)?(?<![0-9])>\s*(?![&/])\S/.test(bare)) return true;
+  if (looksLikeRedirection(cmd)) return true;
+  // 인터프리터 인라인 스크립트는 따옴표 *안* 을 봐야 하므로 원문으로 판정한다.
   if (/\bpython3?\s+-c\s+["'][^"']*open\s*\([^)]*["']\s*,\s*["'][wa]/.test(cmd)) return true;
   if (/\bnode\s+-e\s+["'].*?(?:writeFileSync|writeFile\b|appendFileSync|createWriteStream)/.test(cmd)) return true;
   if (/(^|[|&;])\s*(cp|mv)\s/.test(cmd)) return true;

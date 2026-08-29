@@ -280,7 +280,7 @@ major 로 판정되어도 `auto_approve` 맵은 **모두 true** 로 두고 `"cat
 
 ## 2-5. 최종 자가 검증 (Pre-Completion Checklist)
 
-`done=true` 직전, 다음 6항목을 자체 확인하고 state.json에 결과를 기록한다.
+`done=true` 직전, 다음 9항목을 자체 확인하고 state.json에 결과를 기록한다.
 하나라도 false면 완료 기록 금지.
 
 | 항목 | 확인 |
@@ -293,10 +293,18 @@ major 로 판정되어도 `auto_approve` 맵은 **모두 true** 로 두고 `"cat
 | 6 | 작업 범주화(2-4b)가 끝나 `.policy.category`(minor\|major)와 `auto_approve` 맵이 기록되었다 |
 | 7 | `ambiguity_score`가 산정·기록되었고 최종값 ≤ 0.2 이다 (2-3-2b) |
 | 8 | 확정 명세가 동결되어 `spec_hash`가 기록되었다 (2-4a) |
+| 9 | `draft_path` 마커가 state.json에 기록되었다 (2-0). **`spec_hash`와 한 쌍이다** — `stage3-scope-verify.sh`가 `spec_hash`만 있고 `draft_path`가 없으면 `1_planning.scope` 진입을 하드 차단한다 |
+
+**9번은 자기선언이 아니라 실제 값을 읽어 확인한다** — `draft_synced`(파일 동기화)가 true 여도 마커는 빠질 수 있다. 실제로 `spec_hash`만 기록되고 `draft_path`가 누락된 채 8항목 전부 true 로 종료되어, 다음 게이트에서 워크플로우가 정지한 사례가 있다 (issue #6-①).
+
+```bash
+bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".draft_path'
+# → "null" 이면 2-0 의 set 명령으로 먼저 기록한 뒤 self_check 을 기록한다.
+```
 
 ```bash
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".self_check' \
-  '{"checklist_complete": true, "conflicts_resolved": true, "user_confirmed": true, "scope_clean": true, "draft_synced": true, "categorized": true, "ambiguity_converged": true, "spec_frozen": true}'
+  '{"checklist_complete": true, "conflicts_resolved": true, "user_confirmed": true, "scope_clean": true, "draft_synced": true, "categorized": true, "ambiguity_converged": true, "spec_frozen": true, "draft_recorded": true}'
 ```
 
 ## 완료 기록

@@ -36,8 +36,21 @@ SPEC_HASH="$(q '.stages."1_planning".substages."requirements".spec_hash')"
 if [ "$SPEC_HASH" != "__MISSING__" ] && [ "$SPEC_HASH" != "null" ] && [ -n "$SPEC_HASH" ]; then
   DRAFT="$(q '.stages."1_planning".substages."requirements".draft_path')"
   ROOT="$("$HERE/../scripts/state.sh" root)"
-  { [ "$DRAFT" != "__MISSING__" ] && [ "$DRAFT" != "null" ] && [ -f "$ROOT/$DRAFT" ]; } \
-    || fail "spec_hash 기록됨 그러나 확정 명세 파일 없음 (draft_path=$DRAFT)"
+  # 마커 누락과 파일 부재를 구분해서 알린다. 종전에는 둘 다 "확정 명세 파일 없음" 으로
+  # 뭉뚱그려서, 파일은 멀쩡히 있고 마커만 빠진 흔한 경우(issue #6-①)에 무엇을 해야
+  # 하는지 알 수 없었다. 마커 기록은 team-leader 에게 허용된 state.sh set 경로다.
+  DEFAULT_DRAFT=".makdoong2-team/${ISSUE}/requirements-draft.md"
+  if [ "$DRAFT" = "__MISSING__" ] || [ "$DRAFT" = "null" ] || [ -z "$DRAFT" ]; then
+    if [ -f "$ROOT/$DEFAULT_DRAFT" ]; then
+      fail "spec_hash 는 기록됐는데 draft_path 마커가 없다 — 파일은 ${DEFAULT_DRAFT} 에 있다.
+  복구: (1) sha256sum \"${ROOT}/${DEFAULT_DRAFT}\" 가 spec_hash(${SPEC_HASH}) 와 같은지 대조하고,
+        (2) 같으면 state.sh set 으로 requirements.draft_path 에 \"${DEFAULT_DRAFT}\" 를 기록한다 (stages/02-requirements.md §2-0),
+        (3) 다르면 명세가 동결 후 변경된 것이므로 requirements substage 를 재작업한다 (§2-4a)."
+    fi
+    fail "spec_hash 는 기록됐는데 draft_path 마커도 확정 명세 파일도 없다 — requirements substage 를 재작업하라 (stages/02-requirements.md §2-0, §2-5 9번)"
+  fi
+  [ -f "$ROOT/$DRAFT" ] \
+    || fail "draft_path=${DRAFT} 마커는 있으나 파일이 없다 (기준 경로 ${ROOT}) — worktree 동기화 누락이거나 파일이 삭제됐다"
   ACTUAL="$(sha256sum "$ROOT/$DRAFT" | cut -d' ' -f1)"
   [ "$ACTUAL" = "$SPEC_HASH" ] \
     || fail "확정 명세 무단 변경 감지 (spec drift) — 동결 후 변경은 사용자 재승인 + spec_hash 재기록 절차만 허용 (stages/02-requirements.md §2-4a)"

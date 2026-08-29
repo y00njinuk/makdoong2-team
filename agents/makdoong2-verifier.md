@@ -94,10 +94,10 @@ bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."2_implementation".substage
 `<STAGES_DIR>/NN-*.md`을 읽어 단계가 요구한 *명시적 산출물*을 추출한다.
 - 1_planning.jira: **통합 planning spec(01-planning.md)** 사용 — 3개 substage를 한 번에 처리하므로 다음 모두 확인:
     - `jira`: `template_validation` 6항목 모두 기록 + `validation_passed=true` + `done=true`
-    - `requirements`: `done=true` + `policy.category`(minor|major) 설정 + `self_check.categorized==true` + `requirements-draft.md` 존재
+    - `requirements`: `done=true` + `policy.category`(minor|major) 설정 + `self_check.categorized==true` + **`draft_path` 마커 기록 + 그 경로의 파일 존재** (아래 §2-4 참조)
     - `scope`: `done=true` + `self_check.paths_explicit=true`
     - **interview_required=true가 기록되어 있고 requirements.done=false이면**: 인터뷰 대기 상태 → **REJECTED** (부장님이 인터뷰 후 재dispatch 필요)
-- 1_planning.requirements: (단독 dispatch 폴백 시) `done_at` / `verification_pending` / `requirements-draft.md` 존재 + `.policy.category` 설정 + `self_check.categorized==true`
+- 1_planning.requirements: (단독 dispatch 폴백 시) `done_at` / `verification_pending` + **`draft_path` 마커 기록 + 그 경로의 파일 존재** (아래 §2-4) + `.policy.category` 설정 + `self_check.categorized==true`
 - 1_planning.scope: (단독 dispatch 폴백 시) 4가지 출력 형식 항목 + `done=true`
 - 2_implementation.analysis:
     - `.skipped == true` 이면 즉시 **VERIFIED** (게이트가 SKIP 처리한 경우이므로 산출물 없음)
@@ -114,7 +114,11 @@ bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."2_implementation".substage
         - `integration_points` 배열 길이 >= 1
         - `test_conventions.framework` 가 존재하고 비어있지 않음 (`null`/빈 문자열 불가 — `"none"` 은 허용)
         - `.self_check` 의 **7개** boolean (`has_project_structure` / `has_dependencies` / `has_task_relevant_files` / `has_conventions` / `has_integration_points` / `has_test_conventions` / `json_schema_valid`) 모두 true
-        - `git status --porcelain` 이 `workspace-analysis.json` 외 다른 파일 변경/신규를 보고하지 않음 (analyzer 위반 신호)
+        - `git status --porcelain` 이 **플러그인 자신의 상태 디렉터리(`.makdoong2-team/`)를 뺀 뒤** `workspace-analysis.json` 외 다른 파일 변경/신규를 보고하지 않음 (analyzer 위반 신호)
+          ```bash
+          git status --porcelain | grep -v '\.makdoong2-team/' | grep -v 'workspace-analysis\.json'
+          ```
+          출력이 비어 있어야 한다. `.makdoong2-team/` 은 플러그인이 작업 트리 안에 만드는 **자기 상태**이지 analyzer 의 부산물이 아니다. 이것을 위반으로 세면 해당 패턴이 git exclude 에 없는 저장소에서 **항상 REJECTED** 가 나고, 그 시점에 exclude 를 고칠 권한을 가진 역할이 파이프라인에 없어(analyzer 는 산출물 1개만 쓰기 가능 · team-leader 는 하드룰 2 로 차단 · engineer 는 analysis 통과 후 단계) 동일 사유 무한 루프가 된다 (issue #6-②).
 - 2_implementation.dev: `done=true` + sub-agent output에 "테스트 추가" 명시 / 5체크
 - 2_implementation.test: `.stages."2_implementation".substages."test"` 의 각 필드가 아래 조건을 모두 충족해야 함
         - `.unit` ∈ `{"pass", "fail", "skip"}` — `none`/`null` 은 미기록 → REJECTED
@@ -271,10 +275,28 @@ BB_BASE=$(jq -r '.hosts.BITBUCKET_API_BASE_PATH' ~/.config/opencode/makdoong2-te
 
 5. 위 4단계 모두 통과 시 § 2-2 (앵커 재검증) 로 계속.
 
+### 2-4. 1_planning.requirements 전용: draft_path 마커 재검증
+
+게이트(`stage3-scope-verify.sh`)는 `spec_hash` 가 기록돼 있으면 `draft_path` **마커**를 하드 요구한다. 반면 종전 verifier 기준은 `requirements-draft.md` **파일 존재**만 봤다. 두 기준이 어긋나 있어서, `spec_hash` 는 기록하고 `draft_path` 는 빠뜨린 채 `done=true` 로 끝난 substage 를 verifier 가 VERIFIED 로 통과시키고 **바로 다음 게이트가 하드 차단**하는 정지가 발생했다 (issue #6-①). 파일은 멀쩡히 있으므로 "파일 존재" 검사로는 절대 잡히지 않는다.
+
+```bash
+DRAFT=$(bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".draft_path' | tr -d '"')
+{ [ -n "$DRAFT" ] && [ "$DRAFT" != "null" ]; } || REJECTED   # 마커 누락 — 파일이 있어도 REJECTED
+ROOT=$(bash <SCRIPTS_DIR>/state.sh root)
+if [[ "$DRAFT" == /* ]]; then DRAFT_ABS="$DRAFT"; else DRAFT_ABS="$ROOT/$DRAFT"; fi
+[ -f "$DRAFT_ABS" ] || REJECTED
+```
+
+REJECTED 시 `findings[].item` 은 `requirements.draft_path_missing`, `next_action` 은 `REVERT_DONE_MARKER`. 재작업하는 planner 는 `stages/02-requirements.md` §2-5 의 9번 항목(`draft_recorded`)을 채우면 된다.
+
+**게이트 · self_check · verifier 세 곳의 필수 마커 정의는 항상 일치해야 한다.** 한 곳만 고치면 같은 정지가 그대로 재현된다.
+
 ### 3. Sub-agent 출력 정합성 점검
 
 다음 *추론형* 의심 신호를 확인한다:
-- **빈 응답** — 산출물 언급 없이 "완료" 선언
+- **빈 응답** — 산출물 언급 없이 "완료" 선언.
+  **단, §1·§2 의 결정론적 검사를 전부 통과했다면 이 신호만으로 REJECTED 하지 않는다.** `dispatch_stage` 는 최종 텍스트가 없어도 `.done=true` 면 성공으로 처리한다 (`shouldOverrideEmptyOutcome` — 최종 텍스트를 생략하는 로컬 모델 보상). 그 보상과 이 신호가 어긋나 있으면 그런 모델에서는 **모든 substage 가 REJECTED** 된다 (issue #6 부수 관찰 1). 산출물과 마커가 결정론적으로 검증되는데 산문이 없다는 것은 실패의 증거가 아니다.
+  마커나 산출물이 하나라도 어긋나면 그때는 REJECTED 이지만, 그건 이 추론 신호가 아니라 **§1·§2 위반**으로 기록한다 (`findings[].item` 을 결정론적 항목명으로 적는다 — 원인을 "빈 응답" 으로 돌리면 재작업 방향이 어긋난다).
 - **테스트 삭제 정황** — output에 "기존 테스트 제거" / `// @ts-ignore` 추가 / `as any` 도입 언급
 - **인라인 disable** — `eslint-disable` / `# noqa` 등으로 게이트 우회
 - **자기선언 완료** — `done=true`를 임의로 기록했으나 self_check 누락

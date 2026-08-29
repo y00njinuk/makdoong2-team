@@ -11,6 +11,9 @@
 #     예: "worktree": { "extra_exclude": ".idea/:tmp/" }
 set -euo pipefail
 
+# shellcheck source=lib/git-exclude.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/git-exclude.sh"
+
 # --reverse: worktree → main repo 역방향 동기화 (issue-scoped .makdoong2-team/<issue>/ 만)
 REVERSE=false
 while [[ "${1:-}" == --* ]]; do
@@ -130,24 +133,13 @@ fi
 # 이미 존재하는 라인은 skip 하여 사용자 편집을 덮어쓰지 않는다.
 ensure_baseline_gitexclude() {
   local wt=$1
-  local git_common_dir
-  git_common_dir="$(git -C "$wt" rev-parse --git-common-dir 2>/dev/null)"
-  if [ -z "$git_common_dir" ]; then
-    echo "[wt-sync-ignored] git-common-dir 식별 실패, exclude 스킵" >&2
-    return 0
-  fi
-  if [[ "$git_common_dir" != /* ]]; then
-    git_common_dir="$(cd "$wt/$git_common_dir" 2>/dev/null && pwd -P)" || {
-      echo "[wt-sync-ignored] git-common-dir 절대경로 변환 실패" >&2
-      return 0
-    }
-  fi
-  local exclude_file="$git_common_dir/info/exclude"
-  mkdir -p "$(dirname "$exclude_file")"
-  local added=0
   local -a lines=()
 
   # 공통 (모든 프로젝트)
+  # 플러그인 자신의 상태 디렉터리를 맨 앞에 둔다 — 이게 빠져 있으면 analysis verifier 가
+  # 항상 REJECTED 를 낸다 (issue #6-②). state.sh init 에서도 등록하지만, 이미 state.json 이
+  # 있어 init 의 등록 경로를 타지 않은 기존 워크플로우는 여기서 뒤늦게 구제된다.
+  lines+=("${MAKDOONG2_STATE_DIR_PATTERN}")
   lines+=(".DS_Store" "Thumbs.db" "*.log" "*.swp")
 
   # Python
@@ -175,16 +167,9 @@ ensure_baseline_gitexclude() {
     lines+=("vendor/" "*.test" "*.out")
   fi
 
-  # 존재하지 않는 라인만 append
-  touch "$exclude_file"
-  local ln
-  for ln in "${lines[@]}"; do
-    if ! grep -qxF -- "$ln" "$exclude_file" 2>/dev/null; then
-      printf '%s\n' "$ln" >> "$exclude_file"
-      added=$((added+1))
-    fi
-  done
-
+  # append 는 공용 헬퍼가 한다 (git-common-dir 해석·중복 검사 포함).
+  local added
+  added="$(ensure_git_exclude_lines "$wt" "${lines[@]}")"
   if [ "$added" -gt 0 ]; then
     echo "[wt-sync-ignored] baseline .git/info/exclude +$added lines (project-type detected)"
   fi

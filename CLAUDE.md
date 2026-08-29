@@ -60,7 +60,9 @@
 - state.json **쓰기**는 오직 `scripts/state.sh` (root/issue/init/status/get/set/append/migrate) 를 통해서만 한다.
 - `python -c "... open('state.json', 'w') ..."`, `jq ... > state.json`, `sed -i state.json`, `cp`/`mv`/`rm`, `git add state.json` 등 인터프리터 서브프로세스나 리다이렉트 우회는 `tool.execute.before` 훅이 물리적으로 차단한다.
 - **읽기는 차단하지 않는다.** `ls` / `cat` / `file` / `head` / `stat` / `jq` / `git check-ignore` 로 state.json 을 조회하는 진단 명령은 통과한다. 존재·유효성 확인은 `bash <SCRIPTS_DIR>/state.sh status <이슈키>` 를 쓴다 (exists / readable / phantom_keys / next 를 key=value 로 보고). 읽기까지 막으면 `state_unreadable` 이 안내하는 복구 절차를 수행할 수단이 사라진다.
-- 판정은 `src/state-access-guard.ts` 의 `classifyStateJsonAccess` 하나가 하고, universal state 훅과 leader 하드룰 2 가 **둘 다** 이것을 쓴다. 한쪽만 고치면 leader 는 여전히 막힌다. 애매한 명령은 차단이 기본값이다 — 읽기 오탐에는 `state.sh status` 우회로가 있지만 쓰기 미탐에는 복구 수단이 없다.
+- 판정은 `src/state-access-guard.ts` 의 `classifyStateJsonAccess` 하나가 하고, universal state 훅과 leader 하드룰 2 가 **둘 다** 이것을 쓴다. 한쪽만 고치면 leader 는 여전히 막힌다.
+- **리디렉션·세그먼트 판정은 인용 구간을 걷어낸 문자열로 한다.** 따옴표 안의 `>`·`|`·`;` 는 셸 메타문자가 아니다 — `jq -e '… | length >= 1'` 같은 읽기 전용 술어가 "파일 쓰기" 로 차단됐다 (issue #6-③). `stripQuotedSpans()` 는 따옴표 안쪽만 공백으로 덮고 **문자 오프셋을 보존**한다 (`splitUnquotedSegments()` 가 그 위치를 원문에 대응시켜 자른다). 인용을 걷어내면 가려지는 두 경로는 따로 막았다: `sh -c`/`eval` 은 쓰기 지표에 추가, 큰따옴표 안 명령 치환(`$(`·백틱)과 미종료 따옴표는 덮지 않는다.
+ 애매한 명령은 차단이 기본값이다 — 읽기 오탐에는 `state.sh status` 우회로가 있지만 쓰기 미탐에는 복구 수단이 없다.
 - 서브커맨드 목록을 늘릴 때는 `state.sh` 의 case, `STATE_SH_SUBCOMMANDS`, usage 한 줄을 함께 고친다 (`test/state-access-guard.test.mjs` 가 세 곳의 정합성을 강제한다).
 - 스키마는 항상 hierarchical: `.stages."<PHASE>".substages."<SUBSTAGE>".<field>`. flat 표기(`"<PHASE>.<SUBSTAGE>"`) 금지. `.policy.auto_approve.*` 만 예외적으로 flat 유지.
 - 상세: ARCHITECTURE.md §5.2 (스키마) / §5.5 (읽기 허용 · `state.sh status` · 복구) 참조.
@@ -110,6 +112,13 @@
 - 경로 관례: `<parentDir>/<repoName>-<issue>`, 브랜치명 `feature/<issue>`.
 - 상세: ARCHITECTURE.md §5.4 참조.
 
+### `.makdoong2-team/` 는 스스로 git exclude 에 등록한다 (hardrule)
+- 플러그인이 대상 저장소의 작업 트리 안에 자기 상태를 만드는 이상, 그것이 `git status` 에 보이지 않게 하는 것도 플러그인 책임이다. 등록은 `state.sh init` 이 `mkdir -p` 하는 그 자리에서 한다 (`scripts/lib/git-exclude.sh`).
+- **`wt-sync-ignored.sh` 의 baseline 만으로는 부족하다.** 그 함수는 worktree 생성(dev 진입) 시점에만 도는데 `2_implementation.analysis` 는 그보다 앞선 main repo 단계다. 등록 지점이 두 곳인 것은 중복이 아니라 각각 다른 시점을 덮는 것이다.
+- 등록이 없으면 analysis verifier 가 **구조적으로 통과 불가능**해진다 — 플러그인 자신의 파일이 `git status` 에 잡히는데, 그 시점에 exclude 를 고칠 권한을 가진 역할이 없다 (analyzer=산출물 1개만 쓰기, team-leader=하드룰 2 차단, engineer=analysis 통과 후 단계). 실제로 사용자가 직접 한 줄을 넣어야 풀렸다 (issue #6-②).
+- 이중 안전망으로 verifier 의 analysis `git status` 검사도 `.makdoong2-team/` 를 제외한다. 등록 경로를 타지 않은 in-flight 워크플로우 구제용이다.
+- 상세: ARCHITECTURE.md §5.1 참조.
+
 ### 게이트 3중 안전망 (entry / post / verifier — hardrule)
 - **entry gate** (`gates/stage<N>-*-verify.sh`): substage 진입 "전제조건" 만 검사. 완료 조건은 넣지 않는다.
   - 예: `stage7-pr-verify.sh` 는 commit 완료·worktree clean 만 검사. `origin/BR` 존재 검사는 금지 (chicken-and-egg).
@@ -120,6 +129,8 @@
   - `stage8-post-review-verify.sh`: review-comment-plan.json 존재·정합, per-commit 코멘트 ≥1, 총합 정합, all_comments_inline
 - **verifier** (dispatch_verifier / makdoong2-verifier): substage 종료 후 최종 판정. post-verify 재실행 + Bitbucket API 교차검증.
 - **완료 조건이 entry 에 들어가면 first-entry 자체가 불가능해진다** (PROJ-40406 review 데드락 사례). 신규 substage 추가 시 항상 이 원칙을 준수한다.
+- **필수 마커 정의는 게이트 · stage spec 의 self_check · verifier 세 곳이 항상 일치해야 한다.** 한 곳만 갖고 있으면 substage 가 `done=true` + VERIFIED 로 끝난 뒤 **다음 게이트가 하드 차단**하는 정지가 난다. 실제 사례: `stage3-scope-verify.sh` 는 `spec_hash` 가 있으면 `draft_path` 를 요구하는데, `02-requirements.md` 의 self_check 8항목에도 verifier 기준에도 `draft_path` 가 없어서 마커를 빠뜨린 채 통과됐다 (issue #6-①). verifier 가 **마커가 아니라 파일 존재**를 보고 있었던 것이 검출 실패의 직접 원인이다 — 파일은 멀쩡했다. 마커를 추가할 때는 세 곳을 한 번에 고치고, `test/gate-requirements-quality.test.mjs` 의 "스펙 정합" 블록에 케이스를 추가한다.
+
 
 ### 리뷰 인라인 코멘트 (hardrule)
 - **1 파일 = 1 commit 원칙에 대응하여 인라인 코멘트도 커밋 1개당 최소 1개** (`stage8-post-review-verify.sh` 강제).

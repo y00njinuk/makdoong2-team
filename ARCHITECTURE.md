@@ -372,6 +372,26 @@ payload 작성(리터럴 절대경로 JSON)
 
 **동기화**: `auto_advance_stage` 가 worktree 생성 시 forward, `dispatch_verifier` 가 서브세션 create 직전 forward (stale 방지), `dispatch_stage`/`dispatch_verifier` 의 finally 가 성공·실패 무관 reverse.
 
+#### 이 디렉토리는 스스로 git exclude 에 등록한다 (hardrule)
+
+플러그인이 대상 저장소의 **작업 트리 안**에 자기 상태를 만드는 이상, 그것이 `git status` 에 보이지 않게 하는 것도 플러그인 책임이다. `state.sh init` 이 `mkdir -p` 하는 바로 그 자리에서 `.git/info/exclude` 에 `.makdoong2-team/` 를 등록한다 (`scripts/lib/git-exclude.sh` → `ensure_git_exclude_lines`).
+
+등록하지 않으면 `2_implementation.analysis` 가 **구조적으로 통과 불가능**해진다 (issue #6-②). verifier 는 "`git status --porcelain` 이 산출물 외 변경을 보고하지 않을 것" 을 요구하는데, exclude 가 없으면 플러그인 자신의 파일(`events.ndjson`, `state.json`, `requirements-draft.md` …)이 항상 보고된다. 더 나쁜 것은 **그 시점에 exclude 를 고칠 권한을 가진 역할이 파이프라인에 없다**는 점이다:
+
+| 역할 | 왜 못 고치나 |
+|---|---|
+| analyzer | write 권한이 `workspace-analysis.json` 하나로 제한 |
+| team-leader | 하드룰 2 훅이 bash 파일 쓰기를 차단 |
+| engineer | `2_implementation.dev` 단계 — analysis 를 통과해야 도달 |
+
+그래서 동일 사유 REJECTED 가 반복되고 사용자가 직접 한 줄을 넣어야만 풀렸다.
+
+**`wt-sync-ignored.sh` 의 `ensure_baseline_gitexclude()` 만으로는 부족하다.** 그 함수는 worktree 생성(= dev 진입) 시점에만 도는데, 플러그인의 wt-sync 호출은 전부 `DEV_OR_LATER_STAGES` / `worktree !== cwd` 로 가드되어 있다. analysis 는 그보다 앞선 **main repo** 단계라 그때는 한 번도 실행되지 않는다. 그래서 등록 지점이 두 곳이다 — `state.sh init`(생성 시점)과 baseline(worktree 시점). 둘 다 같은 헬퍼를 쓰고, `.git/info/exclude` 는 커밋되지 않는 로컬 파일이라 대상 저장소 이력을 건드리지 않는다. worktree 의 `--git-common-dir` 은 main repo 의 `.git` 이므로 한 번 등록하면 양쪽에 적용된다.
+
+이중 안전망으로 **verifier 의 analysis 판정도 `.makdoong2-team/` 를 제외**하고 `git status` 를 읽는다 — 위 두 등록 경로를 타지 않은 in-flight 워크플로우를 구제하기 위해서다.
+
+회귀: `test/git-exclude-registration.test.mjs`.
+
 ### 5.2 스키마 (hardrule: hierarchical)
 
 `state.sh init <issue>` 가 시드하는 최소 구조:
@@ -456,6 +476,25 @@ state.json 하드룰이 지키는 것은 **쓰기 경로**다. 읽기는 스키�
 | 3 | 승인된 `state.sh <서브커맨드>` 호출 | `approved-helper` |
 | 4 | state.json 을 언급하는 **모든** 세그먼트가 읽기 전용 allowlist (`ls`/`cat`/`file`/`head`/`stat`/`jq`/`grep`/`git check-ignore` …) | `read-only` |
 | 5 | 그 외 | `write` — **차단** |
+
+**판정은 인용 구간을 걷어낸 문자열로 한다 (issue #6-③).** 셸에서 따옴표 안의 `>`·`|`·`;` 는 메타문자가 아니라 리터럴인데, 종전에는 명령 문자열 전체를 훑었다. 그래서 analyzer 가 자기 산출물을 검증하려던 읽기 전용 술어
+
+```
+jq -e '… and (.task_relevant_files | type == "array" and length >= 1)' workspace-analysis.json
+```
+
+가 두 번 잘못 잡혔다 — `length >= 1` 의 `>` 가 "출력 리디렉션" 으로, `|` 가 "세그먼트 경계" 로. 뒷조각의 선두 토큰(`length`)은 읽기 allowlist 에 없으니 차단이다. 리디렉션도 파이프도 없는 명령이었다.
+
+`stripQuotedSpans()` 가 따옴표 **안쪽만 공백으로 덮되 문자 오프셋을 보존**하고, `looksLikeRedirection()` 과 `splitUnquotedSegments()` 가 그 문자열로 판정한다. 오프셋을 보존하는 이유는 마스킹된 문자열에서 찾은 구분자 위치를 원문에 그대로 대응시켜 세그먼트를 잘라내기 위해서다. `>=` 하나만 예외 처리하는 방법도 있었지만 `awk '$1 > 2'`·`grep '>'` 같은 같은 계열이 그대로 남는다 — 셸 문법을 모델링하는 쪽이 맞다.
+
+인용을 걷어내면 **가려지는 것**이 생기므로 두 구멍을 함께 막았다:
+
+| 구멍 | 조치 |
+|---|---|
+| `bash -c 'echo x > f'` — 인라인 스크립트 안의 리디렉션이 안 보인다 | `sh`/`bash`/`zsh`/`ksh`/`dash` + `-c`, `eval` 을 쓰기 지표에 추가. 스크립트 *파일* 실행(`bash <SCRIPTS_DIR>/state.sh …`)은 `-c` 가 없어 매치되지 않는다 |
+| `"$(cat a > b)"` — 큰따옴표 안 명령 치환은 실제로 실행된다 | 큰따옴표 span 에 `$(` 나 백틱이 있으면 덮지 않는다 |
+
+미종료 따옴표도 덮지 않는다 — 메타문자가 계속 보여야 차단 쪽으로 판정된다. 세 경우 모두 **애매하면 차단** 원칙의 적용이다.
 
 2번이 3번보다 먼저인 것이 계약이다 — `state.sh get … ; rm …/state.json` 같은 밀수를 막는다. 4번이 allowlist 인 것도 계약이다: 오탐(읽기를 막음)에는 `state.sh status` 라는 우회로가 있지만 미탐(쓰기를 허용)에는 복구 수단이 없다. **애매하면 차단**한다.
 

@@ -14,8 +14,12 @@ import assert from "node:assert/strict";
 import {
   classifyStateJsonAccess,
   buildStateWriteBlockMessage,
+  looksLikeRedirection,
+  splitUnquotedSegments,
+  stripQuotedSpans,
   STATE_SH_SUBCOMMANDS,
 } from "../dist/state-access-guard.js";
+import { looksLikeFileWrite } from "../dist/opencode-plugin.js";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -171,5 +175,72 @@ describe("looksLikeFileWrite — state.json 읽기는 leader 하드룰 2 에도 
       assert.equal(looksLikeSealedStateWrite(c), true, `sealed guard should block: ${c}`);
       assert.equal(looksLikeFileWrite(c), true, `leader guard should block: ${c}`);
     }
+  });
+});
+
+describe("인용 구간 인지 — 따옴표 안의 셸 메타문자는 메타문자가 아니다 (issue #6-③)", () => {
+  // analyzer 가 자기 산출물을 검증하려고 실행한 읽기 전용 jq 술어가
+  // `length >= 1` 의 `>` 때문에 "파일 쓰기" 로 3회 차단됐다. 리디렉션은 없었다.
+  const JQ_PREDICATE =
+    `jq -e '(.project_structure and .dependencies and (.task_relevant_files | type == "array" and length >= 1)` +
+    ` and .conventions and (.integration_points | type == "array" and length >= 1))' workspace-analysis.json`;
+
+  test("읽기 전용 jq/awk 술어는 리디렉션으로 오분류되지 않는다", () => {
+    assert.equal(looksLikeFileWrite(JQ_PREDICATE), false, "issue #6-③ 원문 명령이 다시 차단되면 안 된다");
+    assert.equal(looksLikeRedirection(JQ_PREDICATE), false);
+    assert.equal(looksLikeFileWrite(`awk '$1 > 2 { print }' f.txt`), false);
+    assert.equal(looksLikeFileWrite(`grep -c '>' f.txt`), false);
+    assert.equal(looksLikeFileWrite(`jq -r '.a' f.json | grep -q ">"`), false);
+  });
+
+  test("진짜 리디렉션은 그대로 차단된다", () => {
+    for (const cmd of [
+      "echo hi > out.txt", "echo hi >> out.txt", "cat a > b",
+      "awk '{print}' a > b", "printf 'x' > f", `echo x > "quoted name.txt"`,
+    ]) {
+      assert.equal(looksLikeFileWrite(cmd), true, `차단되어야 한다: ${cmd}`);
+    }
+  });
+
+  test("인용 제거가 열 뻔한 밀수 경로를 함께 막는다", () => {
+    // 따옴표 안을 안 보게 되면 셸 인라인 스크립트 내부의 리디렉션이 숨는다.
+    for (const cmd of [
+      `bash -c 'echo x > f'`, `sh -c "echo x > f"`, `zsh -c 'cat a > b'`,
+      `eval "echo x > f"`, `echo "$(cat a > b)"`,
+    ]) {
+      assert.equal(looksLikeFileWrite(cmd), true, `차단되어야 한다: ${cmd}`);
+    }
+    // 스크립트 *파일* 실행은 -c 가 없으므로 계속 통과해야 한다 (모든 에이전트가 쓴다).
+    assert.equal(looksLikeFileWrite("bash /abs/scripts/state.sh get PROJ-1 '.a'"), false);
+    assert.equal(looksLikeFileWrite("bash /abs/gates/verify.sh PROJ-1 1_planning.scope"), false);
+  });
+
+  test("stripQuotedSpans — 오프셋을 보존하고 미종료 따옴표는 원문으로 남긴다", () => {
+    const src = `jq -e '.a > 1' f.json`;
+    const masked = stripQuotedSpans(src);
+    assert.equal(masked.length, src.length, "세그먼트 위치를 원문에 대응시키려면 길이가 같아야 한다");
+    assert.ok(!masked.includes(">"), "따옴표 안의 > 는 덮여야 한다");
+    // 미종료 따옴표는 덮지 않는다 — 메타문자가 계속 보여야 차단 쪽으로 판정된다.
+    assert.ok(stripQuotedSpans(`echo 'abc > f`).includes(">"));
+    // 큰따옴표 안의 명령 치환은 실제로 실행되므로 덮지 않는다.
+    assert.ok(stripQuotedSpans(`echo "$(cat a > b)"`).includes(">"));
+  });
+
+  test("splitUnquotedSegments — 따옴표 안의 파이프로는 자르지 않는다", () => {
+    assert.deepEqual(splitUnquotedSegments(`jq '.a | .b' f.json`), [`jq '.a | .b' f.json`]);
+    assert.equal(splitUnquotedSegments("ls -la; cat f").length, 2);
+    assert.equal(splitUnquotedSegments("cat f | grep x").length, 2);
+  });
+
+  test("state.json 대상 읽기 전용 jq 술어도 통과한다", () => {
+    const S = ".makdoong2-team/PROJ-1/state.json";
+    // 종전에는 jq 안의 `|` 가 세그먼트를 갈라 뒷조각 선두 토큰(length)이
+    // 읽기 allowlist 에 없다는 이유로 차단됐다.
+    assert.equal(classifyStateJsonAccess(`jq -e '.stages | length >= 1' ${S}`).kind, "read-only");
+    assert.equal(classifyStateJsonAccess(`jq '.a > 1' ${S}`).kind, "read-only");
+    // 쓰기는 그대로 차단.
+    assert.equal(classifyStateJsonAccess(`jq '.a=1' x > ${S}`).kind, "write");
+    assert.equal(classifyStateJsonAccess(`bash -c "echo x > ${S}"`).kind, "write");
+    assert.equal(classifyStateJsonAccess(`eval "rm ${S}"`).kind, "write");
   });
 });
