@@ -320,6 +320,73 @@ describe("게시 게이트 배선 — 훅·문서 정합", () => {
   });
 });
 
+describe("이슈 양식 (§6) — 본문 작성 가이드", () => {
+  const skillMd = readFileSync(join(PKG_ROOT, "skills/makdoong2-issue-reporter/SKILL.md"), "utf8");
+  const agentMd = readFileSync(join(PKG_ROOT, "agents/makdoong2-issue-reporter.md"), "utf8");
+
+  // 양식 없이는 수집·마스킹·승인을 다 통과해도 진단에 못 쓰는 이슈가 나온다.
+  // 기준은 이슈 #5 — 유지보수자가 타임라인·로그 발췌·반복 표·의심 코드를 그대로 진단에 썼다.
+  test("§6 이 양식 가이드로 존재하고 실행 순서에 편입돼 있다", () => {
+    assert.match(skillMd, /^## 6\. 이슈 양식 \(본문 작성 가이드\)$/m);
+    // 실행 순서에서 빠지면 에이전트가 6장을 건너뛰고 7장으로 간다.
+    assert.match(skillMd, /최소 질의\(4장\) → 본문 작성\(6장\) → 이슈 생성\(7장\)/);
+    assert.match(agentMd, /최소 질의 → 본문 작성 → 이슈 생성/);
+  });
+
+  test("필수 섹션이 순서대로 규정돼 있다", () => {
+    const required = [
+      "## 증상", "## 환경", "## 재현 절차", "## 기대 동작", "## 실제 동작",
+      "## 실패 지점", "## 타임라인", "## 에러 메시지", "## 재현성 / 영향 범위",
+      "## 시도한 조치", "## 증거",
+    ];
+    const spec = skillMd.slice(skillMd.indexOf("### 6.2 섹션 구성"), skillMd.indexOf("### 6.4"));
+    let cursor = -1;
+    for (const section of required) {
+      const at = spec.indexOf(section, cursor + 1);
+      assert.ok(at > cursor, `필수 섹션 "${section}" 이 6.2~6.3 에 순서대로 없다`);
+      cursor = at;
+    }
+  });
+
+  test("조건부 섹션 4종 — #5 가 채웠으나 이전 템플릿에 없던 것들", () => {
+    // "여유 있으면 쓰는 것" 으로 두면 모델 편차에 따라 빠지고,
+    // 빠지면 유지보수자가 같은 조사를 처음부터 다시 한다.
+    for (const section of ["## 관련 관찰", "## 참고: 의심 근본 원인 코드", "## 부수 관찰 (minor)", "## 제안 (참고)"]) {
+      assert.ok(skillMd.includes(section), `조건부 섹션 "${section}" 규정이 없다`);
+      assert.ok(agentMd.includes(section), `agent 하드룰이 "${section}" 을 지목하지 않는다`);
+    }
+    // 근거 없이 채우는 것도 금지 — 추측 제안은 진단을 잘못된 방향으로 끈다.
+    assert.match(skillMd, /근거 없이 채우지도 않는다/);
+  });
+
+  test("제목 규약과 기준 사례(#5)를 제시한다", () => {
+    assert.match(skillMd, /^### 6\.1 제목$/m);
+    assert.match(skillMd, /어디서.*무엇이 어떻게.*그 결과/s);
+    assert.match(skillMd, /issues\/5/);
+    // 커밋 제목 50자 규칙과 혼동하지 않도록 명시적으로 배제한다.
+    assert.match(skillMd, /50자 제한은 \*\*적용하지 않는다\*\*/);
+  });
+
+  test("제출 전 자기 점검이 cat 표시 *전* 단계로 배치돼 있다", () => {
+    assert.match(skillMd, /^### 6\.6 제출 전 자기 점검 \(7-1 표시 직전\)$/m);
+    // 표시 후 수정하면 sha256 표시 증명이 무효가 되어 승인 절차를 처음부터 다시 밟는다.
+    assert.match(skillMd, /본문을 6장 양식으로 작성하고 6\.6 자기 점검을 통과시킨 뒤/);
+    assert.match(agentMd, /6\.6 자기 점검을 통과시킨다/);
+  });
+
+  test("삭제된 이슈(#1/#4)를 다시 참조하지 않는다", () => {
+    // 두 이슈는 현재 410 Gone. 스냅샷 표가 삭제된 이슈를 가리키면 중복 판정이 어긋난다.
+    for (const dead of [1, 2, 3, 4]) {
+      assert.ok(
+        !skillMd.includes(`makdoong2-team/issues/${dead}`),
+        `삭제된 이슈 #${dead} 링크가 남아 있다`,
+      );
+    }
+    assert.ok(!/기존 이슈\(#1, #4\)/.test(skillMd), "삭제된 이슈를 제목 규약의 근거로 인용하면 안 된다");
+    assert.match(skillMd, /열린 이슈 목록을 이 문서에 하드코딩하지 않는다/);
+  });
+});
+
 describe("install/uninstall 왕복 — 신규 산출물", () => {
   test("install 이 skill + command 를 배포하고 uninstall 이 제거한다", () => {
     const configDir = mkdtempSync(join(tmpdir(), "mkd2-issue-reporter-"));
