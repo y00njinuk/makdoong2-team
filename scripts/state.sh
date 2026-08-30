@@ -49,7 +49,17 @@ issue() {
   # `root()` + `git worktree list --porcelain` 조합으로 ISSUE를 추출해야 한다.
   git rev-parse --abbrev-ref HEAD 2>/dev/null | grep -oE '[A-Z]+-[0-9]+' | head -n1 || true
 }
-sp()    { echo "$(root)/.makdoong2-team/$1/state.json"; }
+# 이슈 키는 경로에 그대로 들어간다. LLM 이 만든 값이 올 수 있으므로 디렉터리
+# 구분자와 상위 참조를 거부한다 — 종전에는 검증이 없어 `state.sh set '../../x' …`
+# 으로 저장소 밖에 쓰거나 읽을 수 있었다.
+validate_issue() {
+  case "$1" in
+    ""|*/*|*\\*) echo "state.sh: 이슈 키에 경로 구분자를 쓸 수 없다: '$1'" >&2; exit 65 ;;
+    .|..|*..*)   echo "state.sh: 이슈 키에 상위 디렉터리 참조를 쓸 수 없다: '$1'" >&2; exit 65 ;;
+  esac
+}
+
+sp()    { validate_issue "$1"; echo "$(root)/.makdoong2-team/$1/state.json"; }
 
 # usage_die <시그니처> [부연 설명...]
 # `${2:?}` 가 뱉는 raw bash 에러(`line 127: 2: parameter null or not set`)는 복구
@@ -60,6 +70,69 @@ usage_die() {
   local line
   for line in "$@"; do echo "  ${line}" >&2; done
   exit 64
+}
+
+# ── 원자적 JSON 쓰기 ────────────────────────────────────────────────────────
+# write_json_atomic <대상경로> <설명> <jq 인자...>
+#
+# 왜 헬퍼인가: 종전 세 곳(set/append/migrate)이 전부 아래 형태였다.
+#
+#     tmp="$(mktemp)"; jq "$Q = $V" "$P" > "$tmp" && mv "$tmp" "$P"
+#     echo "state[$ISSUE] $Q = $V"
+#
+# 이것은 두 가지로 조용히 실패한다.
+#
+#  1) **jq 실패가 은폐된다.** `set -e` 는 `&&` 리스트의 왼쪽 피연산자 실패를
+#     면제하므로, state.json 이 없거나 $V 가 잘못된 JSON 이면 jq 가 죽어도
+#     스크립트는 계속 진행해 **성공 메시지를 찍고 exit 0** 한다. 호출자(게이트·
+#     서브에이전트)는 마커가 기록됐다고 믿고 다음 단계로 넘어가지만 파일은
+#     그대로다 — issue #6-① 이 정확히 이 부류의 정지였다.
+#  2) **mv 가 원자적이지 않을 수 있다.** `mktemp` 는 $TMPDIR(보통 /tmp)에
+#     만드는데, Ubuntu 24.04+ 는 /tmp 가 tmpfs 이고 WSL2 는 저장소가 /mnt/c 일
+#     수 있다. 파일시스템이 다르면 `mv` 는 rename(2) 가 아니라 copy+unlink 라
+#     중간에 죽으면 state.json 이 잘린 채 남는다.
+#
+# 그래서 (a) 대상 파일 존재·JSON 유효성을 먼저 확인하고, (b) 임시 파일을
+# **대상과 같은 디렉터리**에 만들고, (c) jq 종료코드를 명시적으로 검사하고,
+# (d) 결과가 비어 있지 않은 유효 JSON 일 때만 교체한다.
+write_json_atomic() {
+  local target="$1"; shift
+  local what="$1"; shift
+
+  if [ ! -f "${target}" ]; then
+    echo "state.sh: state.json 없음: ${target}" >&2
+    echo "  복구: bash <SCRIPTS_DIR>/state.sh init <이슈키>" >&2
+    return 1
+  fi
+  if ! jq -e . "${target}" >/dev/null 2>&1; then
+    echo "state.sh: state.json 이 유효한 JSON 이 아니다: ${target}" >&2
+    echo "  파일 부재가 아니라 손상이다 — 자동 복구하지 않는다. 사용자에게 에스컬레이션하라." >&2
+    return 1
+  fi
+
+  # 임시 파일을 대상과 같은 디렉터리에 만들어 mv 가 같은 파일시스템 안의
+  # rename(2) 이 되게 한다.
+  local dir tmp rc
+  dir="$(dirname "${target}")"
+  tmp="$(mktemp "${dir}/.state.json.XXXXXX")" || {
+    echo "state.sh: 임시 파일 생성 실패 (${dir})" >&2
+    return 1
+  }
+
+  rc=0
+  jq "$@" "${target}" > "${tmp}" || rc=$?
+  if [ "${rc}" -ne 0 ]; then
+    rm -f "${tmp}"
+    echo "state.sh: ${what} 실패 — jq exit ${rc} (state.json 은 변경되지 않았다)" >&2
+    return 1
+  fi
+  if [ ! -s "${tmp}" ] || ! jq -e . "${tmp}" >/dev/null 2>&1; then
+    rm -f "${tmp}"
+    echo "state.sh: ${what} 실패 — jq 결과가 비었거나 유효한 JSON 이 아니다 (state.json 은 변경되지 않았다)" >&2
+    return 1
+  fi
+
+  mv "${tmp}" "${target}"
 }
 
 # ── phantom-key guard ──
@@ -221,7 +294,7 @@ JSON
       "문자열 값은 '\"pass\"' 처럼 JSON 리터럴로 전달한다."
     P="$(sp "${ISSUE}")"
     check_flat_stage_notation "$Q"
-    tmp="$(mktemp)"; jq "$Q = $V" "$P" > "$tmp" && mv "$tmp" "$P"
+    write_json_atomic "$P" "set ${Q}" "$Q = $V"
     echo "state[$ISSUE] $Q = $V" ;;
   append)
     ISSUE="${1:-}"; Q="${2:-}"; V="${3:-}"
@@ -229,14 +302,12 @@ JSON
       "예: state.sh append PROJ-1 '.stages.\"2_implementation\".substages.\"dev\".hang_history' '{\"at\":\"…\"}'"
     P="$(sp "${ISSUE}")"
     check_flat_stage_notation "$Q"
-    tmp="$(mktemp)"
-    jq --argjson entry "$V" "$Q = ((($Q) // []) + [\$entry])" "$P" > "$tmp" && mv "$tmp" "$P"
+    write_json_atomic "$P" "append ${Q}" --argjson entry "$V" "$Q = ((($Q) // []) + [\$entry])"
     echo "state[$ISSUE] $Q += $V" ;;
   migrate)
     ISSUE="${1:?issue required}"; P="$(sp "$ISSUE")"
     [ -f "$P" ] || { echo "state.json not found: $P" >&2; exit 1; }
-    tmp="$(mktemp)"
-    jq '
+    write_json_atomic "$P" "migrate" '
       def move($legacy; $phase; $sub):
         if has("stages") and (.stages | has($legacy)) then
           .stages[$phase] = (.stages[$phase] // {"done": false, "substages": {}})
@@ -262,7 +333,7 @@ JSON
       | move("3_delivery.commit";       "3_delivery"; "commit")
       | move("3_delivery.pr";           "3_delivery"; "pr")
       | move("3_delivery.review";       "3_delivery"; "review")
-    ' "$P" > "$tmp" && mv "$tmp" "$P"
+    '
     echo "migrated[$ISSUE] $P" ;;
   *) echo "usage: state.sh {root|issue|init|status|get|set|append|migrate} ..." >&2; exit 64 ;;
 esac
