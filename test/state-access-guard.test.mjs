@@ -244,3 +244,199 @@ describe("인용 구간 인지 — 따옴표 안의 셸 메타문자는 메타�
     assert.equal(classifyStateJsonAccess(`eval "rm ${S}"`).kind, "write");
   });
 });
+
+// ── 3차 수정: 공백 없는 리디렉션 · GNU 장문형 · 스크립트 본문 쓰기 · 제어 구문 ──
+//
+// #5 는 "경로만 보고 차단" 을, #6-③ 은 "따옴표 안의 > 를 리디렉션으로 오인" 을
+// 고쳤다. 남아 있던 것은 반대 방향의 구멍이었다 — 아래 5종은 전부 실제로 파일을
+// 덮어쓰는데 `read-only` 로 통과했다. 이 모듈 스스로 "미탐에는 복구 수단이 없다"
+// 를 원칙으로 선언하므로 오탐보다 심각한 상태였다.
+describe("state-access-guard — 미탐 차단 (3차)", () => {
+  const S = ".makdoong2-team/PROJ-1/state.json";
+
+  test("공백 없는 출력 리디렉션", () => {
+    // 종전 정규식은 `>` 앞에 구분자를 요구해서 이 셋을 전부 놓쳤다.
+    assert.equal(kind(`echo '{}'>${S}`), "write");
+    assert.equal(kind(`cat x>${S}`), "write");
+    assert.equal(kind(`echo '{}'>>${S}`), "write");
+  });
+
+  test("파일 디스크립터 접두 리디렉션 (1> / 2>)", () => {
+    assert.equal(kind(`jq . a.json 1> ${S}`), "write");
+    assert.equal(kind(`jq . a.json 1>>${S}`), "write");
+  });
+
+  test("GNU sed 장문형 --in-place (배포 대상이 Ubuntu 다)", () => {
+    assert.equal(kind(`sed --in-place s/a/b/ ${S}`), "write");
+    assert.equal(kind(`sed -i s/a/b/ ${S}`), "write");
+  });
+
+  test("allowlist 명령이 자기 스크립트 문법으로 쓰는 경우", () => {
+    assert.equal(kind(`awk '{print > "${S}"}' x`), "write");
+    assert.equal(kind(`awk '{print >> "${S}"}' x`), "write");
+    assert.equal(kind(`sed -n 'w ${S}' a`), "write");
+    assert.equal(kind(`sed 's/a/b/w ${S}' a`), "write");
+  });
+
+  test("find -delete / xargs 경유 파괴", () => {
+    assert.equal(kind(`find . -name state.json -delete ; cat ${S}`), "write");
+    assert.equal(kind(`ls ${S} | xargs rm`), "write");
+  });
+
+  test("리디렉션·fd 예외는 유지된다 (>/dev/null, 2>&1)", () => {
+    assert.equal(kind(`cat ${S} > /dev/null`), "read-only");
+    assert.equal(kind(`cat ${S} 2>/dev/null`), "read-only");
+    assert.equal(kind(`jq . ${S} 2>&1`), "read-only");
+  });
+});
+
+describe("state-access-guard — 오탐 해소 (3차, issue #5 재발 방지)", () => {
+  const S = ".makdoong2-team/PROJ-1/state.json";
+
+  test("따옴표 안의 쓰기 명령 이름은 명령이 아니다", () => {
+    // WRITE_INDICATORS 가 원문에 돌아서 grep 의 *패턴 인자* 를 명령으로 오인했다.
+    // #6-③ 의 인용 인지 판정이 리디렉션에만 적용된 절반짜리 수정이었다.
+    assert.equal(kind(`grep -e ' rm ' ${S}`), "read-only");
+    assert.equal(kind(`grep -c 'cp ' ${S}`), "read-only");
+    assert.equal(kind(`jq -r '.notes | select(test("mv "))' ${S}`), "read-only");
+  });
+
+  test("셸 제어 구문으로 감싼 존재 확인", () => {
+    // state_unreadable 복구 절차가 실제로 쓰는 형태다. 종전에는 `;` 로 잘린
+    // 세그먼트의 선두가 if / then / fi 라서 "확인되지 않은 명령" 으로 막혔다.
+    assert.equal(kind(`if [ -f ${S} ]; then cat ${S}; fi`), "read-only");
+    assert.equal(kind(`for f in ${S}; do cat "$f"; done`), "read-only");
+    assert.equal(kind(`while read -r l; do echo "$l"; done < ${S}`), "read-only");
+  });
+
+  test("제어 구문이 쓰기를 감추지는 않는다", () => {
+    assert.equal(kind(`if [ -f ${S} ]; then rm ${S}; fi`), "write");
+    assert.equal(kind(`for f in ${S}; do rm "$f"; done`), "write");
+  });
+});
+
+describe("looksLikeFileWrite — git/state.sh 접두 면제의 범위 (3차)", () => {
+  test("git 접두가 뒤따르는 리디렉션을 면제하지 않는다", () => {
+    // 종전에는 명령이 git 서브커맨드로 시작하기만 하면 즉시 false 를 반환해서
+    // READ-ONLY 하드룰(planner/analyzer)과 leader 하드룰 2 가 동시에 우회됐다.
+    assert.equal(looksLikeFileWrite("git diff > /tmp/out.txt"), true);
+    assert.equal(looksLikeFileWrite("git log --oneline > notes.md"), true);
+    assert.equal(looksLikeFileWrite("git show HEAD:a.txt > b.txt"), true);
+    assert.equal(looksLikeFileWrite("git diff | tee /tmp/out.txt"), true);
+    assert.equal(looksLikeFileWrite("git status && echo x > f"), true);
+  });
+
+  test("state.sh 접두도 뒤따르는 쓰기를 면제하지 않는다", () => {
+    assert.equal(looksLikeFileWrite("bash scripts/state.sh get P '.a' && rm -f x"), true);
+    assert.equal(looksLikeFileWrite("bash scripts/state.sh get P '.a' ; cp a b"), true);
+  });
+
+  test("순수 git 읽기와 state.sh 호출은 계속 통과한다", () => {
+    assert.equal(looksLikeFileWrite("git status --porcelain"), false);
+    assert.equal(looksLikeFileWrite("git diff --cached --name-only"), false);
+    assert.equal(looksLikeFileWrite("bash scripts/state.sh get PROJ-1 '.a'"), false);
+  });
+
+  test("누락돼 있던 파일 조작 명령을 잡는다", () => {
+    for (const cmd of ["rm -f x", "truncate -s 0 f", "install -m 644 a b",
+                       "patch -p1 < d.patch", "ln -sf a b", "chmod 600 f",
+                       "sed --in-place s/a/b/ f", "shred f"]) {
+      assert.equal(looksLikeFileWrite(cmd), true, `놓침: ${cmd}`);
+    }
+  });
+
+  test("인용 안의 명령 이름은 여전히 오탐이 아니다", () => {
+    assert.equal(looksLikeFileWrite("grep -rn 'rm ' src/"), false);
+    assert.equal(looksLikeFileWrite("jq -e '.a | length >= 1' workspace-analysis.json"), false);
+  });
+});
+
+describe("state-access-guard — approved-helper 면제의 범위 (3차)", () => {
+  const S = ".makdoong2-team/PROJ-1/state.json";
+
+  test("state.sh 호출이 다른 세그먼트의 검사를 면제하지 않는다", () => {
+    // 종전에는 명령 어딘가에 `state.sh <서브커맨드>` 가 있기만 하면 즉시
+    // approved-helper 를 반환해 세그먼트 allowlist 를 통째로 건너뛰었다.
+    // 단독으로는 차단되는 명령이 접두만 붙이면 통과하는 상태였다.
+    assert.equal(kind(`someunknowncmd ${S}`), "write");           // 기준선
+    assert.equal(kind(`bash state.sh get P '.a' ; someunknowncmd ${S}`), "write");
+    assert.equal(kind(`bash state.sh get P '.a' | someunknowncmd ${S}`), "write");
+    assert.equal(kind(`state.sh status P && python3 -m json.tool a.json ${S}`), "write");
+  });
+
+  test("정상 조합은 그대로 통과한다", () => {
+    assert.equal(kind(`bash scripts/state.sh status P && cat ${S}`), "approved-helper");
+    assert.equal(kind(`bash scripts/state.sh set P '.a' true ; cat ${S}`), "approved-helper");
+    // state.json 경로가 없는 순수 state.sh 호출은 이 가드의 관심 밖이다.
+    assert.equal(kind(`bash scripts/state.sh get PROJ-1 '.a'`), "unrelated");
+  });
+
+  test("밀수 경로는 여전히 막힌다", () => {
+    assert.equal(kind(`bash scripts/state.sh get P '.a' ; rm ${S}`), "write");
+    assert.equal(kind(`bash scripts/state.sh get P '.a' && echo x > ${S}`), "write");
+  });
+});
+
+describe("state-access-guard — 경로 표기 변형 (3차)", () => {
+  test("중복 슬래시 · `.` 세그먼트로 하드룰을 우회할 수 없다", () => {
+    // 셸은 셋 다 같은 파일로 해석하는데 종전 정규식은 `unrelated` 를 냈다 —
+    // 즉 state.json 쓰기 하드룰이 통째로 건너뛰어졌다.
+    assert.equal(kind("echo x > .makdoong2-team//PROJ-1/state.json"), "write");
+    assert.equal(kind("echo x > .makdoong2-team/./PROJ-1/state.json"), "write");
+    assert.equal(kind("rm .makdoong2-team/PROJ-1/./state.json"), "write");
+  });
+
+  test("같은 변형의 읽기는 계속 읽기다", () => {
+    assert.equal(kind("cat .makdoong2-team//PROJ-1/state.json"), "read-only");
+    assert.equal(kind("jq . .makdoong2-team/./PROJ-1/state.json"), "read-only");
+  });
+});
+
+// ── 릴리즈 검토에서 잡힌 회귀: rawHead 단어 스킵의 부분 문자열 매칭 ──
+//
+// "선두 토큰이 온전히 경로면 단어이므로 스킵" 로직이 .test()(부분 문자열)여서,
+// rawHead 안 어디든 경로가 있으면 세그먼트를 통째로 스킵했다 — 실제 쓰기가 통과.
+describe("state-access-guard — rawHead 단어 스킵은 앵커 매칭이다 (검토 회귀)", () => {
+  const P = ".makdoong2-team/PROJ-1/state.json";
+
+  test("heredoc 본문·인터프리터 표현식은 스킵되지 않는다", () => {
+    assert.equal(kind(`python3 - <<EOF\nopen("${P}","w").write("{}")\nEOF`), "write");
+    assert.equal(kind(`open("${P}","w")`), "write");
+    assert.equal(kind(`node -e 'fs.writeFileSync("${P}","")'`), "write");
+  });
+
+  test("변수 대입 세그먼트는 스킵되지 않는다", () => {
+    assert.equal(kind(`X=${P}; some_writer "$X"`), "write");
+  });
+
+  test("온전한 경로 단어(for-in · 입력 리디렉션)는 계속 스킵된다", () => {
+    assert.equal(kind(`for f in ${P}; do cat "$f"; done`), "read-only");
+    assert.equal(kind(`while read -r l; do echo "$l"; done < ${P}`), "read-only");
+    assert.equal(kind(`cat "${P}"`), "read-only");
+    assert.equal(kind(`cat ./${P}`), "read-only");
+  });
+
+  test("파괴적 for 루프는 여전히 차단 (WRITE_INDICATORS 가 잡음)", () => {
+    assert.equal(kind(`for f in ${P}; do rm "$f"; done`), "write");
+  });
+});
+
+describe("state-access-guard — 경로 정규식은 선형 시간이다 (검토 회귀: ReDoS)", () => {
+  test("병리적 '/.' 반복 입력에서 O(n²) 백트래킹이 없다", () => {
+    // tool.execute.before 에서 모든 bash 명령마다 동기 실행되므로, 병리적 입력
+    // 하나가 이벤트 루프를 수 초 블로킹하면 안 된다. 종전 정규식은 40k 입력에서
+    // ~1.4s 였다. 넉넉한 상한(200ms)으로 2차 성장을 잡는다.
+    const cmd = "echo x > .makdoong2-team" + "/.".repeat(20000) + "X/state.json";
+    const t0 = process.hrtime.bigint();
+    classifyStateJsonAccess(cmd);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(ms < 200, `경로 판정이 ${ms.toFixed(0)}ms — 2차 백트래킹 의심 (선형이면 <5ms)`);
+  });
+
+  test("경로 변형 우회는 여전히 차단된다", () => {
+    assert.equal(kind("echo x > .makdoong2-team//PROJ-1/state.json"), "write");
+    assert.equal(kind("echo x > .makdoong2-team/./PROJ-1/state.json"), "write");
+    assert.equal(kind("rm .makdoong2-team/PROJ-1/./state.json"), "write");
+    assert.equal(kind("cat .makdoong2-team//PROJ-1/state.json"), "read-only");
+  });
+});

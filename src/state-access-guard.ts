@@ -18,8 +18,32 @@
 // 허용)은 state.json 정합성을 깨고 되돌릴 수단이 없다. 그래서 읽기 허용은
 // allowlist 로만 한다 — 읽기 전용임이 증명된 명령만 통과하고, 모르는 명령은 차단.
 
-/** `.makdoong2-team/<issue>/state.json` 리터럴 경로. */
-export const STATE_JSON_PATH_RE = /\.makdoong2-team\/[^/\s]+\/state\.json/;
+/**
+ * `.makdoong2-team/<issue>/state.json` 리터럴 경로.
+ *
+ * 중복 슬래시(`//`)와 `.` 세그먼트(`/./`)를 허용한다. 셸은 이 셋을 **같은 파일**로
+ * 해석하는데 종전 정규식은 정확히 한 개의 `/` 와 세그먼트 하나만 인정해서 아래
+ * 셋이 전부 `unrelated` 로 새어나갔다 — 즉 하드룰이 통째로 우회됐다:
+ *   echo x > .makdoong2-team//PROJ-1/state.json
+ *   echo x > .makdoong2-team/./PROJ-1/state.json
+ *   rm       .makdoong2-team/PROJ-1/./state.json
+ * (`..` 는 다른 디렉터리를 가리키므로 여기서 다루지 않는다 — 그 경로의 파일은
+ *  이 워크플로우의 state.json 이 아니다.)
+ *
+ * **선형 시간이어야 한다.** 이 정규식은 tool.execute.before 에서 모든 bash 명령
+ * 전체와 세그먼트마다 동기 실행되므로, 병리적 입력에 2차 백트래킹이 나면 명령
+ * 하나가 플러그인 이벤트 루프(전 세션 폴링 포함)를 수 초 블로킹한다. 종전
+ * `(?:\/+\.)*\/+` 는 `\/+` 반복과 `.` 의 이중 소비(`\.` vs `[^/\s]`)가 겹쳐
+ * `.makdoong2-team` + `/.` 반복 입력에서 O(n²) 였다 (40k 입력 ~1.4s 실측).
+ * `(?:\.?\/)*` 는 매 반복이 슬래시 하나로 결정론적으로 끝나 백트래킹이 없다.
+ */
+export const STATE_JSON_PATH_RE =
+  /\.makdoong2-team\/(?:\.?\/)*[^/\s]+\/(?:\.?\/)*state\.json/;
+
+/** rawHead 가 **온전히** state.json 경로 토큰인지 (선택적 인용·`./` 접두 포함). */
+const RAWHEAD_IS_PATH = new RegExp(
+  `^["']?(?:\\.\\/)?(?:${STATE_JSON_PATH_RE.source})["']?$`,
+);
 
 /**
  * `scripts/state.sh` 가 실제로 구현하는 서브커맨드.
@@ -104,8 +128,37 @@ export function stripQuotedSpans(cmd: string): string {
  * 같은 함수를 쓴다. 한쪽만 고치면 다른 쪽에서 같은 오탐이 남는다.
  */
 export function looksLikeRedirection(cmd: string): boolean {
-  return /(?:^|[|&;\s(`{])>>?\s*(?!&|\/dev\/(?:null|stderr|stdout|tty)(?![\w/]))\S/
+  // 인용 구간을 덮은 뒤에 남은 `>` 는 전부 셸 메타문자다. 종전 정규식은 `>` 앞에
+  // 구분자([|&;\s(`{])를 요구해서 **공백 없는 리디렉션을 통째로 놓쳤다**:
+  //   echo '{}'>state.json   cat x>state.json   jq . a.json 1>state.json
+  // 셋 다 실제로 파일을 덮어쓰는데 "읽기 전용" 으로 판정됐다. 미탐에는 복구
+  // 수단이 없다는 이 모듈의 원칙에 정면으로 어긋난다.
+  //
+  // 그래서 앞 문맥 요구를 없애고 fd 접두(`1>` / `2>`)를 명시적으로 흡수한다.
+  //   - `>&` (fd 복제, 예: 2>&1) 는 파일 생성이 아니므로 제외
+  //   - `>/dev/{null,stderr,stdout,tty}` 는 종전대로 제외
+  //   - `>>` 는 한 토큰으로 소비 (앞의 [^>] 가 두 번째 `>` 에 걸리지 않게)
+  return /(?:^|[^>])\d*>>?\s*(?!&|\/dev\/(?:null|stderr|stdout|tty)(?![\w/]))\S/
     .test(stripQuotedSpans(cmd));
+}
+
+/** 인용 구간의 **본문** 목록 (따옴표 제외). 스크립트 인자 검사에 쓴다. */
+export function quotedSpanBodies(cmd: string): string[] {
+  const bodies: string[] = [];
+  let i = 0;
+  while (i < cmd.length) {
+    const ch = cmd[i];
+    if (ch !== "'" && ch !== '"') { i++; continue; }
+    let close = -1;
+    for (let j = i + 1; j < cmd.length; j++) {
+      if (cmd[j] === "\\" && ch === '"') { j++; continue; }
+      if (cmd[j] === ch) { close = j; break; }
+    }
+    if (close < 0) { bodies.push(cmd.slice(i + 1)); break; }
+    bodies.push(cmd.slice(i + 1, close));
+    i = close + 1;
+  }
+  return bodies;
 }
 
 /** 세그먼트 구분자 — 인용 밖에서만 유효하다. */
@@ -132,14 +185,15 @@ export function splitUnquotedSegments(cmd: string): string[] {
 }
 
 /**
- * 쓰기 의도 지표. 하나라도 매칭되면 명령 전체를 차단한다.
+ * 쓰기 의도 지표 — **원문**(인용 구간 포함)으로 판정하는 것들.
  *
- * state.sh 호출 여부보다 먼저 검사한다 — `state.sh get … ; rm …/state.json` 처럼
- * 승인된 호출에 쓰기를 끼워 넣는 밀수 경로를 막기 위해서다.
+ * 여기 있는 것은 전부 "따옴표 안이 곧 실행 대상" 인 형태다. 인용을 걷어내면
+ * 판정 근거 자체가 사라지므로 원문을 봐야 한다.
  */
-const WRITE_INDICATORS: ReadonlyArray<readonly [RegExp, string]> = [
-  [/(?:^|[|&;(`{])\s*(?:tee|dd|sponge)\b/, "tee / dd / sponge"],
-  [/\bsed\b[^|;&]*\s-i(?:\b|['"])/, "sed -i (in-place 편집)"],
+export const WRITE_INDICATORS_RAW: ReadonlyArray<readonly [RegExp, string]> = [
+  // in-place 편집. `--in-place` 는 GNU sed 의 장문형이고 배포 대상이 Ubuntu 라
+  // 실제로 쓰이는 표기인데 종전 정규식은 `-i` 단문형만 봤다.
+  [/\bsed\b[^|;&]*\s(?:-i(?:\b|['"])|--in-place\b)/, "sed -i / --in-place (in-place 편집)"],
   [/\b(?:perl|ruby)\b[^|;&]*\s-\w*i\b/, "perl / ruby -i (in-place 편집)"],
   // 인터프리터 인라인 스크립트는 읽기/쓰기를 정적으로 구분할 수 없다 → 전부 차단.
   // 읽기가 필요하면 cat / jq / head 를 쓴다.
@@ -149,9 +203,39 @@ const WRITE_INDICATORS: ReadonlyArray<readonly [RegExp, string]> = [
   // 스크립트 파일 실행(`bash <SCRIPTS_DIR>/state.sh …`)은 `-c` 가 없어 매치되지 않는다.
   [/\b(?:ba|z|k|da)?sh\b\s+-\w*c\b/, "셸 인라인 스크립트 (sh -c)"],
   [/(?:^|[|&;\s(`{])eval\s/, "eval"],
+];
+
+/**
+ * 쓰기 의도 지표 — **인용 구간을 덮은** 문자열로 판정하는 것들.
+ *
+ * 이쪽을 원문으로 보면 issue #5 계열의 오탐이 난다. 실제로 종전 구현에서
+ *   grep -e ' rm ' .makdoong2-team/<이슈>/state.json
+ * 이 "파일 조작 명령" 으로 차단됐다 — 따옴표 안의 ` rm ` 은 grep 의 **패턴 인자**
+ * 이지 명령이 아니다. #6-③ 의 인용 인지 판정이 리디렉션에만 적용되고 여기엔
+ * 적용되지 않은 절반짜리 수정이었다.
+ */
+export const WRITE_INDICATORS_UNQUOTED: ReadonlyArray<readonly [RegExp, string]> = [
+  [/(?:^|[|&;(`{])\s*(?:tee|dd|sponge)\b/, "tee / dd / sponge"],
   [/(?:^|[|&;\s(`{])(?:cp|mv|rm|ln|install|touch|truncate|shred|chmod|chown|unlink|rsync|mkfifo)\s/, "파일 조작 명령"],
   [/\bgit\b(?:\s+-\S+(?:\s+\S+)?)*\s+(?:add|rm|mv|checkout|restore|stash|apply|clean|update-index|reset|commit)\b/, "git 쓰기 서브커맨드"],
   [/(?:^|[|&;\s(`{])(?:vi|vim|nano|emacs|ed|ex|patch)\s/, "편집기 / patch"],
+  // `find … -delete` / `-exec rm` 은 대상이 glob 이라 리터럴 경로 정규식에 안 걸릴
+  // 수 있지만, state.json 을 언급하는 명령 안에 있으면 파괴 의도가 명백하다.
+  [/\bfind\b[^|;&]*\s-(?:delete|exec(?:dir)?\b)/, "find -delete / -exec"],
+  [/\bxargs\b[^|;&]*\s(?:rm|mv|cp|truncate|sed)\b/, "xargs 경유 파일 조작"],
+];
+
+/**
+ * allowlist 에 있는 명령이 **자기 문법으로** 파일을 쓰는 형태.
+ *
+ * `awk` 와 `sed` 는 읽기 전용 명령으로 등록돼 있지만 스크립트 본문에 쓰기 연산을
+ * 담을 수 있다. 인용 구간 본문만 검사하므로 `awk '$1 > 2' state.json` 같은 정상
+ * 비교 술어(#6-③ 가 고친 바로 그 형태)는 걸리지 않는다 — 리디렉션은 `print` 뒤에
+ * 오고 대상이 문자열/변수라는 점이 다르다.
+ */
+const SCRIPT_BODY_WRITE_INDICATORS: ReadonlyArray<readonly [string, RegExp, string]> = [
+  ["awk", /\b(?:print|printf)\b[^;}]*>>?\s*["$(]/, "awk 스크립트 안의 출력 리디렉션 (print > \"file\")"],
+  ["sed", /(?:^|[;{\s/])[wW]\s+\S/, "sed 스크립트 안의 w (write) 명령 / 치환 플래그"],
 ];
 
 /** 세그먼트의 선두에 올 수 있는 읽기 전용 명령. 여기 없는 명령은 차단된다. */
@@ -165,7 +249,7 @@ const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
 ]);
 
 /** 읽기 전용으로 확인된 git 서브커맨드. */
-const READ_ONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
+export const READ_ONLY_GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
   "check-ignore", "check-attr", "status", "ls-files", "diff", "show", "log",
   "cat-file", "rev-parse", "blame", "grep", "describe",
 ]);
@@ -175,20 +259,49 @@ const GIT_OPTIONS_WITH_VALUE: ReadonlySet<string> = new Set([
   "-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path",
 ]);
 
-/** 세그먼트 선두의 괄호·역따옴표·환경변수 대입을 벗겨 실제 명령 토큰을 얻는다. */
-function segmentHead(segment: string): { head: string; rest: string } {
+/**
+ * 셸 제어 구문 키워드. 세그먼트 선두에 오면 벗겨내고 다음 토큰을 명령으로 본다.
+ *
+ * 이것이 없으면 정상 존재 확인이 차단된다 (issue #5 재발):
+ *   if [ -f <state.json> ]; then cat <state.json>; fi
+ * → `;` 로 잘린 세그먼트의 선두가 `if` / `then` / `fi` 라서 "읽기 전용으로
+ *   확인되지 않은 명령" 으로 판정됐다. 키워드를 벗기면 `[` 와 `cat` 이 드러나
+ *   allowlist 에 걸린다. 쓰기 명령을 감추지는 않는다 — `if rm x; then` 은
+ *   벗긴 뒤 head 가 `rm` 이라 여전히 차단된다.
+ */
+const SHELL_CONTROL_KEYWORDS: ReadonlySet<string> = new Set([
+  "if", "then", "elif", "else", "fi",
+  "while", "until", "for", "in", "do", "done",
+  "case", "esac", "select", "function", "time", "!",
+]);
+
+/** 세그먼트 선두의 괄호·역따옴표·환경변수 대입·제어 키워드를 벗겨 실제 명령 토큰을 얻는다. */
+function segmentHead(segment: string): { head: string; rawHead: string; rest: string } {
   let s = segment;
-  for (let i = 0; i < 4; i++) {
+  for (let i = 0; i < 8; i++) {
     const before = s;
     s = s
       .replace(/^[\s(){}`]+/, "")
       .replace(/^\$\(/, "")
       .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S*)\s+)+/, "");
+    const kw = /^(\S+)(\s+[\s\S]*)?$/.exec(s);
+    if (kw && SHELL_CONTROL_KEYWORDS.has(kw[1])) {
+      s = (kw[2] ?? "").replace(/^\s+/, "");
+      // `for VAR in LIST` / `select VAR in LIST` — 루프 변수와 `in` 도 함께 벗긴다.
+      // 벗기지 않으면 head 가 루프 변수명이 되어 allowlist 에 없다고 차단된다.
+      if (kw[1] === "for" || kw[1] === "select") {
+        s = s.replace(/^[A-Za-z_][A-Za-z0-9_]*\s+in\s+/, "");
+      }
+    }
     if (s === before) break;
   }
+  // 입력 리디렉션(`< file`, `0< file`)은 읽기다. 선두에 남아 있으면 벗긴다 —
+  // 벗기지 않으면 `while …; done < <state.json>` 의 마지막 세그먼트 선두가 `<`
+  // 가 되어 "읽기 전용으로 확인되지 않은 명령" 으로 차단된다.
+  s = s.replace(/^\d*<<?-?\s*/, "");
   const m = /^(\S+)\s*([\s\S]*)$/.exec(s);
-  if (!m) return { head: "", rest: "" };
-  return { head: m[1].replace(/^.*\//, ""), rest: m[2] };
+  if (!m) return { head: "", rawHead: "", rest: "" };
+  return { head: m[1].replace(/^.*\//, ""), rawHead: m[1], rest: m[2] };
 }
 
 function gitSubcommand(rest: string): string {
@@ -228,16 +341,51 @@ export function classifyStateJsonAccess(cmd: string): StateAccessVerdict {
 
   if (looksLikeRedirection(cmd)) return { kind: "write", reason: "출력 리디렉션 (> / >>)" };
 
-  for (const [re, reason] of WRITE_INDICATORS) {
+  for (const [re, reason] of WRITE_INDICATORS_RAW) {
     if (re.test(cmd)) return { kind: "write", reason };
   }
+  const unquoted = stripQuotedSpans(cmd);
+  for (const [re, reason] of WRITE_INDICATORS_UNQUOTED) {
+    if (re.test(unquoted)) return { kind: "write", reason };
+  }
 
-  if (STATE_SH_CALL_RE.test(cmd)) return { kind: "approved-helper" };
+  // state.sh 승인 호출은 **세그먼트 단위로** 면제한다. 종전에는 명령 어딘가에
+  // `state.sh <서브커맨드>` 가 있기만 하면 즉시 approved-helper 를 반환해서 아래
+  // 세그먼트 allowlist 검사를 통째로 건너뛰었다. 그래서 단독으로는 차단되는
+  // 명령이 접두만 붙이면 통과했다:
+  //   someunknowncmd <state.json>                     → write   (차단)
+  //   state.sh get P '.a' ; someunknowncmd <state.json> → approved-helper (통과!)
+  // `looksLikeFileWrite` 의 git 접두 면제와 정확히 같은 계열의 결함이다.
+  let sawApprovedHelper = false;
 
   const readers: string[] = [];
   for (const segment of splitUnquotedSegments(cmd)) {
+    if (STATE_SH_CALL_RE.test(segment)) { sawApprovedHelper = true; continue; }
     if (!STATE_JSON_PATH_RE.test(segment)) continue;
-    const { head, rest } = segmentHead(segment);
+    const { head, rawHead, rest } = segmentHead(segment);
+
+    // 선두 토큰이 **온전히** state.json 경로면 이 세그먼트는 명령이 아니라 단어다.
+    //   for f in <state.json>; do …        → `for VAR in` 을 벗기면 경로만 남는다
+    //   while …; done < <state.json>       → 입력 리디렉션을 벗기면 경로만 남는다
+    // 단어에서 쓰기가 일어날 수는 없다 — 실제 쓰기는 위의 리디렉션 검사와 쓰기
+    // 지표가 이미 잡았다. 여기서 차단하면 정상 읽기 루프가 막힌다.
+    //
+    // **반드시 앵커 매칭이다** (`RAWHEAD_IS_PATH`, `.test()` 아님). 종전에는
+    // `STATE_JSON_PATH_RE.test(rawHead)` 로 **부분 문자열**을 봐서, rawHead 안
+    // 어디든 경로가 있으면 세그먼트를 통째로 스킵했다. 그 결과 실제 쓰기가 통과했다:
+    //   heredoc 본문 줄  open("<state.json>","w").write(...)  → rawHead 안에 경로 포함
+    //   변수 대입        X=<state.json>                       → rawHead 안에 경로 포함
+    // 둘 다 read-only 로 새어나갔다 (모듈 원칙 "미탐엔 복구 수단 없음" 위반).
+    if (rawHead && RAWHEAD_IS_PATH.test(rawHead)) continue;
+
+    // allowlist 명령이 자기 스크립트 문법으로 파일을 쓰는 경우 (awk print > "f",
+    // sed 'w f'). 인용 구간 본문만 보므로 정상 비교 술어는 걸리지 않는다.
+    for (const [cmdName, re, reason] of SCRIPT_BODY_WRITE_INDICATORS) {
+      if (head !== cmdName) continue;
+      if (quotedSpanBodies(rest).some((body) => re.test(body))) {
+        return { kind: "write", reason };
+      }
+    }
 
     if (head === "git") {
       const sub = gitSubcommand(rest);
@@ -254,7 +402,7 @@ export function classifyStateJsonAccess(cmd: string): StateAccessVerdict {
     readers.push(head);
   }
 
-  return { kind: "read-only", readers };
+  return sawApprovedHelper ? { kind: "approved-helper" } : { kind: "read-only", readers };
 }
 
 /**
