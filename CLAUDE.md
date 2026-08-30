@@ -103,6 +103,23 @@
 - 순수 계약(소스 레지스트리·정규화·파싱·병합)은 `src/research-fanout.ts`, 회귀는 `test/research-fanout.test.ts`.
 - 상세: ARCHITECTURE.md §3.6 참조.
 
+### verdict 는 셋이다 — `ERROR` 를 `REJECTED` 로 환원하지 않는다 (hardrule)
+- `dispatch_verifier` 의 `verdict` 는 `VERIFIED` / `REJECTED` / **`ERROR`** 다. `ERROR` 는 "검증이 **수행되지 않았다**"(verifier 세션 인프라 실패)이고 `REJECTED`(콘텐츠 반려)와 **조치가 정반대**다 — 전자는 verifier 만 재호출, 후자는 stage 재실행.
+- 판정이 **물리적으로 존재하지 않는** 두 경로(`session_failed_default` / `session_gone_default`)만 `ERROR` 다. `malformed_output_default`(세션은 정상 종료했는데 태그가 없음)는 종전대로 `REJECTED` — 형식 위반은 관측 가능한 콘텐츠 결함이고 `same_reason_streak` 이 이미 루프를 막는다. 거기까지 완화하면 무한 재호출만 열고 얻는 것이 없다.
+- **판정 태그는 세션 실패보다 우선한다.** 태그를 뱉은 뒤 세션 꼬리가 죽었다면 그 판정은 실제로 산출된 것이다.
+- `ERROR` 는 `rejected_count` · `same_reason_streak` · `last_verdict_reason` 에 **일절 기록하지 않는다.** 대신 `.verifier_error_streak` 이 3회 연속이면 `verifier_error_streak_exceeded: true` 로 사용자 에스컬레이션한다. 판정을 얻으면 0 으로 리셋.
+- 반환값의 `next_action` 을 **그대로 따른다.** `raw` / `parsed` 문구를 team-leader 가 스스로 해석해 stage 전체를 재실행한 것이 issue #7 의 직접 피해였다 (마커가 전부 정상인 `1_planning.jira` 를 planner 200초 재가동, 재검증 결과는 VERIFIED).
+- 순수 로직은 `src/verifier-verdict.ts` 에 둔다 — `src/opencode-plugin.ts` 에 export 하면 opencode 로더가 plugin factory 로 호출한다. 회귀는 `test/verifier-verdict.test.ts`, 계약 상세는 ARCHITECTURE.md §10.1.
+
+### 완료 판정은 툴이 떠 있는 동안 내리지 않는다 (hardrule)
+- `finish` 는 "이번 assistant 메시지의 **생성**이 끝났다" 는 뜻이지 "세션이 끝났다" 가 아니다. 모델이 tool call 로 턴을 마치면 그 순간 finish 가 붙고 곧바로 툴이 실행된다 — 그 사이(실측 110ms)의 폴은 tool part 를 아직 못 보고 finish 만 본다.
+- 완료 판정에 쓰는 값은 `toolInFlight = hasPendingToolCall || isToolExecuting()` 이다. **스냅샷 하나로 판단하지 않는다** — `hasPendingToolCall` 은 메시지 스냅샷이라 서버 반영이 늦고, `isToolExecuting()`(훅 카운터)은 훅이 없는 호출자에게 없다. OR 로 묶어야 각자의 사각지대를 서로 덮는다.
+- **`isRecentlyActive()` 를 완료 판정에 쓰지 말 것.** 그것은 "최근 5분 내 활동" 이라는 넓은 창(gone 오탐 방지용)이라, 완료 판정에 쓰면 모든 substage 가 5분씩 늦어진다. 순간값 `isToolExecuting()` 과 반드시 구분한다.
+- finish 단독 완료(`statusIdle` 도 `contentStable` 도 없음)는 **같은 content 시그니처를 두 폴 연속으로 본 뒤에만** 확정한다. worktree-CWD 세션은 `statusIdle` 이 영영 안 뜨므로 이 경로를 상시로 탄다 — 비용은 폴 1회다.
+- 공백만 있는 text part 는 `preamble_only` 가 아니라 `whitespace_only_text` 다. `text.length > 0` 만 보면 `"\n\n"` 같은 스트리밍 초기 상태가 trim 길이 0 으로 임계 미만이 되어 무조건 preamble 로 확정된다 (로그의 `textLen=0` 이 이 경로).
+- tool-call stall(`permission_stall`) 은 `isToolExecuting()` 이 참이면 면제한다. tool part 의 state 변화는 content 시그니처를 바꾸지 않으므로 5분짜리 sbt 빌드도 "진전 없음" 으로 보여 기본 임계 60초에서 abort 대상이 된다. **`hasPendingToolCall` 이 항상 false 이던 동안에는 이 경로가 발화하지 않아 드러나지 않았고, 그 값을 고치는 순간 무장됐다.**
+- 상세: ARCHITECTURE.md §8.2. 회귀: `test/poll-sub-session.test.ts` ("issue #7" 블록).
+
 ### REJECTED verdict 재작업 flow (dispatch_verifier + dispatch_stage 자동 연계)
 - `dispatch_verifier` 가 REJECTED 반환 시 verdict raw 텍스트를 state.json 에 자동 기록: `.stages."<PHASE>".substages."<SUBSTAGE>".last_verdict_reason` / `last_verdict_reason_hash` / `last_verdict_at` / `same_reason_streak` / `rejected_count`.
 - `dispatch_stage` 재호출 시 `last_verdict_reason` 이 존재하면 자동으로 `=== 이전 검증 실패 사유 (재작업 시 참고) ===` 블록을 프롬프트에 주입. 서브에이전트 (publisher / engineer / planner) 는 이 블록을 읽고 재작업 방향을 설정한다.

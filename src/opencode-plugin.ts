@@ -24,6 +24,12 @@ import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { appendSessionIndex, findWorktreeRoot, lookupSessionFromIndex } from "./session-index.js";
 import { computeVerdictHash } from "./verdict-hash.js";
+import {
+  classifyVerifierOutcome,
+  nextVerifierErrorStreak,
+  verifierErrorStreakExceeded,
+  VERIFIER_ERROR_STREAK_LIMIT,
+} from "./verifier-verdict.ts";
 import { nextModel, applyConfigOverrides, POLICIES } from "./model-fallback-policy.ts";
 import { agentForStage, STAGE_SPEC_FILES, type Stage } from "./agent-stage-config.ts";
 import { shouldEscalateStall } from "./stall-escalation.ts";
@@ -903,6 +909,11 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         const last = sessionLastToolExecuteAt.get(sessionId);
         return typeof last === "number" && Date.now() - last < TOOL_EXECUTE_ALIVE_WINDOW_MS;
       },
+      // "지금 이 순간 툴이 실행 중인가" — before 훅에서 올리고 after 훅에서 내리는
+      // 활성 카운터 그대로다. isRecentlyActive 의 5분 창과 달리 순간값이라 완료
+      // 판정에 쓸 수 있다. 폴러가 읽는 메시지 스냅샷보다 항상 앞선다 (issue #7:
+      // tool.execute.before 발화 110ms 뒤의 폴이 tool part 를 아직 못 봤다).
+      isToolExecuting: () => (sessionActiveToolCount.get(sessionId) ?? 0) > 0,
     });
 
   // ── sessionID → agent 매핑. chat.params hook에서 채우고, tool.execute.before
@@ -2448,11 +2459,18 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
        * just reported done. Read-only sub-agent reads state.json self_check markers,
        * the stage spec, and the dispatcher's output, and emits a structured verdict
        * of `<verifier-verdict>VERIFIED</verifier-verdict>` or `REJECTED`.
+       *
+       * 반환 verdict 는 셋이다. `ERROR` 는 "검증이 수행되지 않았다"(세션 인프라
+       * 실패)로, 콘텐츠 반려인 `REJECTED` 와 조치가 정반대다 — 전자는 verifier 만
+       * 재호출, 후자는 stage 재실행. 판정 근거는 `verdict_source`, 지시는
+       * `next_action` 이 싣는다 (src/verifier-verdict.ts).
        */
       dispatch_verifier: tool({
         description:
           "Spawn the makdoong2-verifier sub-agent to second-check a stage's completion. " +
-          "Returns { ok, verdict: 'VERIFIED' | 'REJECTED', raw, session_id }.",
+          "Returns { ok, verdict: 'VERIFIED' | 'REJECTED' | 'ERROR', verdict_source, retryable, " +
+          "next_action, raw, session_id }. verdict='ERROR' means the verifier session failed " +
+          "before producing a verdict — re-run dispatch_verifier only; do NOT re-run the stage.",
         args: {
           issue:             tool.schema.string().describe("Jira issue key, e.g. PROJ-12345"),
           stage:             tool.schema.enum(STAGE_ORDER as [Stage, ...Stage[]]),
@@ -2610,8 +2628,8 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 : "";
               logger.warn(
                 `[dispatch_verifier] SESSION_GONE session=${subSessionID} stage=${args.stage}` +
-                `${stallReason} — defaulting to REJECTED verdict, no retry ` +
-                `(verifier is idempotent, team-leader can redispatch)`,
+                `${stallReason} — verdict=ERROR (판정 없음), no retry ` +
+                `(verifier is idempotent, team-leader can redispatch the verifier alone)`,
               );
               const vHangEntry = JSON.stringify({
                 attempt: 1,
@@ -2663,34 +2681,53 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
             });
           }
 
-          const m = raw.match(/<verifier-verdict>\s*(VERIFIED|REJECTED)\s*<\/verifier-verdict>/i);
-          const jsonFallback = !m ? raw.match(/"verdict"\s*:\s*"(VERIFIED|REJECTED)"/i) : null;
-          const verdict = m
-            ? (m[1].toUpperCase() as "VERIFIED" | "REJECTED")
-            : jsonFallback
-              ? (jsonFallback[1].toUpperCase() as "VERIFIED" | "REJECTED")
-              : "REJECTED";
-
-          const verdictSource = verifierSessionGone
-            ? "session_gone_default"
-            : m
-              ? "verdict_tag"
-              : jsonFallback
-                ? "json_fallback"
-                : success
-                  ? "malformed_output_default"
-                  : "session_failed_default";
+          const classification = classifyVerifierOutcome({
+            raw,
+            success,
+            sessionGone: verifierSessionGone,
+          });
+          const verdict = classification.verdict;
+          const verdictSource = classification.source;
           logger.debug(
             `[dispatch_verifier] VERDICT ${verdict} — issue=${args.issue} stage=${args.stage} ` +
-            `session=${subSessionID} source=${verdictSource} success=${success}`,
+            `session=${subSessionID} source=${verdictSource} success=${success} ` +
+            `retryable=${classification.retryable} counts_as_rejection=${classification.countsAsRejection}`,
           );
 
           const stageBase = stageJqPath(args.stage as Stage);
           let sameReasonStreak = 0;
           let sameReasonStreakExceeded = false;
           let rejectedCount = 0;
+          let verifierErrorStreak = 0;
+          let verifierErrorStreakHit = false;
           const SAME_REASON_STREAK_LIMIT = 5;
-          if (verdict === "REJECTED") {
+
+          if (verdict === "ERROR") {
+            // 검증이 **수행되지 않았다**. 반려 집계에 넣지 않는다.
+            //
+            // 여기서 REJECTED 로 집계하면 stage 산출물에 아무 문제가 없는데도
+            // `rejected_count` 가 오르고 `last_verdict_reason` 에 "verifier session
+            // failed" 가 박힌다. team-leader 는 그것을 반려로 읽고 stage 를 통째로
+            // 재실행한다 — 실제로 마커가 전부 정상인 1_planning.jira 가 planner
+            // 200초 재가동으로 이어졌고 재검증은 VERIFIED 였다 (issue #7).
+            //
+            // 대신 ERROR 전용 연속 카운터로 무한 재호출만 막는다.
+            const prevErrR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${stageBase + ".verifier_error_streak"}`
+              .cwd(args.worktree).quiet().nothrow();
+            const prevErr = prevErrR.exitCode === 0
+              ? (parseInt(prevErrR.stdout?.toString().trim() || "0", 10) || 0)
+              : 0;
+            verifierErrorStreak = nextVerifierErrorStreak(prevErr, classification);
+            verifierErrorStreakHit = verifierErrorStreakExceeded(verifierErrorStreak);
+            await $`bash ${SCRIPTS_DIR}/state.sh set ${args.issue} ${stageBase + ".verifier_error_streak"} ${String(verifierErrorStreak)}`
+              .cwd(args.worktree).quiet().nothrow();
+            logger.warn(
+              `[dispatch_verifier] VERIFIER_ERROR — issue=${args.issue} stage=${args.stage} ` +
+              `source=${verdictSource} streak=${verifierErrorStreak}/${VERIFIER_ERROR_STREAK_LIMIT} ` +
+              `— 판정 없음. verifier 재호출만이 올바른 조치다 (stage 재실행 금지)` +
+              (verifierErrorStreakHit ? ` ERROR_STREAK_EXCEEDED` : ``),
+            );
+          } else if (classification.countsAsRejection) {
             const reasonText = raw.trim().slice(0, 4000);
             const reasonHash = computeVerdictHash(raw, args.stage);
             const prevHashR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${stageBase + ".last_verdict_reason_hash"}`
@@ -2740,12 +2777,27 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
               .cwd(args.worktree).quiet().nothrow();
           }
 
+          // 판정을 얻었으면(VERIFIED / REJECTED 무관) ERROR 연속 카운터는 리셋한다.
+          // 인프라가 회복됐다는 뜻이므로 직전 실패를 계속 들고 갈 이유가 없다.
+          if (verdict !== "ERROR") {
+            await $`bash ${SCRIPTS_DIR}/state.sh set ${args.issue} ${stageBase + ".verifier_error_streak"} 0`
+              .cwd(args.worktree).quiet().nothrow();
+          }
+
           await $`bash ${SCRIPTS_DIR}/log-event.sh ${args.issue} verifier_verdict stage=${args.stage} verdict=${verdict} session=${subSessionID}`
             .cwd(args.worktree).quiet().nothrow();
 
           return JSON.stringify({
             ok: success,
             verdict,
+            // 종전에는 이 세 값이 없어서 호출자가 "왜 REJECTED 인지" 를 알 수 없었다.
+            // verdictSource 는 이미 계산되어 로그에만 남고 있었다 (issue #7).
+            verdict_source: verdictSource,
+            // retryable=true 는 "같은 인자로 verifier 만 다시 부르면 된다" 는 뜻이다.
+            // stage 재실행 신호가 아니다 — next_action 이 그 점을 못 박는다.
+            retryable: classification.retryable,
+            counts_as_rejection: classification.countsAsRejection,
+            next_action: classification.nextAction,
             stage: args.stage,
             agent: verifierId,
             model: modelFull,
@@ -2754,13 +2806,9 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
             same_reason_streak: sameReasonStreak,
             same_reason_streak_exceeded: sameReasonStreakExceeded,
             rejected_count: rejectedCount,
-            parsed: m
-              ? "verdict tag found"
-              : jsonFallback
-                ? `verdict tag missing — extracted from JSON body (${jsonFallback[1]})`
-                : success
-                  ? "verdict tag missing — defaulted to REJECTED (verifier output malformed)"
-                  : `verifier session failed (${raw.slice(0, 120)})`,
+            verifier_error_streak: verifierErrorStreak,
+            verifier_error_streak_exceeded: verifierErrorStreakHit,
+            parsed: classification.parsed,
           });
         },
       }),

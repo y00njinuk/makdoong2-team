@@ -116,6 +116,23 @@ export interface PollOptions {
   // to server-side batching. Returning false (or omitting the callback) keeps
   // the pre-existing behavior. Default: undefined.
   isRecentlyActive?: () => boolean;
+  // 지금 이 순간 툴이 실행 중인가 — 실시간 신호.
+  //
+  // `hasPendingToolCall` 은 폴 시점에 읽은 **메시지 스냅샷**이라, 서버가 tool part
+  // 를 메시지에 반영하기 전에는 false 로 보인다. 실측된 오판 2건 모두
+  // `tool.execute.before` 발화 후 110ms / 108ms 안의 폴이었고, 그 폴에서
+  // `finishComplete=true` + `textLen=0` 으로 완료 판정이 내려져 **툴을 실행 중이던
+  // 세션이 abort** 됐다 (GitHub issue #7).
+  //
+  // 플러그인은 이미 그 순간의 진실을 알고 있다 — `tool.execute.before` 에서 세션별
+  // 활성 툴 카운터를 올리고 `tool.execute.after` 에서 내린다. 카운터가 >0 이면 툴이
+  // 실제로 실행 중이라는 뜻이다. 그 신호를 주입해 스냅샷 지연을 메운다.
+  //
+  // `isRecentlyActive` 와 반드시 구분한다: 그쪽은 "최근 5분 안에 툴 활동이 있었나"
+  // 라는 넓은 창(gone 오탐 방지용)이고, 이쪽은 "지금 실행 중인가" 라는 정확한
+  // 순간값이다. 넓은 창을 완료 판정에 쓰면 정상 종료가 매번 5분씩 지연된다.
+  // 미주입(undefined)이면 종전 동작과 동일하다.
+  isToolExecuting?: () => boolean;
   // Content-stable completion inference. When set, a sub-session that (a) has
   // produced at least one assistant message, (b) has no pending tool_call, and
   // (c) has not advanced content (no length or signature change) for this many
@@ -259,6 +276,7 @@ export async function pollSubSession(
   const contentStableCompletionMs = options.contentStableCompletionMs;
   const preambleOnlyTextThreshold = options.preambleOnlyTextThreshold;
   const isRecentlyActive = options.isRecentlyActive;
+  const isToolExecuting = options.isToolExecuting;
   const permissionCheckIntervalPolls = options.permissionCheckIntervalPolls ?? 5;
 
   let pollCount = 0;
@@ -270,6 +288,10 @@ export async function pollSubSession(
   let lastAssistantSig = "";
   let nudged = false;
   let firstGoneObservedAt: number | null = null;
+  // finish 단독 완료 신호를 처음 관측한 폴의 content 시그니처. 같은 시그니처를
+  // 연속 두 폴에서 볼 때만 완료로 확정한다 (아래 finishOnlyCompletion 참조).
+  let finishConfirmSig: string | null = null;
+  let toolStallExemptLogged = false;
 
   dbg?.(`[pollSubSession] START session=${sessionId} timeoutMs=${timeoutMs}`);
 
@@ -370,6 +392,12 @@ export async function pollSubSession(
 
     const hasFinish = lastAssistant?.info?.finish != null;
     const hasPendingToolCall = !!lastAssistant?.parts?.some(isInFlightToolPart);
+    // 메시지 스냅샷(hasPendingToolCall)과 실시간 훅 신호(isToolExecuting)의 합집합.
+    // 둘 중 하나라도 "툴이 떠 있다" 고 하면 완료로 판정하지 않는다 — 스냅샷은
+    // 서버 반영이 늦고(issue #7), 훅 신호는 훅이 안 붙은 환경에서 아예 없다.
+    // OR 로 묶어야 각자의 사각지대를 서로 덮는다.
+    const toolExecuting = isToolExecuting?.() === true;
+    const toolInFlight = hasPendingToolCall || toolExecuting;
 
     const stalledMs = now() - lastProgressAt;
 
@@ -399,7 +427,7 @@ export async function pollSubSession(
     const activeSignal = isRecentlyActive?.() === true;
     const goneAdmitted =
       !activeSignal &&
-      !hasPendingToolCall &&
+      !toolInFlight &&
       !messagesChanged &&
       !status &&
       (sessionEverAppeared || (sessionAliveByMessages && hasProducedAssistantMessage));
@@ -408,7 +436,7 @@ export async function pollSubSession(
         firstGoneObservedAt = now();
         dbg?.(
           `[pollSubSession] GONE_ADMIT session=${sessionId} poll=${pollCount} ` +
-          `sig="${currentAsstSig}" pending_tool=${hasPendingToolCall} ` +
+          `sig="${currentAsstSig}" pending_tool=${hasPendingToolCall} tool_exec=${toolExecuting} ` +
           `session_ever_appeared=${sessionEverAppeared} alive_by_msgs=${sessionAliveByMessages} ` +
           `messages=${messages.length} grace_ms=${statusAbsentGraceMs} ` +
           `— gone admission started; will fire in ${statusAbsentGraceMs}ms if condition persists`,
@@ -432,7 +460,7 @@ export async function pollSubSession(
       if (firstGoneObservedAt !== null) {
         dbg?.(
           `[pollSubSession] GONE_ADMIT_RESET session=${sessionId} poll=${pollCount} ` +
-          `active_signal=${activeSignal} pending_tool=${hasPendingToolCall} ` +
+          `active_signal=${activeSignal} pending_tool=${hasPendingToolCall} tool_exec=${toolExecuting} ` +
           `messages_changed=${messagesChanged} status=${status?.type ?? "absent"} ` +
           `— gone admission cleared before grace elapsed`,
         );
@@ -481,7 +509,31 @@ export async function pollSubSession(
       }
     }
 
-    if (hasPendingToolCall && stalledMs >= toolCallStallThresholdMs) {
+    // Tool-call stall — "툴 호출이 떠 있는데 아무 진전이 없다".
+    //
+    // 이 휴리스틱이 잡으려는 것은 **서브에이전트 컨텍스트에서 답할 수 없는 권한
+    // 요청에 막힌** 툴 호출이다. 실행 자체가 오래 걸리는 툴(sbt·docker·gradle
+    // 빌드)은 대상이 아니다 — 그런데 둘은 `stalledMs` 만 보면 구분되지 않는다.
+    // tool part 의 state 변화는 시그니처(`id:partsLen:textLen`)를 바꾸지 않으므로
+    // 5분짜리 빌드도 "진전 없음" 으로 보이고, 기본 임계 60초에서 abort 된다.
+    // `hasPendingToolCall` 이 프로덕션에서 항상 false 였던 동안에는 이 경로가 한
+    // 번도 발화하지 않아 드러나지 않았고, 그 값을 고치는 순간 무장됐다.
+    //
+    // `isToolExecuting()` 이 그 둘을 가른다. before 훅이 발화하고 after 훅이 아직
+    // 안 돈 상태 = 툴이 실제로 **실행 중**이다. 이때는 죽이지 않는다. 진짜 권한
+    // 대기는 매 폴 도는 `permission.list()` 경로가 요청 ID·패턴까지 짚어 정확히
+    // 잡아내고, 그마저 실패해도 절대 타임아웃이 받쳐준다. 이 모듈의 위험 선호와
+    // 같은 방향이다 — 미탐(살아있는 세션을 죽임)이 오탐(타임아웃까지 기다림)보다
+    // 비싸다.
+    if (hasPendingToolCall && toolExecuting && stalledMs >= toolCallStallThresholdMs && !toolStallExemptLogged) {
+      toolStallExemptLogged = true;
+      dbg?.(
+        `[pollSubSession] TOOL_STALL_EXEMPT session=${sessionId} poll=${pollCount} ` +
+        `stalled_ms=${stalledMs} threshold_ms=${toolCallStallThresholdMs} ` +
+        `— 툴이 실행 중이므로 permission_stall 로 판정하지 않는다`,
+      );
+    }
+    if (hasPendingToolCall && !toolExecuting && stalledMs >= toolCallStallThresholdMs) {
       err(`[pollSubSession] PERMISSION_STALL session=${sessionId} polls=${pollCount} stalledMs=${stalledMs}`);
       await client.session.abort({ path: { id: sessionId } }).catch(() => undefined);
       return {
@@ -527,7 +579,7 @@ export async function pollSubSession(
       messageStallThresholdMs !== undefined &&
       (sessionEverAppeared || sessionAliveByMessages) &&
       busyIndicated &&
-      !hasPendingToolCall &&
+      !toolInFlight &&
       stalledFromProgress >= messageStallThresholdMs
     ) {
       const hangMode = lastAssistant ? "mid_stream" : "bootstrap";
@@ -546,7 +598,7 @@ export async function pollSubSession(
       };
     }
 
-    const finishComplete = hasFinish && !hasPendingToolCall && properOrdering;
+    const finishComplete = hasFinish && !toolInFlight && properOrdering;
 
     // INV-1: `!status` alone is not idle. Require `status.type === "idle"` AND
     // that we saw the session in the status map at least once (or that the
@@ -561,15 +613,51 @@ export async function pollSubSession(
     const contentStable =
       contentStableCompletionMs !== undefined &&
       hasProducedAssistantMessage &&
-      !hasPendingToolCall &&
+      !toolInFlight &&
       stalledFromProgress >= contentStableCompletionMs;
-    const looksComplete = statusIdle || finishComplete || contentStable;
+
+    // finish 단독 완료는 한 폴 더 확인하고 결론낸다.
+    //
+    // `finish` 는 "이번 assistant 메시지의 생성이 끝났다" 는 뜻이지 "세션이 끝났다"
+    // 가 아니다. 모델이 tool call 로 턴을 마치면 그 순간 finish 가 붙고 곧바로 툴이
+    // 실행된다. 그 사이(관측 110ms)에 폴이 끼면 tool part 는 아직 안 보이고 finish
+    // 만 보여 **완료로 오판**한다 (issue #7). statusIdle(서버가 직접 idle 이라고
+    // 말함)이나 contentStable(5분 무변화)이 함께 서 있으면 그런 오판이 아니므로
+    // 즉시 결론내고, finish 뿐일 때만 한 폴(기본 2s) 뒤 재확인한다. 그 시점이면
+    // tool part 가 메시지에 반영돼 있거나 isToolExecuting 이 참이라 판정이 취소된다.
+    //
+    // 재확인의 기준은 **content 시그니처 동일**이다. 시그니처가 바뀌었다는 것은
+    // 이번 폴에서 내용이 움직였다는 뜻이고, 움직이는 중에는 결론내지 않는다.
+    // (관측된 오판 2건 모두 `contentStable=false` — 내용이 아직 안정되지 않은
+    // 상태에서 완료 판정이 내려졌다.)
+    //
+    // 비용은 finish 단독 경로에서 폴 1회다. worktree-CWD 세션(status map 이 CWD
+    // 필터링되어 statusIdle 이 영영 안 뜬다)이 이 경로를 상시로 타지만, substage
+    // 하나가 수 분인 것에 비하면 2초는 무시할 수 있다.
+    const finishOnlyCompletion = finishComplete && !statusIdle && !contentStable;
+    let deferredForConfirm = false;
+    if (finishOnlyCompletion) {
+      if (finishConfirmSig !== currentAsstSig) {
+        finishConfirmSig = currentAsstSig;
+        deferredForConfirm = true;
+      }
+    } else {
+      finishConfirmSig = null;
+    }
+    const looksComplete = !deferredForConfirm && (statusIdle || finishComplete || contentStable);
 
     dbg?.(
       `[pollSubSession] POLL session=${sessionId} poll=${pollCount} status=${status?.type ?? "absent"} ` +
       `messages=${messages.length} finishComplete=${finishComplete} statusIdle=${statusIdle} ` +
-      `contentStable=${contentStable} sessionEverAppeared=${sessionEverAppeared}`,
+      `contentStable=${contentStable} sessionEverAppeared=${sessionEverAppeared} ` +
+      `pendingTool=${hasPendingToolCall} toolExec=${toolExecuting} deferredForConfirm=${deferredForConfirm}`,
     );
+    if (deferredForConfirm) {
+      dbg?.(
+        `[pollSubSession] FINISH_CONFIRM_PENDING session=${sessionId} poll=${pollCount} ` +
+        `sig="${currentAsstSig}" — finish 단독 완료 신호. 한 폴 뒤 재확인한다`,
+      );
+    }
 
     if (!nudged && options.nudgeAtFraction != null && options.onNudge) {
       const elapsedMs = now() - startTime;
@@ -617,16 +705,28 @@ export async function pollSubSession(
       .map(p => p.text!)
       .join("\n");
 
-    if (text.length > 0) {
+    // 공백만 있는 text part 는 "짧은 서두" 가 아니라 "아직 텍스트가 없음" 이다.
+    // 종전에는 `text.length > 0` 만 보고 preamble 분기에 들어갔고, trim 길이 0 은
+    // 임계 미만이라 그대로 preamble_only 로 확정됐다 — 로그의 `textLen=0` 이 바로
+    // 이 경로다 (issue #7). 스트리밍 초기 상태를 "서두만 쓰고 끝냈다" 로 읽는
+    // 것이라 오판의 방향이 정반대다. 정상 반환된 서브에이전트 출력들도 모두
+    // `\n\n` 으로 시작한다는 관측이 이 경로가 상시 노출돼 있었음을 말한다.
+    //
+    // 텍스트 없음으로 떨어뜨리면 dispatch_stage 는 "작업을 다시 하라" 는 action
+    // 재프롬프트 대신 요약 재프롬프트를 보내고, `.done=true` override 도 그대로
+    // 걸린다 — 이미 끝난 작업을 되풀이시키지 않는 쪽이다.
+    const trimmedLen = text.trim().length;
+
+    if (trimmedLen > 0) {
       if (
         preambleOnlyTextThreshold !== undefined &&
         preambleOnlyTextThreshold > 0 &&
-        text.trim().length < preambleOnlyTextThreshold &&
-        !hasPendingToolCall
+        trimmedLen < preambleOnlyTextThreshold &&
+        !toolInFlight
       ) {
         dbg?.(
           `[pollSubSession] preamble-only detected session=${sessionId} ` +
-          `textLen=${text.trim().length} threshold=${preambleOnlyTextThreshold} — ` +
+          `textLen=${trimmedLen} threshold=${preambleOnlyTextThreshold} — ` +
           `reclassifying text outcome as empty`,
         );
         return {
@@ -637,6 +737,19 @@ export async function pollSubSession(
         };
       }
       return { kind: "text", text, polls: pollCount, elapsedMs: now() - startTime };
+    }
+
+    if (text.length > 0) {
+      dbg?.(
+        `[pollSubSession] whitespace-only text session=${sessionId} raw_len=${text.length} — ` +
+        `텍스트 없음으로 처리 (preamble_only 아님)`,
+      );
+      return {
+        kind: "empty",
+        reason: "whitespace_only_text",
+        polls: pollCount,
+        elapsedMs: now() - startTime,
+      };
     }
 
     return {

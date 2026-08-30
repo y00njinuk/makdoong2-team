@@ -50,6 +50,7 @@ const STEPS = [
   "node --test test/doctor-phantom-scan.test.ts",
   "node --test test/mcp-secret-injector.test.ts",
   "node --test test/poll-sub-session.test.ts",
+  "node --test test/verifier-verdict.test.ts",
   "node --test test/tmux-monitor.test.ts",
   "node --test test/gate-already-done-block.test.ts",
   "node --test test/gate-hybrid-first-entry.test.ts",

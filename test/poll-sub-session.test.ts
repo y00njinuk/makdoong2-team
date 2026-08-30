@@ -1411,3 +1411,229 @@ describe("pollSubSession — 실행 중 툴 호출은 stall 판정에서 면제�
     assert.notEqual(outcome.reason, "message_stall");
   });
 });
+
+// ── GitHub issue #7 — 툴을 실행 중인 세션을 완료로 오판하고 중단시키는 결함 ──
+//
+// 관측된 것: `tool.execute.before` 가 발화한 지 110ms 뒤의 폴에서
+// `finishComplete=true` / `textLen=0` 이 나와 preamble-only 로 재분류되고 세션이
+// abort 됐다. 같은 패턴이 dev substage 에서 108ms 간격으로 재현됐다.
+//
+// `finish` 는 "이번 assistant 메시지의 생성이 끝났다" 는 뜻이지 "세션이 끝났다" 가
+// 아니다 — 모델이 tool call 로 턴을 마치면 그 순간 finish 가 붙고 툴이 실행된다.
+// 그 찰나에 폴이 끼면 tool part 는 아직 메시지에 안 보이고 finish 만 보인다.
+//
+// 방어는 두 겹이다. 서로 독립이라 한쪽이 없는 환경에서도 나머지가 선다:
+//   (1) `isToolExecuting` — 플러그인 훅이 아는 "지금 실행 중" 순간값.
+//   (2) finish 단독 완료의 한 폴 재확인 — 훅이 없어도 스냅샷 지연을 흡수한다.
+describe("pollSubSession — issue #7: 툴 실행 중 완료 오판 방지", () => {
+  const shortText = "좋습니다! 이제 검증을 시작하겠습니다:";
+  const asstFinishedNoTool = (id = "a1", text = shortText) => ({
+    info: { id, role: "assistant", finish: { reason: "tool_calls" } },
+    parts: [{ type: "text", text }],
+  });
+  const asstFinishedWithTool = (id = "a1", text = shortText) => ({
+    info: { id, role: "assistant", finish: { reason: "tool_calls" } },
+    parts: [
+      { type: "text", text },
+      { type: "tool", state: { status: "running" } },
+    ],
+  });
+
+  test("isToolExecuting=true 면 finish 가 있어도 완료로 판정하지 않는다", async () => {
+    // 실제 사고의 재현: status=busy, finish=set, 짧은 텍스트, tool part 는 아직
+    // 메시지에 반영되지 않음. 훅만이 "지금 bash 가 돌고 있다" 는 것을 안다.
+    let aborted = false;
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: Array.from({ length: 10 }, () => ({ s1: { type: "busy" } })),
+      messagesScript: Array.from({ length: 10 }, () => [userMsg(), asstFinishedNoTool()]),
+      onAbort: () => { aborted = true; },
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 20_000,
+      pollIntervalMs: 2_000,
+      preambleOnlyTextThreshold: 200,
+      isToolExecuting: () => true,
+      logger: { error: () => {} },
+    });
+    assert.notEqual(outcome.kind, "empty",
+      "툴이 실행 중인데 preamble-only 로 재분류했다 — 사고 그대로다");
+    assert.equal(outcome.kind, "timeout", "완료 신호를 유보하면 절대 타임아웃까지 간다");
+    assert.equal(aborted, true, "타임아웃 경로에서는 abort 가 정상이다");
+  });
+
+  test("훅 신호가 없어도 finish 단독 완료는 한 폴 재확인으로 걸러진다", async () => {
+    // isToolExecuting 미주입. 폴 1 은 tool part 를 아직 못 보고(스냅샷 지연),
+    // 폴 2 에서 보인다. 재확인이 없으면 폴 1 에서 preamble_only 로 확정된다.
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: Array.from({ length: 10 }, () => ({ s1: { type: "busy" } })),
+      messagesScript: [
+        [userMsg(), asstFinishedNoTool()],
+        ...Array.from({ length: 9 }, () => [userMsg(), asstFinishedWithTool()]),
+      ],
+      onAbort: () => {},
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 20_000,
+      pollIntervalMs: 2_000,
+      preambleOnlyTextThreshold: 200,
+      logger: { error: () => {} },
+    });
+    assert.notEqual(outcome.kind, "empty",
+      "재확인 폴에서 tool part 가 보였는데도 완료로 확정했다");
+    assert.equal(outcome.kind, "timeout");
+  });
+
+  test("finish 단독 완료는 유효하다 — 한 폴 늦게 결론날 뿐", async () => {
+    // 재확인은 완료를 막는 장치가 아니라 미루는 장치다. 같은 시그니처가 두 폴
+    // 연속으로 서면 그대로 완료된다. worktree-CWD 세션(statusIdle 이 영영 안 뜸)이
+    // 이 경로를 상시로 타므로 여기서 막히면 안 된다.
+    const clock = fakeClock();
+    const body = "검증 완료 보고입니다. ".repeat(30);
+    const client = makeClient({
+      statusScript: Array.from({ length: 10 }, () => ({})),
+      messagesScript: Array.from({ length: 10 }, () => [userMsg(), asstFinished("a1", body)]),
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 60_000,
+      pollIntervalMs: 2_000,
+      preambleOnlyTextThreshold: 200,
+      logger: { error: () => {} },
+    });
+    assert.equal(outcome.kind, "text");
+    assert.equal(outcome.polls, 2, "재확인 비용은 정확히 폴 1회여야 한다");
+  });
+
+  test("statusIdle 완료는 재확인 없이 즉시 결론난다", async () => {
+    // 서버가 직접 idle 이라고 말한 경우까지 미루면 모든 substage 가 2초씩 늦어진다.
+    // statusIdle 은 스냅샷 추정이 아니라 서버의 단언이므로 유보 대상이 아니다.
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: [{ s1: { type: "idle" } }],
+      messagesScript: [[userMsg(), asstFinished("a1", "완료했습니다. ".repeat(40))]],
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 60_000,
+      pollIntervalMs: 2_000,
+      preambleOnlyTextThreshold: 200,
+    });
+    assert.equal(outcome.kind, "text");
+    assert.equal(outcome.polls, 1);
+  });
+
+  test("공백만 있는 text part 는 preamble_only 가 아니라 whitespace_only_text 다", async () => {
+    // 로그의 `textLen=0` 이 이 경로다. `text.length > 0` 만 보고 preamble 분기로
+    // 들어가면 trim 길이 0 은 임계 미만이라 무조건 preamble_only 로 확정된다 —
+    // 스트리밍 초기 상태를 "서두만 쓰고 끝냈다" 로 읽는 것이라 방향이 정반대다.
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: [{ s1: { type: "idle" } }],
+      messagesScript: [[
+        userMsg(),
+        {
+          info: { id: "a1", role: "assistant", finish: { reason: "stop" } },
+          parts: [{ type: "text", text: "\n\n" }],
+        },
+      ]],
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 60_000,
+      pollIntervalMs: 2_000,
+      preambleOnlyTextThreshold: 200,
+    });
+    assert.equal(outcome.kind, "empty");
+    assert.equal(outcome.reason, "whitespace_only_text",
+      "preamble_only 로 떨어지면 dispatch_stage 가 끝난 작업을 다시 시킨다");
+  });
+
+  test("실행 중인 툴은 permission_stall 로 죽이지 않는다", async () => {
+    // tool part 의 state 변화는 시그니처(id:partsLen:textLen)를 바꾸지 않으므로
+    // 5분짜리 sbt 빌드도 "진전 없음" 으로 보인다. hasPendingToolCall 이 항상
+    // false 였던 동안에는 이 경로가 발화하지 않아 드러나지 않았고, 그 값을 고치는
+    // 순간 무장됐다 — 기본 임계 60초를 넘는 모든 빌드가 abort 대상이 된다.
+    let aborted = false;
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: Array.from({ length: 20 }, () => ({ s1: { type: "busy" } })),
+      messagesScript: Array.from({ length: 20 }, () => [
+        userMsg(),
+        { info: { id: "a1", role: "assistant" }, parts: [
+          { type: "text", text: "빌드를 시작합니다" },
+          { type: "tool", state: { status: "running" } },
+        ] },
+      ]),
+      onAbort: () => { aborted = true; },
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 30_000,
+      pollIntervalMs: 2_000,
+      toolCallStallThresholdMs: 6_000,
+      isToolExecuting: () => true,
+      logger: { error: () => {} },
+    });
+    assert.notEqual(outcome.kind, "permission_stall",
+      "실행 중인 툴을 권한 대기로 오판했다 — 긴 빌드가 강제 종료된다");
+    assert.equal(outcome.kind, "timeout");
+    assert.equal(aborted, true, "타임아웃 abort 는 정상");
+  });
+
+  test("실행되지 않는 툴 호출은 여전히 permission_stall 로 잡는다", async () => {
+    // 면제는 "실행 중" 에만 준다. before 훅이 발화하지 않았다면 툴이 뜬 채로 멈춘
+    // 것이고, 그것이 이 휴리스틱의 원래 대상(답할 수 없는 권한 요청)이다.
+    let aborted = false;
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: Array.from({ length: 20 }, () => ({ s1: { type: "busy" } })),
+      messagesScript: Array.from({ length: 20 }, () => [
+        userMsg(),
+        { info: { id: "a1", role: "assistant" }, parts: [
+          { type: "text", text: "권한을 기다립니다" },
+          { type: "tool", state: { status: "pending" } },
+        ] },
+      ]),
+      onAbort: () => { aborted = true; },
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 60_000,
+      pollIntervalMs: 2_000,
+      toolCallStallThresholdMs: 6_000,
+      isToolExecuting: () => false,
+      logger: { error: () => {} },
+    });
+    assert.equal(outcome.kind, "permission_stall",
+      "면제를 너무 넓게 주면 권한 stall 감지가 통째로 꺼진다");
+    assert.equal(aborted, true);
+  });
+
+  test("isToolExecuting 미주입은 종전 동작을 바꾸지 않는다", async () => {
+    // 훅이 없는 호출자(테스트·외부 사용)에서 새 옵션이 동작을 바꾸면 안 된다.
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: Array.from({ length: 20 }, () => ({ s1: { type: "busy" } })),
+      messagesScript: Array.from({ length: 20 }, () => [
+        userMsg(),
+        { info: { id: "a1", role: "assistant" }, parts: [
+          { type: "text", text: "권한을 기다립니다" },
+          { type: "tool", state: { status: "pending" } },
+        ] },
+      ]),
+      onAbort: () => {},
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 60_000,
+      pollIntervalMs: 2_000,
+      toolCallStallThresholdMs: 6_000,
+      logger: { error: () => {} },
+    });
+    assert.equal(outcome.kind, "permission_stall");
+  });
+});

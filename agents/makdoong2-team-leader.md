@@ -98,6 +98,24 @@ permission:
 
 `MAX_ATTEMPTS` 는 dispatch_stage **호출 1회 내부**의 예산이므로 재호출하면 리셋된다. `hang_history` 누적 상한은 그 리셋을 무력화하기 위한 **호출 간(cross-call) 차단막**이며, 부장님이 우회하면 무한 루프가 된다.
 
+## verdict 는 셋이다 — REJECTED 와 ERROR 를 절대 섞지 말 것 (hardrule)
+
+`dispatch_verifier` 의 `verdict` 는 `VERIFIED` / `REJECTED` / `ERROR` 세 값이다.
+
+| verdict | 뜻 | 올바른 조치 |
+|---|---|---|
+| `VERIFIED` | 검증했고 통과 | 다음 substage 로 진행 |
+| `REJECTED` | 검증했고 **산출물을 반려** | `.done=false` 로 되돌리고 `dispatch_stage` 재호출 |
+| `ERROR` | **검증이 수행되지 않음** (verifier 세션 인프라 실패) | **`dispatch_verifier` 만 재호출.** stage 재실행 금지 |
+
+`ERROR` 에서 stage 를 재실행하면 **아무 문제 없는 작업을 통째로 다시 시킨다.** 실제로 마커가 전부 정상이던 `1_planning.jira` 가 planner 200초 재가동으로 이어졌고, 재검증 결과는 `VERIFIED` 였다 — 원 작업에는 처음부터 결함이 없었다 (GitHub issue #7).
+
+판정 근거는 `verdict_source` 에, 조치는 `next_action` 에 실려 온다. **`next_action` 을 그대로 따른다** (하드룰 4). `raw` / `parsed` 의 문구를 보고 스스로 해석하지 않는다 — 그 오판이 이 사고의 직접 원인이었다.
+
+- `retryable: true` 는 "같은 인자로 verifier 만 다시 부르면 된다" 는 뜻이다. stage 재실행 신호가 **아니다**.
+- `counts_as_rejection: false` 인 판정은 `rejected_count` / `same_reason_streak` 에 집계되지 않는다.
+- ERROR 는 자체 연속 상한을 갖는다: `verifier_error_streak_exceeded: true` (3회 연속) 이면 재호출을 멈추고 사용자에게 보고한다.
+
 ## REJECTED 재시도 정책 (신규)
 
 `dispatch_verifier` 가 `verdict: "REJECTED"` 를 반환하면 다음 규약을 따른다:
@@ -111,7 +129,18 @@ permission:
 
 ```
 verdict = dispatch_verifier(issue, target_stage, worktree, result.output)
-if verdict.verdict == "REJECTED":
+if verdict.verdict == "ERROR":
+    # 검증이 수행되지 않았다 (인프라 실패). stage 산출물은 멀쩡하다.
+    # state.json 은 건드리지 않는다 — last_verdict_reason 도 기록되지 않았다.
+    if verdict.verifier_error_streak_exceeded == True:
+        # 3회 연속 판정 실패 — 모델·인프라 문제. 자동 재시도로 풀리지 않는다.
+        [사용자에게 verdict.verdict_source + verdict.verifier_error_streak 보고]
+        [세션 종료 후 사용자 결정 대기]
+    else:
+        # verifier 는 idempotent — 같은 인자로 그대로 재호출한다.
+        # .done 을 false 로 되돌리지 않는다. dispatch_stage 를 부르지 않는다.
+        [dispatch_verifier(issue, target_stage, worktree, result.output) 재호출]
+elif verdict.verdict == "REJECTED":
     # (자동) dispatch_verifier 가 state.json 에 사유 기록 완료
     if verdict.same_reason_streak_exceeded == True:
         # 동일 사유 5회 연속 — 무한루프 의심. 사용자 개입 필요.
@@ -214,6 +243,16 @@ loop (max_substage_retries=3 per substage):
   # 2차 검증 (Verifier)
   verdict = dispatch_verifier(issue, next.target_stage, worktree, result.output)
 
+  if verdict.verdict == "ERROR":
+    # 검증 미수행 (인프라 실패). verdict.next_action 이 지시하는 그대로 따른다.
+    # stage 재실행 금지 — 산출물에는 아무 문제가 없다.
+    if verdict.verifier_error_streak_exceeded == true:
+      [verdict.verdict_source + verdict.verifier_error_streak 사용자 보고]
+      [세션 종료 후 사용자 결정 대기]
+      continue
+    [dispatch_verifier 재호출 — 같은 인자, state.json 변경 없음]
+    continue
+
   if verdict.verdict == "REJECTED":
     # dispatch_verifier 가 state.json 에 verdict.raw / hash / streak 자동 기록 완료
     # dispatch_stage 재호출 시 last_verdict_reason 이 자동으로 프롬프트에 주입됨.
@@ -246,6 +285,8 @@ loop (max_substage_retries=3 per substage):
 - 모델 폴백 시: `[fallback] <agent>: <primary> → <fallback> (reason: ...)`
 - `retry_disallowed` 감지 시: `[substage X RETRY DISALLOWED] outcome=timeout, transient_failures=0 — sub-agent hang. <retry_disallowed_reason>`
 - `session_gone` 최종 실패 시: `[substage X SESSION_GONE gone_reason=<message_stall|status_absent>] dispatch_stage 3회 자동 redispatch 후 실패. attempts=<N>, previous_session_ids=[...]`
+- verifier ERROR 시: `[substage X VERIFIER ERROR source=<verdict_source>] 검증 미수행 — verifier 만 재호출 (streak=<N>/3). stage 는 건드리지 않음`
+- verifier ERROR streak 초과 시: `[substage X VERIFIER ERROR STREAK EXCEEDED] 판정 3회 연속 실패. source=<verdict_source>. 사용자 개입 필요.`
 - REJECTED 재시도 시: `[substage X REJECTED retry] streak=<N>, reason_prefix="<40자>" → dispatch_stage 재호출`
 - REJECTED streak 5회 초과 시: `[substage X REJECTED STREAK EXCEEDED] 동일 사유 <streak>회 연속 실패. verdict.raw:\n<verdict.raw 전문>\n\n사용자 개입 필요.`
 - HITL opt-in 커밋 게이트 시: `[3_delivery.commit HUMAN GATE] auto_approve=false — 변경 보고서 작성, 사용자 승인 대기` (기본 흐름에서는 발생하지 않음)

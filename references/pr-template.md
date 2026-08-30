@@ -83,7 +83,8 @@
 ## 4. PR 생성 규칙
 
 1. 반드시 **Draft 로 생성**한다 → `bitbucket_createPullRequest(..., draft=true)`.
-2. **리뷰어를 추가하지 않는다** → `reviewers` 파라미터 자체를 생략한다 (`[]` 도 아니라 미전달).
+2. **토큰 소유자를 리뷰어로 추가한다** → §4-1 로 식별한 username 을 `reviewers` 에 전달한다. 자기 자신이 PR 작성자여서 Bitbucket DC 가 거부하면 `reviewer_self_skipped=true` 로 기록한다 (`stages/08-pr.md` §7-5).
+   > 종전 이 항목은 "리뷰어를 추가하지 않는다 (`reviewers` 파라미터 자체를 생략)" 였다. 같은 문서의 §4-1·§4-2 와도, `stages/08-pr.md` 와도, `gates/stage7-post-pr-verify.sh` 의 reviewer 마커 검사(`reviewer_added` XOR `reviewer_self_skipped`, 미기록 시 fail)와도 정면으로 어긋나 있었다. 게이트가 마커를 요구하는 이상 리뷰어는 추가하는 것이 맞다.
 3. 생성 후 각 커밋별 diff 를 분석하여 **인라인 코멘트** 를 **개별 live 코멘트** 로 작성한다 (아래 §5–6).
 
 ### 4-1. 토큰 소유자 식별 (리뷰어 추가용)

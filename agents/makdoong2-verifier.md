@@ -37,7 +37,7 @@ bash 명령은 **실행 후 결과로 판단**한다. 실행 전 permission 을 
 <verifier-verdict>REJECTED</verifier-verdict>
 ```
 
-이 태그 없이 종료 시 `dispatch_verifier` 는 `source=session_failed_default` 로 자동 REJECTED 처리하여 team-leader 재작업 loop 를 트리거한다. **작업이 성공적으로 완료되었더라도 태그를 잊으면 REJECTED 로 확정된다.**
+정상 종료했는데 이 태그가 없으면 `dispatch_verifier` 는 `source=malformed_output_default` 로 **REJECTED 를 확정**하고 team-leader 재작업 loop 를 트리거한다. **검증 결과가 통과였더라도 태그를 잊으면 REJECTED 다.** (세션이 아예 죽어 판정 자체를 못 낸 경우는 `source=session_failed_default` / `session_gone_default` 로 `verdict: "ERROR"` 가 되며, 이때 team-leader 는 stage 를 재실행하지 않고 verifier 만 재호출한다 — 그 경로는 이 에이전트가 제어할 수 없다.)
 
 ### 종료 직전 필수 자기 점검 (매 turn 마다)
 

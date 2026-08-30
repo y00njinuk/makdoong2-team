@@ -581,9 +581,9 @@ sub-session hang 은 결이 세 가지이고 각각 별도 감지가 필요하�
 
 | 결 | 원인 | 감지 조건 | 반환 |
 |---|---|---|---|
-| **status-absent gone** | orphan-scan / 서버 재시작으로 세션이 status map 에서 사라짐 | `!activeSignal && !hasPendingToolCall && !messagesChanged && !status && (sessionEverAppeared 또는 loose alive)` 가 `statusAbsentGraceMs` (기본 **5분**) 이상 연속 유지 | `session_gone` |
-| **tool-call stall** | 사용자 승인 대기 (서브에이전트는 승인할 수 없다) | `hasPendingToolCall && stalledMs >= toolCallStallThresholdMs` (기본 60s) | `permission_stall` |
-| **message stall** | LLM API 무응답 (bootstrap hang 또는 mid-stream hang) | `(sessionEverAppeared \|\| sessionAliveByMessages) && busyIndicated && !hasPendingToolCall && (now - lastProgressAt) >= messageStallThresholdMs` | `session_gone` (reason `message_stall`) |
+| **status-absent gone** | orphan-scan / 서버 재시작으로 세션이 status map 에서 사라짐 | `!activeSignal && !toolInFlight && !messagesChanged && !status && (sessionEverAppeared 또는 loose alive)` 가 `statusAbsentGraceMs` (기본 **5분**) 이상 연속 유지 | `session_gone` |
+| **tool-call stall** | 사용자 승인 대기 (서브에이전트는 승인할 수 없다) | `hasPendingToolCall && !isToolExecuting() && stalledMs >= toolCallStallThresholdMs` (기본 60s) | `permission_stall` |
+| **message stall** | LLM API 무응답 (bootstrap hang 또는 mid-stream hang) | `(sessionEverAppeared \|\| sessionAliveByMessages) && busyIndicated && !toolInFlight && (now - lastProgressAt) >= messageStallThresholdMs` | `session_gone` (reason `message_stall`) |
 
 `busyIndicated = status?.type === "busy" || (!status && messages.length > 0)`. worktree cwd 세션은 status map 에 나타나지 않으므로 loose alive 만으로도 성립한다.
 
@@ -593,12 +593,31 @@ sub-session hang 은 결이 세 가지이고 각각 별도 감지가 필요하�
 
 ### 8.2 alive 신호 이중화
 
-플러그인이 두 map 을 유지하고 `isRecentlyActive()` 콜백으로 넘긴다.
+플러그인이 두 map 을 유지하고 **두 개의 서로 다른 콜백**으로 넘긴다.
 
-- `sessionActiveToolCount` — `tool.execute.before` 에서 ++, `.after` 에서 --. **0 초과면 무조건 alive** (5분 넘는 heavy tool 도 감지)
+- `sessionActiveToolCount` — `tool.execute.before` 에서 ++, `.after` 에서 --. **0 초과면 지금 툴이 실행 중**이다
 - `sessionLastToolExecuteAt` — 양쪽에서 갱신. counter 가 0 이어도 최근 5분 내 활동이면 alive
 
-`(counter > 0) || (now - last < TOOL_EXECUTE_ALIVE_WINDOW_MS=5분)` 이면 gone 판정을 스킵하고 `firstGoneObservedAt` 을 리셋한다. map entry 는 `cleanupSubSession` 과 orphan-scan pane-kill 경로에서 삭제되므로 누수가 없다.
+| 콜백 | 값 | 쓰이는 곳 | 왜 분리했나 |
+|---|---|---|---|
+| `isRecentlyActive()` | `counter > 0 \|\| (now - last < 5분)` | gone 판정 스킵 | 넓은 창이라야 tool gap 이 긴 세션의 gone 오탐을 막는다 |
+| `isToolExecuting()` | `counter > 0` | **완료 판정 유보** | 순간값이라야 정상 종료가 지연되지 않는다. 넓은 창을 완료 판정에 쓰면 모든 substage 가 5분씩 늦어진다 |
+
+map entry 는 `cleanupSubSession` 과 orphan-scan pane-kill 경로에서 삭제되므로 누수가 없다. `tool.execute.before` 의 가드가 throw 하면 `.after` 가 돌지 않아 counter 가 영구 누수되므로, 증분은 try/catch 로 되돌린다 (§4.2).
+
+#### 완료 판정은 툴이 떠 있는 동안 내리지 않는다 (hardrule)
+
+`finish` 는 "이번 assistant 메시지의 **생성**이 끝났다" 는 뜻이지 "세션이 끝났다" 가 아니다. 모델이 tool call 로 턴을 마치면 그 순간 `finish` 가 붙고 곧바로 툴이 실행된다. 그 사이에 폴이 끼면 tool part 는 아직 메시지에 안 보이고 `finish` 만 보여 **완료로 오판**한다 — 실측 2건 모두 `tool.execute.before` 발화 후 110ms / 108ms 안의 폴이었고, `finishComplete=true` + `textLen=0` 으로 preamble-only 재분류 → 세션 abort 로 이어졌다 (GitHub issue #7).
+
+방어는 세 겹이고 서로 독립이다. 한 겹이 없는 환경에서도 나머지가 선다.
+
+1. **`toolInFlight = hasPendingToolCall || isToolExecuting()`** — 메시지 스냅샷과 실시간 훅 신호의 합집합. 스냅샷은 서버 반영이 늦고, 훅 신호는 훅이 안 붙은 호출자에게 없다. `finishComplete` · `contentStable` · gone 판정 · message stall · preamble 재분류가 모두 이 값을 본다.
+2. **finish 단독 완료의 한 폴 재확인** — `statusIdle`(서버의 단언)이나 `contentStable`(5분 무변화)이 함께 서 있지 않고 `finish` 뿐이면 한 폴(기본 2s) 뒤 **같은 content 시그니처**를 다시 본 뒤에만 확정한다. 시그니처가 바뀌었다는 것은 내용이 아직 움직인다는 뜻이므로 결론을 미룬다 (관측된 오판 2건 모두 `contentStable=false`). worktree-CWD 세션은 `statusIdle` 이 영영 안 뜨므로 이 경로를 상시로 타지만, 비용은 폴 1회다.
+3. **공백 전용 text part 는 `preamble_only` 가 아니다** — `text.length > 0` 만 보면 `"\n\n"` 같은 스트리밍 초기 상태가 trim 길이 0 으로 임계 미만이 되어 무조건 preamble 로 확정된다 (로그의 `textLen=0` 이 이 경로다). `whitespace_only_text` 로 따로 떨어뜨려야 `dispatch_stage` 가 "작업을 다시 하라" 대신 요약 재프롬프트를 보내고 `.done=true` override 도 그대로 걸린다.
+
+**tool-call stall 의 면제도 같은 신호를 쓴다.** tool part 의 state 변화는 content 시그니처(`id:partsLen:textLen`)를 바꾸지 않으므로 5분짜리 sbt 빌드도 "진전 없음" 으로 보이고 기본 임계 60초에서 abort 대상이 된다. `hasPendingToolCall` 이 프로덕션에서 항상 false 이던 동안에는 이 경로가 발화하지 않아 드러나지 않았고, 그 값을 고치는 순간 무장됐다. `isToolExecuting()` 이 참이면 면제한다 — 진짜 권한 대기는 매 폴 도는 `permission.list()` 경로가 요청 ID·패턴까지 짚어 잡고, 그마저 실패해도 절대 타임아웃이 받쳐준다.
+
+회귀: `test/poll-sub-session.test.ts` ("issue #7: 툴 실행 중 완료 오판 방지" 8 케이스).
 
 ### 8.3 content-signature 로 진행을 감지
 
@@ -742,6 +761,27 @@ tmux list-panes -aF '#{pane_id}\t#{@mdn2_session}' | grep ses_XXX
 재시도는 필요하지만 무한 재시도는 실패다. REJECTED 경로와 stall 경로가 **대칭으로** 막혀 있다.
 
 ### 10.1 REJECTED — 사유 전달 + streak 상한
+
+#### verdict 는 셋이다 — `ERROR` 는 반려가 아니다 (hardrule)
+
+`dispatch_verifier` 는 다섯 갈래의 결과를 `verdictSource` 로 **구분해 로그에 남기면서도** 반환값의 `verdict` 는 전부 `REJECTED` 하나로 눌러 내보냈다. 그래서 호출자는 "검증했고 물렸다" 와 "검증이 아예 수행되지 않았다" 를 구별할 수 없었다 — 조치가 정반대인데도. 실제로 후자가 전자로 보고되어, 마커가 전부 정상이던 `1_planning.jira` 를 부장님이 통째로 재실행했다 (planner 200초). 재검증은 `VERIFIED` 였다 — 원 작업에는 처음부터 결함이 없었다 (GitHub issue #7).
+
+| `verdict_source` | `verdict` | `counts_as_rejection` | `retryable` | 올바른 조치 |
+|---|---|---|---|---|
+| `verdict_tag` | 태그 그대로 | REJECTED 일 때만 | false | 판정대로 |
+| `json_fallback` | 본문 JSON 값 | REJECTED 일 때만 | false | 판정대로 |
+| `malformed_output_default` | `REJECTED` | **true** | false | stage 재실행 (형식 위반은 관측 가능한 콘텐츠 결함) |
+| `session_failed_default` | **`ERROR`** | false | **true** | **verifier 만 재호출** |
+| `session_gone_default` | **`ERROR`** | false | **true** | **verifier 만 재호출** |
+
+- 판정 태그는 세션 실패보다 **우선**한다. 태그를 뱉은 뒤 꼬리가 죽었다면 그 판정은 실제로 산출된 것이다.
+- 완화 대상은 판정이 **물리적으로 존재하지 않는** 두 경로뿐이다. `malformed_output_default` 까지 올리면 무한 재호출만 열고 얻는 것이 없다 — 형식 위반은 `same_reason_streak` 이 이미 막는다.
+- `ERROR` 는 `rejected_count` · `same_reason_streak` · `last_verdict_reason` 에 **일절 기록되지 않는다.** 그래서 자체 상한이 필요하다: `.verifier_error_streak` 이 `VERIFIER_ERROR_STREAK_LIMIT(3)` 에 닿으면 `verifier_error_streak_exceeded: true` 로 사용자 에스컬레이션. 판정을 얻으면(VERIFIED/REJECTED 무관) 0 으로 리셋된다.
+- 반환값에 `next_action` 이 실린다. 부장님은 **그것을 그대로 따른다** — `raw` / `parsed` 문구를 스스로 해석한 것이 이 사고의 직접 원인이었다.
+
+순수 로직은 `src/verifier-verdict.ts`, 회귀는 `test/verifier-verdict.test.ts` (14 케이스). `src/opencode-plugin.ts` 에 export 하지 않는다 (§plugin-exports-shape 계약).
+
+#### 사유 전달과 streak
 
 **문제였던 것.** 초기에는 부장님이 verdict.raw 를 다음 dispatch 프롬프트에 직접 재주입해야 했는데, 이 로직이 프롬프트 상 pseudocode 로만 존재하고 구현이 없었다. 서브에이전트는 **REJECTED 사유를 모른 채 같은 실수를 반복**했고 무한 루프가 관측됐다 (`3_delivery.commit` REJECTED 4~5회 반복).
 
@@ -963,6 +1003,7 @@ pre-push 훅 경로는 STEP 1 의 while 루프가 stdin 을 EOF 까지 소진하
 | `session_gone` (status_absent) | 사용자 개입 대기 |
 | `stall_streak_exceeded` | `hang_history` 상한 도달. 모델 교체로 안 풀린다 — 사용자 에스컬레이션 (§10.2) |
 | `dispatch_verifier` REJECTED | `.done` 되돌리고 재dispatch (사유 자동 주입). commit 이면 publisher 가 먼저 `rollback-commits.sh` |
+| `dispatch_verifier` ERROR | **verifier 만 재호출.** state.json 을 건드리지 않는다 — 검증이 수행되지 않았을 뿐 stage 산출물은 그대로다. `verifier_error_streak_exceeded` 면 사용자 에스컬레이션 |
 | verdict 태그 누락 | 자동 REJECTED (안티-환각 floor) |
 | `same_reason_streak_exceeded` | 같은 사유 5회. 재시도 중단, 사용자 보고 |
 | Track A `exhausted=true` | 사용자 보고, 수동 대기 |
