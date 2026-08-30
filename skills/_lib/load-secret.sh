@@ -147,3 +147,56 @@ EOF
   export "$var_name=$host"
   return 0
 }
+
+# ── TLS 검증 설정 ────────────────────────────────────────────────────────────
+# configure_tls_from_makdoong2_config TAG
+#
+# 종전에는 4개 런처가 전부 무조건 `export NODE_TLS_REJECT_UNAUTHORIZED="0"` 을
+# 했다. 그 프로세스는 사내 PAT 를 들고 사내 Jira/Confluence/Bitbucket/Bamboo 로
+# 나가므로, **인증서 검증을 끈 채 자격증명을 전송**하는 상태였다 (중간자 공격에
+# 무방비). 사내 사설 CA 때문에 넣은 것으로 보이지만, 그 경우의 올바른 해법은
+# 검증을 끄는 것이 아니라 CA 번들을 알려주는 것이다.
+#
+# 우선순위:
+#   1. `.network.ca_bundle` 이 있고 파일이 실재 → NODE_EXTRA_CA_CERTS 로 지정하고
+#      **검증을 켠다**. 사내 사설 CA 의 정답.
+#   2. `.network.tls_reject_unauthorized` 가 true → 검증을 켠다.
+#   3. 그 외 → 종전 동작(검증 끔)을 유지하되 **매 기동마다 경고**한다.
+#      동작을 깨지 않으면서 위험을 드러내고 고치는 법을 알려주기 위함이다.
+configure_tls_from_makdoong2_config() {
+  local tag="${1:?configure_tls: TAG missing}"
+
+  local cfg_dir="${MAKDOONG2_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/opencode}"
+  local cfg_file="$cfg_dir/makdoong2-team.json"
+
+  local ca_bundle="" reject=""
+  if command -v jq >/dev/null 2>&1 && [ -f "$cfg_file" ]; then
+    ca_bundle=$(jq -r '.network.ca_bundle // empty' "$cfg_file" 2>/dev/null || true)
+    reject=$(jq -r '.network.tls_reject_unauthorized // empty' "$cfg_file" 2>/dev/null || true)
+  fi
+
+  if [ -n "$ca_bundle" ] && [ -f "$ca_bundle" ]; then
+    export NODE_EXTRA_CA_CERTS="$ca_bundle"
+    unset NODE_TLS_REJECT_UNAUTHORIZED
+    printf '[%s] TLS: 사내 CA 번들 사용 (%s) — 인증서 검증 켬\n' "$tag" "$ca_bundle" >&2
+    return 0
+  fi
+
+  if [ -n "$ca_bundle" ]; then
+    printf '[%s] TLS: .network.ca_bundle 파일을 찾을 수 없다: %s\n' "$tag" "$ca_bundle" >&2
+  fi
+
+  if [ "$reject" = "true" ]; then
+    unset NODE_TLS_REJECT_UNAUTHORIZED
+    printf '[%s] TLS: 인증서 검증 켬 (.network.tls_reject_unauthorized=true)\n' "$tag" >&2
+    return 0
+  fi
+
+  export NODE_TLS_REJECT_UNAUTHORIZED="0"
+  printf '[%s] %s\n' "$tag" "경고: TLS 인증서 검증이 꺼진 채로 사내 자격증명을 전송한다." >&2
+  printf '  이 프로세스는 PAT 를 들고 사내 엔드포인트로 나가므로 중간자 공격에 무방비다.\n' >&2
+  printf '  고치는 법 — %s 에 다음 중 하나를 추가:\n' "$cfg_file" >&2
+  printf '    "network": { "ca_bundle": "/etc/ssl/certs/<사내-ca>.pem" }   <- 권장 (사설 CA)\n' >&2
+  printf '    "network": { "tls_reject_unauthorized": true }               <- 공인 인증서라면\n' >&2
+  return 0
+}

@@ -4,7 +4,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 . "$HERE/../_lib/load-secret.sh"
 
-export NODE_TLS_REJECT_UNAUTHORIZED="0"
+# TLS 설정은 공용 헬퍼가 결정한다 (사내 CA 번들 우선, 없으면 종전 동작 + 경고).
+configure_tls_from_makdoong2_config "run-works"
 
 load_host_from_makdoong2_config \
   "run-works" \

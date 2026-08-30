@@ -5,7 +5,7 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync, mkdirSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, writeFileSync, readFileSync, mkdirSync, statSync, chmodSync } from "node:fs";
 import { tmpdir, homedir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -838,6 +838,57 @@ describe("install-lib — opencode plugin cache version drift", () => {
         "version mismatch is what must trigger replacement instead of the old unconditional skip");
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── 자격증명 파일 권한 ──
+//
+// makdoong2-team.json 은 `.secrets.*` 에 Jira / Confluence / Bitbucket / Bamboo
+// PAT 를 **평문**으로 담는다. 그런데 종전에는 기본 umask 로 생성돼 world-readable
+// (0644/0666) 이었다. 같은 리포의 src/logger.ts 는 훅 로그가 자격증명을 흘릴 수
+// 있다는 이유로 이미 로그 파일에 0600 을 강제한다 — 정작 토큰 원본이 든 파일이
+// 더 느슨했다.
+describe("install-lib — 자격증명 파일 권한", () => {
+  const mode = (p) => statSync(p).mode & 0o777;
+
+  test("최초 설치가 makdoong2-team.json 을 0600 으로 만든다", () => {
+    const configDir = mkdtempSync(join(tmpdir(), "makdoong2-perm-"));
+    try {
+      install({
+        configDir, pkgRoot: PKG_ROOT, force: true, patchOpencode: "skip",
+        logger: { log() {}, warn() {} },
+      });
+      const cfg = join(configDir, "makdoong2-team.json");
+      assert.ok(existsSync(cfg));
+      assert.equal(mode(cfg), 0o600, `평문 토큰이 든 파일이 ${mode(cfg).toString(8)} 이다`);
+      // 실제로 토큰 자리가 있는 파일인지 확인 (그래야 이 테스트가 의미 있다)
+      const parsed = JSON.parse(readFileSync(cfg, "utf8"));
+      assert.ok(parsed.secrets && "JIRA_API_TOKEN" in parsed.secrets);
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
+    }
+  });
+
+  test("이미 있는 느슨한 파일도 재설치로 0600 이 된다", () => {
+    // 예전 설치가 만든 world-readable 파일이 그대로 남는 것을 install 로 고칠 수 있어야 한다.
+    const configDir = mkdtempSync(join(tmpdir(), "makdoong2-perm2-"));
+    try {
+      install({
+        configDir, pkgRoot: PKG_ROOT, force: true, patchOpencode: "skip",
+        logger: { log() {}, warn() {} },
+      });
+      const cfg = join(configDir, "makdoong2-team.json");
+      chmodSync(cfg, 0o644);
+      assert.equal(mode(cfg), 0o644, "선행 조건: 느슨한 권한으로 되돌렸다");
+
+      install({
+        configDir, pkgRoot: PKG_ROOT, force: false, patchOpencode: "skip",
+        logger: { log() {}, warn() {} },
+      });
+      assert.equal(mode(cfg), 0o600, "재설치가 권한을 좁히지 않았다");
+    } finally {
+      rmSync(configDir, { recursive: true, force: true });
     }
   });
 });
