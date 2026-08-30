@@ -101,6 +101,8 @@ mkdir -p .makdoong2-team/<이슈키>
 
 ```bash
 # state.json 에는 반드시 상대경로만 저장한다 (절대경로 저장 시 다른 cwd 에서 접근 불가 → Read hang 유발).
+# 이 마커는 §2-5b 의 spec_hash 와 **한 쌍**이다 — spec_hash 만 기록되고 이것이 빠지면
+# stage3-scope-verify.sh 가 1_planning.scope 진입을 하드 차단한다 (issue #6-①).
 bash <SCRIPTS_DIR>/state.sh set <이슈키> \
   '.stages."1_planning".substages."requirements".draft_path' '".makdoong2-team/<이슈키>/requirements-draft.md"'
 ```
@@ -175,11 +177,35 @@ bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.categorized_at' "\"$(date -
 
 major 로 판정된 경우에도 `auto_approve` 맵은 **모두 true** 로 두고 `"category":"major"` 만 다르게 기록한다. HITL 을 강제해야 하는 이슈 유형별 opt-in 이 필요한 경우에만 특정 substage 를 명시적으로 `false` 로 설정한다.
 
+### 2-5b. 요구사항 품질 마커 (ambiguity_score · spec_hash)
+
+`stage3-scope-verify.sh` 의 요구사항 품질 게이트는 **이 두 마커가 있을 때만** 검사한다
+(구형 state 호환을 위한 조건부 검사). 즉 여기서 기록하지 않으면 통합 경로에서는
+품질 게이트가 통째로 사문화된다 — `02-requirements.md` 를 거치는 분리 경로에서는
+검사되는데 이 경로에서만 안 되는 비대칭이 생긴다. 반드시 기록한다.
+
+```bash
+# 1) 모호성 점수. 미해소 항목 수 / 전체 요구 항목 수. 0.2 초과면 게이트가 차단하므로
+#    초과 시에는 인터뷰로 해소한 뒤 재산정한다 (stages/02-requirements.md §2-3-2b).
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".ambiguity_score' '0.13'
+
+# 2) 확정 명세 동결. 이후 무단 변경(spec drift)은 게이트가 해시 재계산으로 차단한다.
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".spec_hash' \
+  "\"$(sha256sum .makdoong2-team/<이슈키>/requirements-draft.md | cut -d' ' -f1)\""
+```
+
+기록 후 **실제 값을 읽어 확인**한다 (자기선언 금지 — issue #6-① 의 직접 원인):
+
+```bash
+bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".draft_path'
+bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".spec_hash'
+```
+
 ### 2-6. Requirements 완료 기록
 
 ```bash
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".self_check' \
-  '{"checklist_complete":true,"conflicts_resolved":true,"user_confirmed":true,"scope_clean":true,"draft_synced":true,"categorized":true}'
+  '{"checklist_complete":true,"conflicts_resolved":true,"user_confirmed":true,"scope_clean":true,"draft_synced":true,"categorized":true,"ambiguity_scored":true,"spec_frozen":true,"draft_recorded":true}'
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".verification_pending' 'false'
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".done' 'true'
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".done_at' "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""

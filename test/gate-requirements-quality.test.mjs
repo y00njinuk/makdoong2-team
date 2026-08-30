@@ -206,3 +206,47 @@ describe("스펙 정합 — draft_path 는 게이트·self_check·verifier 세 �
     );
   });
 });
+
+describe("스펙 정합 — 통합 경로(01-planning)와 분리 경로(02-requirements)가 같은 마커를 남긴다", () => {
+  // 두 파일은 같은 substage(`1_planning.requirements`)의 스펙이다:
+  //   STAGE_SPEC_FILES["1_planning.jira"]         = 01-planning.md  (3 substage 통합 처리)
+  //   STAGE_SPEC_FILES["1_planning.requirements"] = 02-requirements.md
+  //
+  // stage3-scope-verify.sh 의 품질 게이트(ambiguity_score ≤ 0.2, spec_hash 동결)는
+  // **마커가 있을 때만** 검사하는 조건부 검사다(구형 state 호환). 그래서 통합 경로가
+  // 마커를 남기지 않으면 그 경로에서만 품질 게이트가 통째로 사문화된다 — 같은
+  // 워크플로우인데 어느 스펙을 탔느냐에 따라 검증 강도가 달라지는 비대칭이 생긴다.
+  const combined = readFileSync(join(REPO_ROOT, "stages/01-planning.md"), "utf8");
+  const split = readFileSync(join(REPO_ROOT, "stages/02-requirements.md"), "utf8");
+  const gate = readFileSync(join(REPO_ROOT, "gates/stage3-scope-verify.sh"), "utf8");
+
+  const MARKERS = ["draft_path", "ambiguity_score", "spec_hash"];
+
+  for (const marker of MARKERS) {
+    test(`게이트가 보는 '${marker}' 를 두 스펙 모두 기록한다`, () => {
+      assert.match(gate, new RegExp(marker), `게이트가 ${marker} 를 안 본다면 이 테스트가 낡았다`);
+      const setRe = new RegExp(`state\\.sh set[\\s\\S]{0,200}${marker}`);
+      assert.match(split, setRe, `02-requirements.md 가 ${marker} 를 기록하지 않는다`);
+      assert.match(combined, setRe, `01-planning.md 가 ${marker} 를 기록하지 않는다`);
+    });
+  }
+
+  test("통합 경로의 self_check 이 품질 마커 3종을 선언한다", () => {
+    const m = /"requirements"\.self_check'[\s\S]{0,80}?'(\{[^']*\})'/.exec(combined);
+    assert.ok(m, "01-planning.md 에서 requirements self_check JSON 을 찾지 못했다");
+    const selfCheck = JSON.parse(m[1]);
+    for (const key of ["ambiguity_scored", "spec_frozen", "draft_recorded"]) {
+      assert.equal(selfCheck[key], true, `self_check 에 ${key} 가 없다`);
+    }
+  });
+
+  test("마커를 중복 기록하지 않는다 (같은 값을 두 번 쓰면 어느 쪽이 정본인지 모호해진다)", () => {
+    // `set` 만 센다. §2-5b 의 확인용 `get` 은 정상이므로 세지 않는다.
+    const setCount = (marker, text) =>
+      (text.match(new RegExp(`state\\.sh set[^\\n]*(\\\\\\n\\s*)?'\\.stages\\."1_planning"\\.substages\\."requirements"\\.${marker}'`, "g")) ?? []).length;
+    for (const marker of MARKERS) {
+      const n = setCount(marker, combined);
+      assert.equal(n, 1, `01-planning.md 의 ${marker} set 이 ${n}회 — 정확히 1회여야 한다`);
+    }
+  });
+});
