@@ -162,7 +162,11 @@ bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."2_implementation".substage
    - 제목 형식: `^(Feat|Fix|Chore|Refactor|Docs|Style|Test|Perf|Ci|Build|Revert): [A-Z]+-[0-9]+ - .+$`
    - 제목 길이 ≤ 50자
    - 제목에 결합어(`and`, `&`, `+`, `및`, `그리고`) 없음
-   - 본문에 `Resolves:` / `Closes:` / `Fixes:` / `See also:` 중 하나 이상 포함 (이슈 종료/참조 키워드)
+   - 본문에 이슈 참조 마커 `[RV] <이슈키>` 포함. **단 본문이 비어 있으면 면제** —
+     `gates/stage6-post-commit-verify.sh` §7 과 정확히 같은 규칙이다 (`\[RV\][[:space:]]+[A-Z]+-[0-9]+`).
+     `Resolves:`/`Closes:`/`Fixes:`/`See also:` 를 요구하지 말 것 — CLAUDE.md · `stages/07-commit.md` ·
+     `agents/makdoong2-publisher.md` · `references/` 어디에도 그 키워드는 없고, 규약대로 커밋하면
+     post-gate 는 통과하는데 verifier 만 REJECTED 를 내는 구조적 무한 재작업이 된다.
    - 위반 시 → **REJECTED** + `finding.item = "3_delivery.commit.msg_convention_violation"` + `evidence` 에 위반 커밋 SHA·제목·위반 사유.
 
 4. **필수 마커 확인**:

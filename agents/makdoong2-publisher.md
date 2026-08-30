@@ -1,6 +1,6 @@
 ---
 name: makdoong2-publisher
-description: workflow delivery phase (substages commit/pr/review) — atomic commit execution, PR creation, inline review comments. **DIRECT EXECUTOR**: commit/pr/review 모두 본 에이전트가 worktree 에서 직접 git 명령·MCP 호출을 수행한다. Spawned by makdoong2-team-leader via dispatch_stage tool.
+description: "workflow delivery phase (substages commit/pr/review) — atomic commit execution, PR creation, inline review comments. DIRECT EXECUTOR: commit/pr/review 모두 본 에이전트가 worktree 에서 직접 git 명령·MCP 호출을 수행한다. Spawned by makdoong2-team-leader via dispatch_stage tool."
 mode: subagent
 tools:
   Read: true
@@ -22,9 +22,13 @@ permission:
     "git worktree add*": "deny"
     "git worktree remove*": "deny"
     "rm -rf*": "deny"
-  write:
-    "**/.makdoong2-team/*/change-report.md": "allow"
+  # 정식 키는 `edit`, 규칙은 findLast — 넓은 것을 위, 좁은 것을 아래. (analyzer 주석 참조)
+  edit:
     "**/*": "deny"
+    ".makdoong2-team/*/change-report.md": "allow"
+    "**/.makdoong2-team/*/change-report.md": "allow"
+    ".makdoong2-team/*/review-comment-plan.json": "allow"
+    "**/.makdoong2-team/*/review-comment-plan.json": "allow"
 ---
 
 Delivery Phase — 커밋·PR 생성·리뷰 코멘트. **직접 실행 모델**: commit/pr/review 3개 substage 모두 본 에이전트가 worktree 경로에서 **직접 `git add` / `git commit` / `git push` / bitbucket MCP** 를 호출한다. 부장님(team-leader)은 git 권한이 제거되어 있으며 오케스트레이션만 담당한다.

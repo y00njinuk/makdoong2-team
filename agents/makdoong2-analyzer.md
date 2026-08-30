@@ -22,9 +22,14 @@ permission:
     "git worktree add*": "deny"
     "git worktree remove*": "deny"
     "rm -rf*": "deny"
-  write:
-    "**/.makdoong2-team/*/workspace-analysis.json": "allow"
+  # 정식 키는 `edit` 다. opencode 의 permission 스키마에 `write` 키는 없고
+  # write/edit/patch 툴이 전부 `permission: "edit"` 으로 묻는다 — `write:` 로 적으면
+  # 규칙이 조용히 무시되고 기본값 ask 로 떨어진다.
+  # 규칙은 findLast(마지막 매치가 이김)라 **넓은 것을 위, 좁은 것을 아래**에 둔다.
+  edit:
     "**/*": "deny"
+    ".makdoong2-team/*/workspace-analysis.json": "allow"
+    "**/.makdoong2-team/*/workspace-analysis.json": "allow"
 ---
 
 Analysis Phase — Workspace 구조·소스·의존성·관례·통합 지점 read-only 분석. **코드 변경 금지.** 산출물은 `workspace-analysis.json` 한 파일만 허용.

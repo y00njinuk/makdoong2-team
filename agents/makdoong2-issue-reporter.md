@@ -31,7 +31,8 @@ permission:
     # 이 패턴은 issue-reporter-guard.ts 의 APPROVABLE_PAYLOAD_RE 와 한 쌍이다 —
     # 훅이 `-d @/절대경로` 표기만 허용하므로 게시 호출은 반드시 여기에 걸린다.
     "*-d @/*": "ask"
-  write:
+  # 정식 키는 `edit`. 이슈 payload 를 자기 세션에서 작성해야 하므로 쓰기를 허용한다.
+  edit:
     "**/*": "allow"
 ---
 

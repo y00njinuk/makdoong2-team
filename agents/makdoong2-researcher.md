@@ -26,7 +26,8 @@ permission:
     "git worktree add*": "deny"
     "git worktree remove*": "deny"
     "rm -rf*": "deny"
-  write:
+  # 정식 키는 `edit`. researcher 는 파일을 쓰지 않는다 — 결과는 응답 텍스트로 반환한다.
+  edit:
     "**/*": "deny"
 ---
 
