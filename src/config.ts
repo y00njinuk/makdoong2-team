@@ -186,6 +186,84 @@ export function loadConfig(): Makdoong2Config {
   return _cache ?? {};
 }
 
+/**
+ * opencode 는 자기 설정을 JSONC 로 파싱한다 (주석·후행 쉼표 허용). 문자열 리터럴
+ * 바깥의 그 둘만 걷어내고 JSON.parse 한다.
+ *
+ * `scripts/install-lib.mts` 의 `parseJsonc` 와 **동작이 같아야 한다** — 한쪽은
+ * opencode.json 을 쓰고 한쪽은 읽으므로, 갈리면 install 이 성공했다고 보고한
+ * 설정을 런타임이 못 읽는 상태가 된다. `test/opencode-json-read.test.mjs` 가
+ * 두 구현의 동치를 강제한다. (install-lib 은 `bin/cli` 의 dist-무의존 성질 때문에
+ * dist 를 import 할 수 없어 공용 모듈로 합치지 못한다.)
+ */
+export function parseJsoncLoose(text: string): unknown {
+  let out = "";
+  let inString = false, escaped = false, inLine = false, inBlock = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], n = text[i + 1];
+    if (inLine) { if (c === "\n") { inLine = false; out += c; } continue; }
+    if (inBlock) { if (c === "*" && n === "/") { inBlock = false; i++; } continue; }
+    if (inString) {
+      out += c;
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; out += c; continue; }
+    if (c === "/" && n === "/") { inLine = true; i++; continue; }
+    if (c === "/" && n === "*") { inBlock = true; i++; continue; }
+    out += c;
+  }
+  let stripped = "";
+  inString = false; escaped = false;
+  for (let i = 0; i < out.length; i++) {
+    const c = out[i];
+    if (inString) {
+      stripped += c;
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; stripped += c; continue; }
+    if (c === ",") {
+      let j = i + 1;
+      while (j < out.length && /\s/.test(out[j])) j++;
+      if (out[j] === "}" || out[j] === "]") continue;
+    }
+    stripped += c;
+  }
+  return JSON.parse(stripped);
+}
+
+/**
+ * opencode.json 의 `permission.external_directory` 중 action==="allow" 인 패턴 목록.
+ *
+ * **이 설정은 opencode.json 에 있다 — makdoong2-team.json 이 아니다.**
+ * 종전 구현은 `loadConfig().permission?.external_directory` 를 읽었는데
+ * loadConfig() 는 makdoong2-team.json 을 읽고 그 스키마에는 `permission` 키가
+ * 아예 없다(additionalProperties:false). 그래서 이 목록은 **항상 빈 배열**이었고,
+ * 사용자가 opencode.json 에 명시적으로 allow 한 외부 디렉터리도 인식되지 않아
+ * 서브세션의 permission 요청이 auto-reject 됐다.
+ * (install-lib 의 computeExternalDirPaths 가 그 값을 쓰는 쪽이다.)
+ */
+export function loadOpencodeExternalDirAllows(): string[] {
+  try {
+    const raw = readFileSync(join(configDir(), "opencode.json"), "utf8");
+    const oc = parseJsoncLoose(raw) as {
+      permission?: { external_directory?: unknown };
+    } | null;
+    const ext = oc?.permission?.external_directory;
+    if (!ext || typeof ext !== "object") return [];
+    return Object.entries(ext as Record<string, unknown>)
+      .filter(([, action]) => action === "allow")
+      .map(([pattern]) => pattern);
+  } catch {
+    return []; // 부재 / 파싱 실패 → 설정된 allow 없음
+  }
+}
+
 /** Resolve the five runtime path roots (JSON paths.* override → default).
  *
  * `skills` default is the opencode config dir (`${XDG_CONFIG_HOME:-$HOME/.config}/opencode/skills`)

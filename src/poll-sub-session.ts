@@ -22,7 +22,12 @@
 
 import { matchesGlob } from "node:path";
 
-export type MessagePartLike = { type: string; text?: string };
+export type MessagePartLike = {
+  type: string;
+  text?: string;
+  /** opencode SDK 의 ToolPart 는 state.status 로 진행 상태를 알린다. */
+  state?: { status?: string };
+};
 export type MessageInfoLike = { id?: string; role: string; finish?: unknown };
 export type MessageLike = { info: MessageInfoLike; parts: MessagePartLike[] };
 export type StatusEntryLike = { type: string };
@@ -142,7 +147,35 @@ export interface PollOptions {
   onNudge?: (sessionId: string, elapsedMs: number) => Promise<void>;
 }
 
-const TOOL_CALL_PART_TYPES = new Set(["tool_call", "tool-call", "tool_use"]);
+// opencode SDK 의 실제 part 타입은 **"tool"** 이다 (@opencode-ai/sdk 의 ToolPart:
+// `type: "tool"`, `state: ToolState`). 종전 집합에는 "tool" 이 아예 없어서
+// `hasPendingToolCall` 이 **프로덕션에서 항상 false** 였다 — 그 결과 이 값이
+// 지키려던 것("docker/gradle 처럼 수 분 걸리는 툴 실행을 stall 로 오판하지 않는다")
+// 이 통째로 무력화돼, 긴 빌드를 도는 정상 세션이 MESSAGE_STALL 로 abort 되고
+// 재디스패치됐다. 배포 대상이 JVM(sbt) 저장소라 정면으로 걸리는 경로다.
+// 구형/변형 shape 대비로 옛 이름도 남긴다.
+const TOOL_CALL_PART_TYPES = new Set(["tool", "tool_call", "tool-call", "tool_use"]);
+
+/** 아직 끝나지 않은 툴 상태 (ToolStatePending / ToolStateRunning). */
+const IN_FLIGHT_TOOL_STATUSES = new Set(["pending", "running"]);
+
+/**
+ * "지금 실행 중인 툴 호출이 있는가".
+ *
+ * 타입만 보면 안 된다 — 마지막 assistant 메시지에는 이미 끝난 툴 파트가 여러 개
+ * 들어 있으므로, `type === "tool"` 만 추가하면 이번에는 값이 **항상 true** 가 되어
+ * stall 감지 자체가 꺼진다. 그래서 `state.status` 로 진행 중인 것만 센다.
+ *
+ * status 가 없는 알 수 없는 shape 은 **실행 중으로 본다**: 오탐(무거운 툴을 더
+ * 기다림)은 절대 타임아웃이 받쳐주지만, 미탐(살아있는 세션을 죽임)은 진행 중이던
+ * 작업을 통째로 버린다.
+ */
+function isInFlightToolPart(part: MessagePartLike): boolean {
+  if (!TOOL_CALL_PART_TYPES.has(part.type)) return false;
+  const status = part.state?.status;
+  if (typeof status !== "string") return true;
+  return IN_FLIGHT_TOOL_STATUSES.has(status);
+}
 
 // path.posix.dirname is used directly so the module works in both Node and test
 // environments without importing 'path'. The separator is always '/' because
@@ -336,9 +369,7 @@ export async function pollSubSession(
         : Boolean(lastAssistant);
 
     const hasFinish = lastAssistant?.info?.finish != null;
-    const hasPendingToolCall = !!lastAssistant?.parts?.some(
-      p => TOOL_CALL_PART_TYPES.has(p.type),
-    );
+    const hasPendingToolCall = !!lastAssistant?.parts?.some(isInFlightToolPart);
 
     const stalledMs = now() - lastProgressAt;
 

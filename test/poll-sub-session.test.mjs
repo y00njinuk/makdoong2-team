@@ -1328,3 +1328,86 @@ describe("pollSubSession — preambleOnlyTextThreshold", () => {
     assert.equal(outcome.text, preamble);
   });
 });
+
+// ── 실행 중인 툴 호출 감지 (SDK part 타입 정합) ──
+//
+// `hasPendingToolCall` 은 "지금 무거운 툴이 돌고 있으니 stall 로 오판하지 말라" 는
+// 면제 신호다. 그런데 판정 집합이 {"tool_call","tool-call","tool_use"} 였고
+// opencode SDK 의 실제 타입은 **"tool"** 이다 (@opencode-ai/sdk 의 ToolPart:
+// `type: "tool"`, `state: ToolState`). 즉 이 값이 **프로덕션에서 항상 false** 라
+// 면제가 한 번도 걸리지 않았고, docker/gradle 처럼 수 분 걸리는 빌드를 도는 정상
+// 세션이 MESSAGE_STALL 로 abort → 재디스패치됐다. 배포 대상이 JVM(sbt) 저장소라
+// 정면으로 걸리는 경로다.
+//
+// 반대 방향도 같이 고정한다: 타입만 보고 판정하면 이미 끝난 툴 파트까지 세어
+// 값이 항상 true 가 되고, 그러면 stall 감지 자체가 꺼진다. state.status 로
+// 진행 중인 것만 세야 한다.
+describe("pollSubSession — 실행 중 툴 호출은 stall 판정에서 면제된다", () => {
+  const toolPart = (status) => ({
+    type: "tool",
+    state: { status, input: {}, raw: "" },
+  });
+  const asstWithTool = (status, id = "a1") => ({
+    info: { id, role: "assistant" },
+    parts: [{ type: "text", text: "빌드를 시작합니다" }, toolPart(status)],
+  });
+
+  for (const status of ["pending", "running"]) {
+    test(`state.status="${status}" 이면 message stall 로 죽이지 않는다`, async () => {
+      let aborted = false;
+      const clock = fakeClock();
+      const client = makeClient({
+        statusScript: Array.from({ length: 10 }, () => ({ s1: { type: "busy" } })),
+        messagesScript: Array.from({ length: 10 }, () => [userMsg(), asstWithTool(status)]),
+        onAbort: () => { aborted = true; },
+      });
+      const outcome = await pollSubSession(client, "s1", {
+        ...clock,
+        timeoutMs: 30_000,
+        pollIntervalMs: 2_000,
+        messageStallThresholdMs: 6_000,
+      });
+      assert.notEqual(outcome.reason, "message_stall",
+        "실행 중인 툴이 있는데 stall 로 판정했다 — 긴 빌드가 강제 종료된다");
+      assert.equal(outcome.kind, "timeout", "면제되면 절대 타임아웃까지 기다린다");
+      assert.ok(!aborted || outcome.kind === "timeout");
+    });
+  }
+
+  for (const status of ["completed", "error"]) {
+    test(`state.status="${status}" 는 끝난 툴이므로 면제하지 않는다`, async () => {
+      const clock = fakeClock();
+      const client = makeClient({
+        statusScript: Array.from({ length: 10 }, () => ({ s1: { type: "busy" } })),
+        messagesScript: Array.from({ length: 10 }, () => [userMsg(), asstWithTool(status)]),
+      });
+      const outcome = await pollSubSession(client, "s1", {
+        ...clock,
+        timeoutMs: 60_000,
+        pollIntervalMs: 2_000,
+        messageStallThresholdMs: 6_000,
+      });
+      assert.equal(outcome.reason, "message_stall",
+        "끝난 툴 파트까지 면제하면 stall 감지가 통째로 꺼진다");
+    });
+  }
+
+  test("state 가 없는 알 수 없는 shape 은 보수적으로 실행 중으로 본다", async () => {
+    // 미탐(살아있는 세션을 죽임)이 오탐(절대 타임아웃까지 기다림)보다 비싸다.
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: Array.from({ length: 10 }, () => ({ s1: { type: "busy" } })),
+      messagesScript: Array.from({ length: 10 }, () => [
+        userMsg(),
+        { info: { id: "a1", role: "assistant" }, parts: [{ type: "tool_use" }] },
+      ]),
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock,
+      timeoutMs: 30_000,
+      pollIntervalMs: 2_000,
+      messageStallThresholdMs: 6_000,
+    });
+    assert.notEqual(outcome.reason, "message_stall");
+  });
+});

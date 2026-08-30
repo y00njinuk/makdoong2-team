@@ -19,7 +19,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join, resolve as pathResolve, sep as pathSep } from "node:path";
+import { basename as pathBasename, dirname as pathDirname, join, resolve as pathResolve, sep as pathSep } from "node:path";
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { appendSessionIndex, findWorktreeRoot, lookupSessionFromIndex } from "./session-index.js";
@@ -31,6 +31,9 @@ import {
   buildStateWriteBlockMessage,
   classifyStateJsonAccess,
   looksLikeRedirection,
+  splitUnquotedSegments,
+  WRITE_INDICATORS_RAW,
+  WRITE_INDICATORS_UNQUOTED,
   STATE_SH_CALL_RE,
   stripQuotedSpans,
 } from "./state-access-guard.ts";
@@ -49,6 +52,7 @@ import { TmuxMonitor, readTmuxConfig, orphanCleanupGuard } from "./tmux-monitor.
 import {
   resolvePaths,
   loadConfig,
+  loadOpencodeExternalDirAllows,
   readLoggingConfig,
   DEFAULT_STALL_ESCALATE_THRESHOLD,
 } from "./config.ts";
@@ -225,8 +229,16 @@ interface CreateWorktreeResult {
   hint?: string;
 }
 
+/**
+ * createWorktree 의 로깅 주입점.
+ *
+ * `info` 가 아니라 `debug` 다 — CLAUDE.md 는 플러그인 코드에서 `logger.info` 를
+ * 쓰지 않고 debug / warn / error 세 레벨만 쓰도록 규정한다. 종전에는 이 인터페이스가
+ * `info` 를 노출하고 호출부가 `info: (m) => logger.debug(m)` 으로 우회 매핑해서
+ * 하드룰이 형식적으로만 지켜졌다.
+ */
 interface CreateWorktreeLogger {
-  info?: (msg: string) => void;
+  debug?: (msg: string) => void;
   warn?: (msg: string) => void;
   error?: (msg: string) => void;
 }
@@ -238,7 +250,7 @@ async function createWorktree(
   wtLogger?: CreateWorktreeLogger,
 ): Promise<CreateWorktreeResult> {
   const branchName = `feature/${issue}`;
-  wtLogger?.info?.(`[createWorktree] ENTER issue=${issue} cwd=${cwd} branch=${branchName}`);
+  wtLogger?.debug?.(`[createWorktree] ENTER issue=${issue} cwd=${cwd} branch=${branchName}`);
 
   const mainRepoResult = await $`git worktree list --porcelain`
     .cwd(cwd).quiet().nothrow();
@@ -286,23 +298,27 @@ async function createWorktree(
     };
   }
 
-  const path = require("node:path");
-  const parentDir = path.dirname(mainRepo);
-  const repoName = path.basename(mainRepo);
-  const targetWorktree = path.join(parentDir, `${repoName}-${issue}`);
+  // ESM 모듈에서 require() 를 쓰면 안 된다. package.json 이 "type":"module" 이고
+  // tsc 산출물도 ESM 이라 `require` 는 정의되지 않는다 — 지금 터지지 않는 이유는
+  // opencode 가 Bun 바이너리이고 Bun 이 ESM 안의 require() 를 허용하기 때문일
+  // 뿐이다. Node 로 로드되는 순간 createWorktree 가 ReferenceError 로 즉사한다
+  // (dev 단계 진입 = worktree 생성 경로).
+  const parentDir = pathDirname(mainRepo);
+  const repoName = pathBasename(mainRepo);
+  const targetWorktree = join(parentDir, `${repoName}-${issue}`);
 
   if (existingWorktreePath) {
     if (existingWorktreePath === targetWorktree) {
       if (!existsSync(targetWorktree)) {
         // git metadata 는 남아있지만 실제 디렉토리가 삭제된 phantom 상태.
         // prune 으로 stale entry 를 제거한 뒤 아래 addCommand 로 재생성한다.
-        wtLogger?.info?.(
+        wtLogger?.debug?.(
           `[createWorktree] PHANTOM_REUSED — dir gone, pruning and recreating ` +
           `issue=${issue} path=${targetWorktree}`,
         );
         await $`git worktree prune`.cwd(cwd).quiet().nothrow();
       } else {
-        wtLogger?.info?.(`[createWorktree] REUSED issue=${issue} path=${targetWorktree} branch=${branchName}`);
+        wtLogger?.debug?.(`[createWorktree] REUSED issue=${issue} path=${targetWorktree} branch=${branchName}`);
         return {
           ok: true,
           path: targetWorktree,
@@ -345,7 +361,7 @@ async function createWorktree(
     };
   }
 
-  wtLogger?.info?.(
+  wtLogger?.debug?.(
     `[createWorktree] CREATED issue=${issue} path=${targetWorktree} branch=${branchName} ` +
     `branch_existed=${branchExists}`,
   );
@@ -356,33 +372,56 @@ async function createWorktree(
   };
 }
 
+/**
+ * 세그먼트가 "이 함수의 판정 대상이 아님" 으로 면제되는가.
+ *
+ * git 서브커맨드는 permission 계층(frontmatter deny)이 따로 관장하고, state.sh
+ * 호출은 승인된 상태 쓰기 경로다. **세그먼트 단위로만** 면제한다 — 종전에는
+ * 명령 전체를 면제해서 `git status && echo x > f` 처럼 접두만 git 이면 뒤에 붙은
+ * 진짜 쓰기가 통째로 통과했다.
+ */
+function isExemptSegment(segment: string): boolean {
+  if (STATE_SH_CALL_RE.test(segment)) return true;
+  return /^\s*git\s+(?:commit|push|add|rm|status|log|diff|show|branch|checkout|fetch|worktree|config|remote)\b/i
+    .test(segment);
+}
+
 export function looksLikeFileWrite(cmd: string): boolean {
   // state.json 은 전용 분류기가 판정한다. 읽기 전용 진단(ls/file/head/cat)을 여기서
   // 다시 "파일 쓰기" 로 잡으면 universal 훅을 고쳐도 leader 는 하드룰 2 로 막힌다.
   const stateAccess = classifyStateJsonAccess(cmd);
   if (stateAccess.kind === "write") return true;
-  if (stateAccess.kind !== "unrelated") return false;
-  if (/^\s*(git\s+(commit|push|add|rm|status|log|diff|show|branch|checkout|fetch|worktree|config|remote))/i.test(cmd)) return false;
-  if (STATE_SH_CALL_RE.test(cmd)) return false;
 
-  // 리디렉션 계열은 인용 구간을 지운 문자열로 판정한다 — 따옴표 안의 `>` 는
-  // 셸 메타문자가 아니라 리터럴이다. `jq -e '… length >= 1'` 같은 읽기 전용
-  // 술어가 "파일 쓰기" 로 잡혀 analyzer 가 자기 산출물을 검증하지 못했다 (issue #6-③).
-  const bare = stripQuotedSpans(cmd);
-  // 셸 인라인 스크립트는 인용 구간이 사라지면 내부 리디렉션이 보이지 않는다 → 통째로 차단.
-  // 스크립트 파일 실행(`bash <SCRIPTS_DIR>/state.sh …`)은 `-c` 가 없어 매치되지 않는다.
+  // ── 1) 명령 전체로 판정해야 하는 것 ──
+  // 세그먼트로 쪼개면 인용 구간 안이나 리디렉션 문맥이 가려진다. 그리고 이 검사는
+  // **면제보다 먼저** 와야 한다 — 종전에는 git/state.sh 접두 면제가 먼저 걸려서
+  // `git diff > out.txt` · `git log > notes.md` · `git diff | tee out.txt` 가 전부
+  // "쓰기 아님" 으로 통과했다 (READ-ONLY 하드룰과 leader 하드룰 2 동시 우회).
   if (/\b(?:ba|z|k|da)?sh\b\s+-\w*c\b/.test(cmd)) return true;
   if (/(^|[|&;\s(`{])eval\s/.test(cmd)) return true;
-
-  if (/(^|[|&;])\s*(tee|dd)\b/.test(cmd)) return true;
-  if (/\bsed\b[^|;&]*\s-i(?:\b|['"])/.test(cmd)) return true;
-  if (/\bawk\b[^|;&]*?(?<![0-9])>\s*(?![&/])\S/.test(bare)) return true;
-  if (/(^|[|;&\s])(cat|printf|echo)\b[^|;&]*?(<<\S+.*?)?(?<![0-9])>\s*(?![&/])\S/.test(bare)) return true;
   if (looksLikeRedirection(cmd)) return true;
+  if (/\bsed\b[^|;&]*\s(?:-i(?:\b|['"])|--in-place\b)/.test(cmd)) return true;
+  if (/\b(?:perl|ruby)\b[^|;&]*\s-\w*i\b/.test(cmd)) return true;
+
   // 인터프리터 인라인 스크립트는 따옴표 *안* 을 봐야 하므로 원문으로 판정한다.
-  if (/\bpython3?\s+-c\s+["'][^"']*open\s*\([^)]*["']\s*,\s*["'][wa]/.test(cmd)) return true;
-  if (/\bnode\s+-e\s+["'].*?(?:writeFileSync|writeFile\b|appendFileSync|createWriteStream)/.test(cmd)) return true;
-  if (/(^|[|&;])\s*(cp|mv)\s/.test(cmd)) return true;
+  //
+  // state.json 가드(WRITE_INDICATORS_RAW)는 `-c`/`-e` 자체를 통째로 막지만 여기는
+  // 그러지 않는다 — 이 함수는 **모든 파일**에 대한 판정이고, 읽기 전용 인라인
+  // 스크립트는 planner/analyzer 의 정상 능력으로 이미 허용돼 있다
+  // (test/state-write-guard.test.mjs 가 고정). 대신 쓰기 API 목록을 넓힌다.
+  if (/\bpython3?\s+-c\s+["'][\s\S]*?(?:open\s*\([^)]*["']\s*,\s*["'][wax]|\.write_text\s*\(|\.write_bytes\s*\(|shutil\.(?:copy|move|rmtree)|os\.(?:remove|unlink|rename|replace|truncate)|json\.dump\s*\()/.test(cmd)) return true;
+  if (/\bnode\s+-e\s+["'][\s\S]*?(?:writeFileSync|writeFile\b|appendFileSync|appendFile\b|createWriteStream|renameSync|rmSync|unlinkSync|cpSync|copyFileSync|truncateSync|mkdirSync)/.test(cmd)) return true;
+
+  // ── 2) 세그먼트별 판정 ──
+  // 여기서만 면제가 적용된다. 인용 구간을 덮은 문자열로 보므로
+  // `grep -e ' rm ' f` 같은 읽기는 걸리지 않는다.
+  for (const segment of splitUnquotedSegments(cmd)) {
+    if (isExemptSegment(segment)) continue;
+    const bare = stripQuotedSpans(segment);
+    for (const [re] of WRITE_INDICATORS_UNQUOTED) {
+      if (re.test(bare)) return true;
+    }
+  }
   return false;
 }
 
@@ -699,15 +738,24 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     Math.round(config.timeout?.stall_escalate_threshold ?? DEFAULT_STALL_ESCALATE_THRESHOLD),
   );
 
-  const externalDirConfig = (config as any).permission?.external_directory ?? {};
-  const configuredAllowPatterns: string[] = typeof externalDirConfig === "string"
-    ? []
-    : Object.entries(externalDirConfig as Record<string, string>)
-        .filter(([, action]) => action === "allow")
-        .map(([pattern]) => pattern);
+  // 사용자가 opencode.json 에 명시적으로 allow 한 외부 디렉터리 패턴.
+  // 종전에는 makdoong2-team.json(=`config`)에서 읽어 **항상 빈 배열**이었다 —
+  // 그 스키마에는 permission 키가 없다. 자세한 내용은 config.ts 의 함수 주석 참조.
+  const configuredAllowPatterns: string[] = loadOpencodeExternalDirAllows();
+  logger.debug(
+    `[permission] configured external_directory allows: ${configuredAllowPatterns.length}개` +
+    (configuredAllowPatterns.length ? ` (${configuredAllowPatterns.slice(0, 3).join(", ")}…)` : ""),
+  );
 
   const sessionLastToolExecuteAt = new Map<string, number>();
   const sessionActiveToolCount = new Map<string, number>();
+
+  /** 활성 툴 카운터를 1 감소시킨다 (0 이면 항목 삭제). */
+  function releaseActiveTool(sid: string): void {
+    const cur = sessionActiveToolCount.get(sid) ?? 0;
+    if (cur <= 1) sessionActiveToolCount.delete(sid);
+    else sessionActiveToolCount.set(sid, cur - 1);
+  }
   const TOOL_EXECUTE_ALIVE_WINDOW_MS = 300_000;
 
   // MESSAGE_STALL 후 client.session.abort() 는 즉시 반환하지만 opencode 서버는 잠시 후
@@ -982,6 +1030,32 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   // 하드룰 1: Read 외 파일 조작은 dispatch_stage로만 위임.
   const LEADER_FORBIDDEN_TOOLS = new Set(["write", "edit", "patch", "multiedit"]);
 
+  // ── 산출물이 제한된 서브에이전트 ──
+  //
+  // 이 제한은 원래 에이전트 frontmatter 의 `permission.write` 블록으로만 표현돼
+  // 있었는데 그 블록은 **런타임에서 한 번도 평가되지 않는다**. opencode 1.18 의
+  // permission 스키마에는 `write` 키가 없고(정식 키는 `edit`), write/edit/patch
+  // 툴은 전부 `permission: "edit"` 으로 묻는다 — 바이너리의 스키마 정의와 각 툴의
+  // `ask({permission:"edit", …})` 호출로 확인했다. 즉 `write:` 로 적힌 규칙은
+  // 조용히 무시되고 기본값 `ask` 로 떨어지며, 그 ask 는 플러그인의 permission
+  // 자동 승인(worktree scope 안이면 approve)이 받아버린다.
+  //
+  // frontmatter 는 `edit:` 키로 고쳤지만(1차 방어), 그것만으로는 glob 매칭 의미에
+  // 의존한다. 여기서 경로를 직접 대조하는 결정론적 2차 방어를 둔다 —
+  // SEALED_SUBAGENTS 와 같은 이중 방어 구조다.
+  const ARTIFACT_RESTRICTED_AGENTS: ReadonlyMap<string, RegExp | null> = new Map([
+    // analyzer: workspace-analysis.json 하나만
+    ["makdoong2-analyzer", /(^|\/)\.makdoong2-team\/[^/]+\/workspace-analysis\.json$/],
+    // publisher: change-report.md (07-commit) + review-comment-plan.json (09-review §8-2).
+    // 후자는 stage8-post-review-verify 가 존재를 하드 요구하는 필수 산출물이다 —
+    // change-report 만 허용하면 3_delivery.review 가 구조적으로 통과 불가능해진다.
+    ["makdoong2-publisher", /(^|\/)\.makdoong2-team\/[^/]+\/(change-report\.md|review-comment-plan\.json)$/],
+    // planner: 요구사항 초안 · 리서치 산출물
+    ["makdoong2-planner", /(^|\/)\.makdoong2-team\/[^/]+\/[^/]+\.(md|json)$/],
+    // researcher: 쓰기 없음
+    ["makdoong2-researcher", null],
+  ]);
+
   // ══════════════════════════════════════════════════════════════════════════
   // Sealed Workflow Enforcement — Outer-World Tool Blocking
   // ══════════════════════════════════════════════════════════════════════════
@@ -1132,238 +1206,280 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
 
       logger.debug(`[makdoong2-team hook] tool.execute.before fired: tool="${input.tool}" sessionID="${sessionID}" agent="${agent ?? "unknown"}" callID="${(input as any).callID}"`);
 
+      // 활성 툴 카운터는 **증분과 감소가 반드시 짝을 이뤄야 한다**.
+      // tool.execute.after 는 툴이 실제로 실행된 뒤에만 돈다. 아래 가드들이 throw 하면
+      // (차단된 bash · sealed 서브에이전트의 outer-world 툴 · leader 의 파일 쓰기 등)
+      // after 훅이 돌지 않아 카운터가 영구히 ≥1 로 남고, 그러면 isRecentlyActive() 가
+      // 항상 true 가 되어 그 세션의 gone 감지와 orphan 회수가 **영구 비활성**된다.
+      // 차단은 정상 동작이라 반드시 일어나므로 확정적으로 누수됐다.
       if (sessionID) {
         sessionLastToolExecuteAt.set(sessionID, Date.now());
         sessionActiveToolCount.set(sessionID, (sessionActiveToolCount.get(sessionID) ?? 0) + 1);
       }
+      try {
 
-      if (sessionID && (toolLower === "dispatch_stage" || toolLower === "dispatch_verifier")) {
-        const callID = (input as any).callID as string | undefined;
-        if (callID) parentSessionByCallID.set(callID, sessionID);
-        parentSessionByToolStack.push(sessionID);
-        logger.debug(`[makdoong2-team hook] captured parentSessionID=${sessionID} for ${input.tool} callID=${callID}`);
-      }
+        if (sessionID && (toolLower === "dispatch_stage" || toolLower === "dispatch_verifier")) {
+          const callID = (input as any).callID as string | undefined;
+          if (callID) parentSessionByCallID.set(callID, sessionID);
+          parentSessionByToolStack.push(sessionID);
+          logger.debug(`[makdoong2-team hook] captured parentSessionID=${sessionID} for ${input.tool} callID=${callID}`);
+        }
 
-      if (input.tool === "call_omo_agent") {
-        logger.error(`[makdoong2-team hook] BLOCKED: call_omo_agent invocation detected`);
-        throw new Error(
-          "[makdoong2-team] call_omo_agent is forbidden in this workflow. " +
-          "Use dispatch_stage / dispatch_verifier / get_fallback_model instead. " +
-          "If dispatch_stage is missing, the makdoong2-team plugin failed to load — " +
-          "fix the plugin (likely: cd ~/.config/opencode/plugins/makdoong2-team && npm install --ignore-scripts)."
-        );
-      }
-
-      if (OUTER_WORLD_TOOLS.has(toolLower)) {
-        if (!agent) {
-          logger.debug(
-            `[makdoong2-team hook] outer-world tool "${input.tool}" called, agent unknown ` +
-            `(sessionAgent not yet populated). Allowing — primary session passthrough. ` +
-            `sessionID="${sessionID}" callID="${(input as any).callID}".`
+        if (input.tool === "call_omo_agent") {
+          logger.error(`[makdoong2-team hook] BLOCKED: call_omo_agent invocation detected`);
+          throw new Error(
+            "[makdoong2-team] call_omo_agent is forbidden in this workflow. " +
+            "Use dispatch_stage / dispatch_verifier / get_fallback_model instead. " +
+            "If dispatch_stage is missing, the makdoong2-team plugin failed to load — " +
+            "fix the plugin (likely: cd ~/.config/opencode/plugins/makdoong2-team && npm install --ignore-scripts)."
           );
-        } else if (SEALED_SUBAGENTS.has(agent)) {
+        }
+
+        if (OUTER_WORLD_TOOLS.has(toolLower)) {
+          if (!agent) {
+            logger.debug(
+              `[makdoong2-team hook] outer-world tool "${input.tool}" called, agent unknown ` +
+              `(sessionAgent not yet populated). Allowing — primary session passthrough. ` +
+              `sessionID="${sessionID}" callID="${(input as any).callID}".`
+            );
+          } else if (SEALED_SUBAGENTS.has(agent)) {
+            logger.error(
+              `[makdoong2-team hook] BLOCKED: sealed sub-agent "${agent}" attempted outer-world tool "${input.tool}" (sessionID="${sessionID}")`
+            );
+            throw new Error(
+              `[makdoong2-team sealed workflow violation]\n` +
+              `Agent "${agent}" cannot call "${input.tool}".\n\n` +
+              `Makdoong2 sub-agents are SEALED and must not delegate to outer-world agents ` +
+              `(Sisyphus / Explore / Librarian / Oracle / Metis / Momus 등 oh-my-openagent 계열).\n\n` +
+              `**허용된 대안:**\n` +
+              `• 조사/리서치: \`skill_mcp\` 툴로 아래 스킬 사용\n` +
+              `    - jira-research (Jira 이슈)\n` +
+              `    - confluence-research (설계 문서, 위키)\n` +
+              `    - bitbucket-research (소스 코드, PR, 커밋)\n` +
+              `    - github-oss-research (공개 저장소, OSS 참조)\n` +
+              `• 다른 substage 작업 필요 시: 결과·스펙을 team-leader에게 반환하면 team-leader가 dispatch_stage로 라우팅.\n` +
+              `• 상태 공유: \`state.sh set\` 으로 state.json 마커에 기록. team-leader가 읽어서 다음 단계 결정.\n\n` +
+              `**아키텍처 원칙:** 각 substage는 self-contained. Inter-substage 의존은 team-leader 오케스트레이션을 통해서만 흐르며, ` +
+              `agent-to-agent 직접 호출은 금지된다. 참조: CLAUDE.md "워크플로우 상태 & 위임 규약".`
+            );
+          }
+        } else if (agent && SEALED_SUBAGENTS.has(agent) && DELEGATION_LIKE_NAME.test(toolLower) && !KNOWN_SAFE_TOOLS.has(toolLower)) {
+          logger.debug(
+            `[makdoong2-team hook] sealed sub-agent "${agent}" called delegation-like tool "${input.tool}" not in blocklist. ` +
+            `Consider adding to OUTER_WORLD_TOOLS if this is a new oh-my-openagent delegation tool.`
+          );
+        }
+
+        // ── issue-reporter 스킬 사용자-전용 트리거 강제 ──
+        // makdoong2-issue-reporter 스킬은 사용자의 /makdoong2-issue-reporter
+        // 커맨드(전용 full-permission 에이전트로 라우팅)로만 실행된다. 다른
+        // 에이전트의 skill() 자율 로드는 트리거 정책 위반 — 1차 방어는 SKILL.md
+        // description, 이 블록이 2차(런타임) 방어다.
+        if (toolLower === "skill") {
+          const violation = issueReporterSkillLoadViolation(agent, (output as { args?: unknown }).args);
+          if (violation) {
+            logger.error(
+              `[makdoong2-team hook] BLOCKED: agent "${agent}" attempted autonomous load of user-only skill makdoong2-issue-reporter (sessionID="${sessionID}")`
+            );
+            throw new Error(violation);
+          }
+        }
+
+        // ── issue-reporter 는 task 로 spawn 할 수 없다 ──
+        // frontmatter 의 mode/hidden 은 "목록에서 감추기" 일 뿐이고, opencode 의 task 툴은
+        // subagent_type 의 mode 를 검사하지 않는다. 이름만 알면 부를 수 있으므로 여기서 막는다.
+        if (toolLower === "task") {
+          const taskViolation = issueReporterTaskSpawnViolation((output as { args?: unknown }).args);
+          if (taskViolation) {
+            logger.error(
+              `[makdoong2-team hook] BLOCKED: agent "${agent ?? "unknown"}" attempted task spawn of ${ISSUE_REPORTER_AGENT} (sessionID="${sessionID}")`
+            );
+            throw new Error(taskViolation);
+          }
+        }
+
+        // ── skill_mcp lazy-load 사전 힌트 ──
+        // opencode 는 skill 이 로드되기 전에 skill_mcp 를 호출하면
+        // "MCP server not found" 로 튕기지만 정작 어떤 skill 을 로드해야 하는지는
+        // 알려주지 않는다. 우리가 관리하는 mcp_name 이면 콘솔에 정확한 skill 이름을
+        // 미리 남긴다 — 성공 시엔 아무 영향 없고, 실패 시 사용자·디버거가 로그에서
+        // 즉시 원인을 볼 수 있다. 사전 throw 는 하지 않는다 — outer MCP (site-wide)
+        // 나 chrome-devtools-mcp 처럼 skill 밖의 MCP 도 정상 케이스다.
+        if (toolLower === "skill_mcp") {
+          const mcpName = extractMcpName((output as { args?: unknown }).args);
+          if (mcpName && knownMcpNames.has(mcpName)) {
+            const skillName = knownMcpNames.get(mcpName)!;
+            logger.debug(
+              `[makdoong2-team hook] skill_mcp lazy-load hint: mcp_name="${mcpName}" ` +
+              `is embedded in skill "${skillName}". If the call fails with "not found", ` +
+              `first invoke skill(name="${skillName}") in the current session, then retry.`,
+            );
+          }
+        }
+
+        // ── Issue-reporter: payload 를 고쳐 쓰면 표시 증명이 무효가 된다 ──
+        // 마커 파일 방식과 달리 표시 증명은 프로세스 메모리에 있어 위조할 수 없다.
+        // 다만 사용자에게 보여준 뒤 파일만 바꿔치기하는 경로가 남으므로, write 계열
+        // 툴이 표시된 payload 를 건드리면 그 증명을 즉시 폐기한다 (재표시 필요).
+        if (agent === ISSUE_REPORTER_AGENT && (LEADER_FORBIDDEN_TOOLS.has(toolLower) || WRITE_TOOLS.has(toolLower))) {
+          // filePath 인자뿐 아니라 인자 전체를 검사한다 — apply_patch 는 파일 경로가
+          // 패치 본문 안에 들어 있어 filePath 추출로는 대상 파일을 알 수 없다.
+          let argsSerialized = "";
+          try { argsSerialized = JSON.stringify((output as { args?: unknown }).args ?? ""); } catch { /* ignore */ }
+          for (const shownPath of [...issueReporterShownPayloads.keys()]) {
+            if (argsSerialized.includes(shownPath)) {
+              issueReporterShownPayloads.delete(shownPath);
+              logger.debug(`[makdoong2-team hook] issue-reporter 표시 증명 폐기(${input.tool} 이 payload 를 수정): ${shownPath}`);
+            }
+          }
+        }
+
+        // ── 산출물 제한 서브에이전트의 write 계열 툴 차단 ──
+        //
+        // filePath 를 추출할 수 없으면(예: apply_patch — 경로가 패치 본문 안에
+        // 있다) 보수적으로 차단한다. 이 방향이 안전하다: 산출물이 제한된
+        // 에이전트가 대상 불명의 패치를 미는 것 자체가 정책 위반이고, 이들은
+        // 산출물을 Write 툴(filePath 인자 보유)로만 만든다. 실제로 네 에이전트
+        // 모두 frontmatter 에서 Patch 툴이 비활성이라 이 경로는 도달 불가에 가깝다.
+        if (agent && ARTIFACT_RESTRICTED_AGENTS.has(agent)
+            && (LEADER_FORBIDDEN_TOOLS.has(toolLower) || WRITE_TOOLS.has(toolLower))) {
+          const allowed = ARTIFACT_RESTRICTED_AGENTS.get(agent) ?? null;
+          const filePath = extractFilePathFromToolArgs((output as { args?: unknown }).args);
+          const normalized = (filePath ?? "").replace(/\\/g, "/");
+          const permitted = allowed !== null && normalized !== "" && allowed.test(normalized);
+          if (!permitted) {
+            logger.error(
+              `[makdoong2-team hook] BLOCKED: ${agent} 가 허용되지 않은 대상에 ` +
+              `${input.tool} 을 시도했다 (filePath=${filePath ?? "unknown"})`
+            );
+            throw new Error(
+              `[makdoong2-team artifact hardrule] "${agent}" 는 '${input.tool}' 로 ` +
+              `${filePath ? `"${filePath}" 에 ` : ""}쓸 수 없다.\n` +
+              (allowed === null
+                ? `이 에이전트는 파일을 쓰지 않는다 — 조사 결과는 최종 응답 텍스트로 반환하라.\n`
+                : `허용된 산출물은 .makdoong2-team/<이슈키>/ 아래의 지정된 파일 하나뿐이다 ` +
+                  `(패턴: ${allowed.source}).\n`) +
+              `코드 변경이 필요하면 그 사실을 산출물/응답에 적고 engineer 단계로 넘겨라.`
+            );
+          }
+        }
+
+        // ── Leader hardrule 1: 직접 파일 편집·생성 금지 (write/edit/patch/multiedit) ──
+        if (agent === "makdoong2-team-leader" && LEADER_FORBIDDEN_TOOLS.has(toolLower)) {
+          logger.error(`[makdoong2-team hook] BLOCKED: team-leader가 ${input.tool} 툴 호출을 시도했다.`);
+          throw new Error(
+            `[makdoong2-team hardrule 1] team-leader는 '${input.tool}' 툴을 직접 호출할 수 없다. ` +
+            "파일 조작은 반드시 dispatch_stage로 engineer/planner/publisher 막둥이에 위임하라. " +
+            "auto_advance_stage의 next_action 필드가 지시하는 dispatch_stage 호출을 우선 실행하라."
+          );
+        }
+
+        if (input.tool !== "bash") return;
+        const cmd = (output.args as { command?: string })?.command ?? "";
+        if (!cmd) return;
+
+        // ── Universal state.json hardrule: agent 식별 결과와 무관하게 차단 ──
+        // sessionAgent map race, primary/outer session, undefined agent 모두 포함.
+        // 차단 대상은 *쓰기* 뿐이다 — 읽기 전용 진단까지 막으면 state_unreadable
+        // 복구 절차(next_action)를 수행할 수단이 사라진다 (issue #5).
+        const stateAccess = classifyStateJsonAccess(cmd);
+        if (stateAccess.kind === "write") {
           logger.error(
-            `[makdoong2-team hook] BLOCKED: sealed sub-agent "${agent}" attempted outer-world tool "${input.tool}" (sessionID="${sessionID}")`
+            `[makdoong2-team hook] BLOCKED: state.json 쓰기 우회 시도 (agent="${agent ?? "unknown"}", ` +
+            `reason="${stateAccess.reason}"). cmd="${redactAndTruncate(cmd, 200)}"`,
+          );
+          throw new Error(buildStateWriteBlockMessage(stateAccess.reason, agent));
+        }
+        if (stateAccess.kind === "read-only") {
+          logger.debug(
+            `[makdoong2-team hook] state.json 읽기 전용 진단 허용 (agent="${agent ?? "unknown"}", ` +
+            `readers=${stateAccess.readers.join(",")})`,
+          );
+        }
+
+        // ── Leader hardrule 2: Bash 우회 파일 쓰기 금지 (state.json 제외) ──
+        if (agent === "makdoong2-team-leader" && looksLikeFileWrite(cmd)) {
+          logger.error(`[makdoong2-team hook] BLOCKED: team-leader가 bash 파일 쓰기 우회를 시도했다. cmd="${redactAndTruncate(cmd, 200)}"`);
+          throw new Error(
+            "[makdoong2-team hardrule 2] team-leader는 bash를 통한 파일 쓰기(>, >>, tee, sed -i, cat > 등)도 금지된다. " +
+            "허용: git commit/push/add/rm, state.sh set. " +
+            "그 외 파일 생성·수정은 dispatch_stage로 engineer 막둥이에 위임하라."
+          );
+        }
+
+        // ── Planner/Analyzer hardrule: READ-ONLY 원칙 - bash 파일 쓰기 일체 금지 ──
+        if ((agent === "makdoong2-planner" || agent === "makdoong2-analyzer") && looksLikeFileWrite(cmd)) {
+          logger.error(
+            `[makdoong2-team hook] BLOCKED: ${agent}가 bash 파일 쓰기를 시도했다 (READ-ONLY 위반). cmd="${redactAndTruncate(cmd, 200)}"`
           );
           throw new Error(
-            `[makdoong2-team sealed workflow violation]\n` +
-            `Agent "${agent}" cannot call "${input.tool}".\n\n` +
-            `Makdoong2 sub-agents are SEALED and must not delegate to outer-world agents ` +
-            `(Sisyphus / Explore / Librarian / Oracle / Metis / Momus 등 oh-my-openagent 계열).\n\n` +
-            `**허용된 대안:**\n` +
-            `• 조사/리서치: \`skill_mcp\` 툴로 아래 스킬 사용\n` +
-            `    - jira-research (Jira 이슈)\n` +
-            `    - confluence-research (설계 문서, 위키)\n` +
-            `    - bitbucket-research (소스 코드, PR, 커밋)\n` +
-            `    - github-oss-research (공개 저장소, OSS 참조)\n` +
-            `• 다른 substage 작업 필요 시: 결과·스펙을 team-leader에게 반환하면 team-leader가 dispatch_stage로 라우팅.\n` +
-            `• 상태 공유: \`state.sh set\` 으로 state.json 마커에 기록. team-leader가 읽어서 다음 단계 결정.\n\n` +
-            `**아키텍처 원칙:** 각 substage는 self-contained. Inter-substage 의존은 team-leader 오케스트레이션을 통해서만 흐르며, ` +
-            `agent-to-agent 직접 호출은 금지된다. 참조: CLAUDE.md "워크플로우 상태 & 위임 규약".`
+            `[makdoong2-team READ-ONLY hardrule] ${agent}는 Read-only 에이전트로 파일 생성·수정이 일체 금지된다.\n\n` +
+            `**허용**: state.sh set (state.json 마커 기록만)\n` +
+            `**금지**: bash 리디렉션 (>, >>, tee, cat >, echo >, sed -i, awk > 등), Python/Node 인터프리터 파일 쓰기\n\n` +
+            `**올바른 절차**:\n` +
+            `• Planning 단계 (planner): "무엇을 만들지" 결정만. 실제 파일 생성은 implementation 단계로 위임.\n` +
+            `• Analysis 단계 (analyzer): workspace-analysis.json 1개만 생성 가능 (Write 툴 사용).\n` +
+            `• 초안 파일 필요 시: spec을 team-leader에게 반환 → dev 단계에서 engineer가 구현.\n\n` +
+            `**참조**: agents/${agent}.md "금지" 섹션, CLAUDE.md "워크플로우 상태 & 위임 규약"`
           );
         }
-      } else if (agent && SEALED_SUBAGENTS.has(agent) && DELEGATION_LIKE_NAME.test(toolLower) && !KNOWN_SAFE_TOOLS.has(toolLower)) {
-        logger.debug(
-          `[makdoong2-team hook] sealed sub-agent "${agent}" called delegation-like tool "${input.tool}" not in blocklist. ` +
-          `Consider adding to OUTER_WORLD_TOOLS if this is a new oh-my-openagent delegation tool.`
-        );
-      }
 
-      // ── issue-reporter 스킬 사용자-전용 트리거 강제 ──
-      // makdoong2-issue-reporter 스킬은 사용자의 /makdoong2-issue-reporter
-      // 커맨드(전용 full-permission 에이전트로 라우팅)로만 실행된다. 다른
-      // 에이전트의 skill() 자율 로드는 트리거 정책 위반 — 1차 방어는 SKILL.md
-      // description, 이 블록이 2차(런타임) 방어다.
-      if (toolLower === "skill") {
-        const violation = issueReporterSkillLoadViolation(agent, (output as { args?: unknown }).args);
-        if (violation) {
-          logger.error(
-            `[makdoong2-team hook] BLOCKED: agent "${agent}" attempted autonomous load of user-only skill makdoong2-issue-reporter (sessionID="${sessionID}")`
-          );
-          throw new Error(violation);
-        }
-      }
+        // ── Issue-reporter 게시 게이트: GitHub 쓰기는 사용자가 본 원문만 ──
+        // 승인의 의사표시는 opencode permission 프롬프트(세션 내 yes/no)가 받는다.
+        // 여기서 강제하는 것은 나머지 절반 — 형식(검증 가능한 형태)과 표시 증명
+        // (사용자가 본 원문 == 전송되는 원문). 계약 상세: src/issue-reporter-guard.ts 상단.
+        if (agent === ISSUE_REPORTER_AGENT) {
+          const approveHint =
+            `승인 절차: ① payload 를 리터럴 절대경로 JSON 파일로 쓴다 → ② 'cat <payload>' 로 원문 전체를\n` +
+            `세션에 표시한다 (체이닝 없이 단독 실행 — 이 출력이 사용자가 보는 원문이고 훅이 해시를 기록한다) →\n` +
+            `③ 단일 curl -d @<payload> 로 전송하면 opencode 가 사용자에게 게시 여부를 묻는다 (yes/no).\n` +
+            `표시 이후 payload 를 고치면 증명이 무효가 되므로 ②부터 다시 한다.`;
 
-      // ── issue-reporter 는 task 로 spawn 할 수 없다 ──
-      // frontmatter 의 mode/hidden 은 "목록에서 감추기" 일 뿐이고, opencode 의 task 툴은
-      // subagent_type 의 mode 를 검사하지 않는다. 이름만 알면 부를 수 있으므로 여기서 막는다.
-      if (toolLower === "task") {
-        const taskViolation = issueReporterTaskSpawnViolation((output as { args?: unknown }).args);
-        if (taskViolation) {
-          logger.error(
-            `[makdoong2-team hook] BLOCKED: agent "${agent ?? "unknown"}" attempted task spawn of ${ISSUE_REPORTER_AGENT} (sessionID="${sessionID}")`
-          );
-          throw new Error(taskViolation);
-        }
-      }
-
-      // ── skill_mcp lazy-load 사전 힌트 ──
-      // opencode 는 skill 이 로드되기 전에 skill_mcp 를 호출하면
-      // "MCP server not found" 로 튕기지만 정작 어떤 skill 을 로드해야 하는지는
-      // 알려주지 않는다. 우리가 관리하는 mcp_name 이면 콘솔에 정확한 skill 이름을
-      // 미리 남긴다 — 성공 시엔 아무 영향 없고, 실패 시 사용자·디버거가 로그에서
-      // 즉시 원인을 볼 수 있다. 사전 throw 는 하지 않는다 — outer MCP (site-wide)
-      // 나 chrome-devtools-mcp 처럼 skill 밖의 MCP 도 정상 케이스다.
-      if (toolLower === "skill_mcp") {
-        const mcpName = extractMcpName((output as { args?: unknown }).args);
-        if (mcpName && knownMcpNames.has(mcpName)) {
-          const skillName = knownMcpNames.get(mcpName)!;
-          logger.debug(
-            `[makdoong2-team hook] skill_mcp lazy-load hint: mcp_name="${mcpName}" ` +
-            `is embedded in skill "${skillName}". If the call fails with "not found", ` +
-            `first invoke skill(name="${skillName}") in the current session, then retry.`,
-          );
-        }
-      }
-
-      // ── Issue-reporter: payload 를 고쳐 쓰면 표시 증명이 무효가 된다 ──
-      // 마커 파일 방식과 달리 표시 증명은 프로세스 메모리에 있어 위조할 수 없다.
-      // 다만 사용자에게 보여준 뒤 파일만 바꿔치기하는 경로가 남으므로, write 계열
-      // 툴이 표시된 payload 를 건드리면 그 증명을 즉시 폐기한다 (재표시 필요).
-      if (agent === ISSUE_REPORTER_AGENT && (LEADER_FORBIDDEN_TOOLS.has(toolLower) || WRITE_TOOLS.has(toolLower))) {
-        // filePath 인자뿐 아니라 인자 전체를 검사한다 — apply_patch 는 파일 경로가
-        // 패치 본문 안에 들어 있어 filePath 추출로는 대상 파일을 알 수 없다.
-        let argsSerialized = "";
-        try { argsSerialized = JSON.stringify((output as { args?: unknown }).args ?? ""); } catch { /* ignore */ }
-        for (const shownPath of [...issueReporterShownPayloads.keys()]) {
-          if (argsSerialized.includes(shownPath)) {
-            issueReporterShownPayloads.delete(shownPath);
-            logger.debug(`[makdoong2-team hook] issue-reporter 표시 증명 폐기(${input.tool} 이 payload 를 수정): ${shownPath}`);
+          const call = classifyGithubApiCall(cmd);
+          if (call.kind === "forbidden-client") {
+            logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter가 비-curl 클라이언트로 GitHub API 접근. cmd="${redactAndTruncate(cmd, 200)}"`);
+            throw new Error(`[makdoong2-team issue-reporter 게시 게이트] ${call.reason}\n${approveHint}`);
           }
-        }
-      }
-
-      // ── Leader hardrule 1: 직접 파일 편집·생성 금지 (write/edit/patch/multiedit) ──
-      if (agent === "makdoong2-team-leader" && LEADER_FORBIDDEN_TOOLS.has(toolLower)) {
-        logger.error(`[makdoong2-team hook] BLOCKED: team-leader가 ${input.tool} 툴 호출을 시도했다.`);
-        throw new Error(
-          `[makdoong2-team hardrule 1] team-leader는 '${input.tool}' 툴을 직접 호출할 수 없다. ` +
-          "파일 조작은 반드시 dispatch_stage로 engineer/planner/publisher 막둥이에 위임하라. " +
-          "auto_advance_stage의 next_action 필드가 지시하는 dispatch_stage 호출을 우선 실행하라."
-        );
-      }
-
-      if (input.tool !== "bash") return;
-      const cmd = (output.args as { command?: string })?.command ?? "";
-      if (!cmd) return;
-
-      // ── Universal state.json hardrule: agent 식별 결과와 무관하게 차단 ──
-      // sessionAgent map race, primary/outer session, undefined agent 모두 포함.
-      // 차단 대상은 *쓰기* 뿐이다 — 읽기 전용 진단까지 막으면 state_unreadable
-      // 복구 절차(next_action)를 수행할 수단이 사라진다 (issue #5).
-      const stateAccess = classifyStateJsonAccess(cmd);
-      if (stateAccess.kind === "write") {
-        logger.error(
-          `[makdoong2-team hook] BLOCKED: state.json 쓰기 우회 시도 (agent="${agent ?? "unknown"}", ` +
-          `reason="${stateAccess.reason}"). cmd="${redactAndTruncate(cmd, 200)}"`,
-        );
-        throw new Error(buildStateWriteBlockMessage(stateAccess.reason, agent));
-      }
-      if (stateAccess.kind === "read-only") {
-        logger.debug(
-          `[makdoong2-team hook] state.json 읽기 전용 진단 허용 (agent="${agent ?? "unknown"}", ` +
-          `readers=${stateAccess.readers.join(",")})`,
-        );
-      }
-
-      // ── Leader hardrule 2: Bash 우회 파일 쓰기 금지 (state.json 제외) ──
-      if (agent === "makdoong2-team-leader" && looksLikeFileWrite(cmd)) {
-        logger.error(`[makdoong2-team hook] BLOCKED: team-leader가 bash 파일 쓰기 우회를 시도했다. cmd="${redactAndTruncate(cmd, 200)}"`);
-        throw new Error(
-          "[makdoong2-team hardrule 2] team-leader는 bash를 통한 파일 쓰기(>, >>, tee, sed -i, cat > 등)도 금지된다. " +
-          "허용: git commit/push/add/rm, state.sh set. " +
-          "그 외 파일 생성·수정은 dispatch_stage로 engineer 막둥이에 위임하라."
-        );
-      }
-
-      // ── Planner/Analyzer hardrule: READ-ONLY 원칙 - bash 파일 쓰기 일체 금지 ──
-      if ((agent === "makdoong2-planner" || agent === "makdoong2-analyzer") && looksLikeFileWrite(cmd)) {
-        logger.error(
-          `[makdoong2-team hook] BLOCKED: ${agent}가 bash 파일 쓰기를 시도했다 (READ-ONLY 위반). cmd="${redactAndTruncate(cmd, 200)}"`
-        );
-        throw new Error(
-          `[makdoong2-team READ-ONLY hardrule] ${agent}는 Read-only 에이전트로 파일 생성·수정이 일체 금지된다.\n\n` +
-          `**허용**: state.sh set (state.json 마커 기록만)\n` +
-          `**금지**: bash 리디렉션 (>, >>, tee, cat >, echo >, sed -i, awk > 등), Python/Node 인터프리터 파일 쓰기\n\n` +
-          `**올바른 절차**:\n` +
-          `• Planning 단계 (planner): "무엇을 만들지" 결정만. 실제 파일 생성은 implementation 단계로 위임.\n` +
-          `• Analysis 단계 (analyzer): workspace-analysis.json 1개만 생성 가능 (Write 툴 사용).\n` +
-          `• 초안 파일 필요 시: spec을 team-leader에게 반환 → dev 단계에서 engineer가 구현.\n\n` +
-          `**참조**: agents/${agent}.md "금지" 섹션, CLAUDE.md "워크플로우 상태 & 위임 규약"`
-        );
-      }
-
-      // ── Issue-reporter 게시 게이트: GitHub 쓰기는 사용자가 본 원문만 ──
-      // 승인의 의사표시는 opencode permission 프롬프트(세션 내 yes/no)가 받는다.
-      // 여기서 강제하는 것은 나머지 절반 — 형식(검증 가능한 형태)과 표시 증명
-      // (사용자가 본 원문 == 전송되는 원문). 계약 상세: src/issue-reporter-guard.ts 상단.
-      if (agent === ISSUE_REPORTER_AGENT) {
-        const approveHint =
-          `승인 절차: ① payload 를 리터럴 절대경로 JSON 파일로 쓴다 → ② 'cat <payload>' 로 원문 전체를\n` +
-          `세션에 표시한다 (체이닝 없이 단독 실행 — 이 출력이 사용자가 보는 원문이고 훅이 해시를 기록한다) →\n` +
-          `③ 단일 curl -d @<payload> 로 전송하면 opencode 가 사용자에게 게시 여부를 묻는다 (yes/no).\n` +
-          `표시 이후 payload 를 고치면 증명이 무효가 되므로 ②부터 다시 한다.`;
-
-        const call = classifyGithubApiCall(cmd);
-        if (call.kind === "forbidden-client") {
-          logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter가 비-curl 클라이언트로 GitHub API 접근. cmd="${redactAndTruncate(cmd, 200)}"`);
-          throw new Error(`[makdoong2-team issue-reporter 게시 게이트] ${call.reason}\n${approveHint}`);
-        }
-        if (call.kind === "mutation") {
-          if (call.problems.length > 0) {
-            logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 형식 위반: ${call.problems.join(" / ")}`);
-            throw new Error(
-              `[makdoong2-team issue-reporter 게시 게이트] GitHub 쓰기 호출 형식 위반:\n` +
-              call.problems.map((p) => `  - ${p}`).join("\n") + `\n${approveHint}`
-            );
-          }
-          for (const payloadPath of call.payloadPaths) {
-            if (!existsSync(payloadPath)) {
+          if (call.kind === "mutation") {
+            if (call.problems.length > 0) {
+              logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 형식 위반: ${call.problems.join(" / ")}`);
               throw new Error(
-                `[makdoong2-team issue-reporter 게시 게이트] payload 파일이 없다: ${payloadPath}\n${approveHint}`
+                `[makdoong2-team issue-reporter 게시 게이트] GitHub 쓰기 호출 형식 위반:\n` +
+                call.problems.map((p) => `  - ${p}`).join("\n") + `\n${approveHint}`
               );
             }
-            const mismatch = displayMismatch(
-              readFileSync(payloadPath),
-              issueReporterShownPayloads.get(payloadPath),
-            );
-            if (mismatch !== null) {
-              logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 — ${mismatch} (${payloadPath})`);
-              throw new Error(
-                `[makdoong2-team issue-reporter 게시 게이트] ${mismatch}.\n` +
-                `게시될 원문을 세션에 그대로 표시하라 (단독 실행):\n` +
-                `  cat ${payloadPath}\n${approveHint}`
+            for (const payloadPath of call.payloadPaths) {
+              if (!existsSync(payloadPath)) {
+                throw new Error(
+                  `[makdoong2-team issue-reporter 게시 게이트] payload 파일이 없다: ${payloadPath}\n${approveHint}`
+                );
+              }
+              const mismatch = displayMismatch(
+                readFileSync(payloadPath),
+                issueReporterShownPayloads.get(payloadPath),
               );
+              if (mismatch !== null) {
+                logger.error(`[makdoong2-team hook] BLOCKED: issue-reporter GitHub 쓰기 — ${mismatch} (${payloadPath})`);
+                throw new Error(
+                  `[makdoong2-team issue-reporter 게시 게이트] ${mismatch}.\n` +
+                  `게시될 원문을 세션에 그대로 표시하라 (단독 실행):\n` +
+                  `  cat ${payloadPath}\n${approveHint}`
+                );
+              }
+              logger.debug(`[makdoong2-team hook] issue-reporter 표시 증명 확인: ${payloadPath} (hash 일치)`);
             }
-            logger.debug(`[makdoong2-team hook] issue-reporter 표시 증명 확인: ${payloadPath} (hash 일치)`);
           }
         }
-      }
 
-      const hookIssue = sessionIssue.get(sessionID ?? "") ?? "";
-      const r = await runScript(HOOKS_DIR, "guard-bash.sh", cmd, hookIssue);
-      if (!r.ok) {
-        throw new Error((r.stderr || "makdoong2-team gate blocked").trim());
+        const hookIssue = sessionIssue.get(sessionID ?? "") ?? "";
+        const r = await runScript(HOOKS_DIR, "guard-bash.sh", cmd, hookIssue);
+        if (!r.ok) {
+          throw new Error((r.stderr || "makdoong2-team gate blocked").trim());
+        }
+      } catch (err) {
+        // 차단으로 끝난 호출은 실행되지 않았다 → 증분을 되돌린다.
+        if (sessionID) releaseActiveTool(sessionID);
+        throw err;
       }
     },
 
@@ -1377,9 +1493,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
       const afterSessionID = (input as any).sessionID as string | undefined;
       if (afterSessionID) {
         sessionLastToolExecuteAt.set(afterSessionID, Date.now());
-        const cur = sessionActiveToolCount.get(afterSessionID) ?? 0;
-        if (cur <= 1) sessionActiveToolCount.delete(afterSessionID);
-        else sessionActiveToolCount.set(afterSessionID, cur - 1);
+        releaseActiveTool(afterSessionID);
       }
 
       // ── Issue-reporter 표시 증명 기록·소멸 ──
@@ -1631,12 +1745,50 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
             });
           }
 
+          const WORKTREE_ISOLATED_STAGES = new Set<string>([
+            "2_implementation.dev", "2_implementation.test",
+            "3_delivery.commit", "3_delivery.pr", "3_delivery.review",
+          ]);
+          // ── worktree 확정을 가장 먼저 한다 ──
+          // 이 아래의 모든 state.json 접근(done 검사 · hang_history 읽기/쓰기 ·
+          // verify.sh)이 **같은 state.json** 을 봐야 한다. state.sh 의 root() 는
+          // cwd 의 git toplevel 을 쓰므로 cwd 가 갈리면 서로 다른 파일이 된다.
+          //
+          // 종전에는 done 검사와 hang_history 가 `args.worktree`(LLM 이 준 값)로,
+          // 그 뒤의 나머지는 자동 교정된 `effectiveWorktree` 로 돌았다. 교정이
+          // 발동하면 hang_history 만 main repo 쪽 state.json 에 쌓이는데,
+          // finally 의 reverse sync 가 worktree 쪽 사본으로 그 파일을 덮어써
+          // **방금 기록한 hang 이력이 매 시도마다 지워졌다** — 누적 상한
+          // (stall_escalate_threshold) 이 영영 도달하지 못한다.
+          let effectiveWorktree = args.worktree;
+          if (WORKTREE_ISOLATED_STAGES.has(args.target_stage)) {
+            const storedWtR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${".worktree"}`
+              .cwd(args.worktree).quiet().nothrow();
+            const storedWt = storedWtR.stdout?.toString().trim();
+            if (storedWt && storedWt !== "null" && storedWt !== "" && storedWt !== args.worktree) {
+              if (!existsSync(storedWt)) {
+                return JSON.stringify({
+                  ok: false,
+                  error: "worktree_missing",
+                  state_worktree: storedWt,
+                  reason: `state.json worktree "${storedWt}" 가 파일 시스템에 존재하지 않습니다.`,
+                  next_action: `auto_advance_stage(issue: "${args.issue}") 를 호출하면 worktree 를 자동 재생성합니다. dispatch_stage 를 먼저 호출하지 마세요.`,
+                });
+              }
+              logger.warn(
+                `[dispatch_stage] worktree 불일치 감지 — ` +
+                `LLM 인자: "${args.worktree}", state.json: "${storedWt}". 자동 수정.`
+              );
+              effectiveWorktree = storedWt;
+            }
+          }
+
           // done=true stage 재-dispatch 방지 (sub-agent tool-call loop → timeout/empty output).
           // 3_delivery.* 는 hybrid stage (publisher = spec provider) 로 재-진입이 정상 흐름이라 제외.
           const isHybridDelivery = args.target_stage.startsWith("3_delivery.");
           if (!isHybridDelivery) {
             const doneR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${stageJqPath(args.target_stage as Stage) + ".done"}`
-              .cwd(args.worktree).quiet().nothrow();
+              .cwd(effectiveWorktree).quiet().nothrow();
             if (doneR.exitCode === 0 && doneR.stdout?.toString().trim() === "true") {
               return JSON.stringify({
                 ok: false,
@@ -1659,7 +1811,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
           // models does not clear an upstream LLM hang, so the correct action
           // is to stop and escalate to a human.
           const hangCountR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${`${stageJqPath(args.target_stage as Stage)}.hang_history // [] | length`}`
-            .cwd(args.worktree).quiet().nothrow();
+            .cwd(effectiveWorktree).quiet().nothrow();
           const hangCount = hangCountR.exitCode === 0
             ? Number.parseInt(hangCountR.stdout?.toString().trim() ?? "", 10)
             : Number.NaN;
@@ -1683,33 +1835,6 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 `사용자에게 hang_history 를 보고하고 지시를 기다려라. ` +
                 `원인 조사 후 재개하려면 state.sh set 으로 hang_history 를 [] 로 초기화해야 한다.`,
             });
-          }
-
-          const WORKTREE_ISOLATED_STAGES = new Set<string>([
-            "2_implementation.dev", "2_implementation.test",
-            "3_delivery.commit", "3_delivery.pr", "3_delivery.review",
-          ]);
-          let effectiveWorktree = args.worktree;
-          if (WORKTREE_ISOLATED_STAGES.has(args.target_stage)) {
-            const storedWtR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${".worktree"}`
-              .cwd(args.worktree).quiet().nothrow();
-            const storedWt = storedWtR.stdout?.toString().trim();
-            if (storedWt && storedWt !== "null" && storedWt !== "" && storedWt !== args.worktree) {
-              if (!existsSync(storedWt)) {
-                return JSON.stringify({
-                  ok: false,
-                  error: "worktree_missing",
-                  state_worktree: storedWt,
-                  reason: `state.json worktree "${storedWt}" 가 파일 시스템에 존재하지 않습니다.`,
-                  next_action: `auto_advance_stage(issue: "${args.issue}") 를 호출하면 worktree 를 자동 재생성합니다. dispatch_stage 를 먼저 호출하지 마세요.`,
-                });
-              }
-              logger.warn(
-                `[dispatch_stage] worktree 불일치 감지 — ` +
-                `LLM 인자: "${args.worktree}", state.json: "${storedWt}". 자동 수정.`
-              );
-              effectiveWorktree = storedWt;
-            }
           }
 
           const verify = await runScriptCwd(effectiveWorktree, GATES_DIR, "verify.sh", args.issue, args.target_stage);
@@ -2059,7 +2184,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
               });
               const hangJqPath = stageJqPath(args.target_stage as Stage) + ".hang_history";
               const hangR = await $`bash ${SCRIPTS_DIR}/state.sh append ${args.issue} ${hangJqPath} ${hangEntry}`
-                .cwd(args.worktree).quiet().nothrow();
+                .cwd(effectiveWorktree).quiet().nothrow();
               if (hangR.exitCode !== 0) {
                 logger.debug(
                   `[hang_history] append failed issue=${args.issue} stage=${args.target_stage} ` +
@@ -3143,7 +3268,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
             
             if (needsWorktree) {
               const wtResult = await createWorktree($, args.issue, effectiveCwd, {
-                info: (msg: string) => logger.debug(msg),
+                debug: (msg: string) => logger.debug(msg),
                 warn: (msg: string) => logger.warn(msg),
                 error: (msg: string) => logger.error(msg),
               });
@@ -3270,7 +3395,15 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
           const spec = agentForStage(target);
           const isPublisherHybrid = target.startsWith("3_delivery.");
           const dispatchInstruction = isPublisherHybrid
-            ? `당신은 Publisher 하이브리드 stage에 진입했습니다. 지금 즉시 dispatch_stage(issue: "${args.issue}", target_stage: "${target}", worktree: "${resolvedWt}") 툴을 호출해 publisher가 spec을 반환하게 하고, 반환된 spec을 부장님이 직접 git 명령으로 실행하세요. 파일을 직접 편집하지 마세요.`
+            // ⚠ 이 문구는 **폐기된 hybrid 모델**을 지시하면 안 된다. 종전에는
+            // "publisher 가 spec 을 반환하게 하고 반환된 spec 을 부장님이 직접 git
+            // 명령으로 실행하세요" 였는데, team-leader 는 frontmatter 에서
+            // git commit/push/add/rm/worktree 가 **deny** 다. 그리고 leader 하드룰 4 는
+            // "next_action 을 100% 따른다" 이므로, 지시를 따르면 permission 에 막히고
+            // 안 따르면 하드룰 위반이 된다 — 어느 쪽으로도 진행이 안 되는 지시였다.
+            // 현행 모델: publisher 가 worktree 안에서 git 을 직접 실행한다
+            // (CLAUDE.md "파일 편집" 절 · DESIGN §2.2).
+            ? `당신은 3_delivery 단계에 진입했습니다. 지금 즉시 dispatch_stage(issue: "${args.issue}", target_stage: "${target}", worktree: "${resolvedWt}") 툴을 호출하세요. git 명령은 publisher 가 worktree 안에서 직접 실행합니다 — 당신은 git 을 실행하지 마세요(permission deny). 반환값을 확인한 뒤 dispatch_verifier 로 검증하세요.`
             : `당신은 직접 구현하지 마세요. 지금 즉시 dispatch_stage(issue: "${args.issue}", target_stage: "${target}", worktree: "${resolvedWt}") 툴을 호출하세요. Read/Bash 이외의 어떤 도구도 사용하지 말고, 파일을 직접 편집하지 마세요.`;
           
           const workPolicy = await readPolicy(args.issue, resolvedWt);
