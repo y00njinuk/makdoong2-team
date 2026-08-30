@@ -1,12 +1,22 @@
 {
+  "//": "에디터/IDE 가 집는 프로젝트 + `npm run typecheck`. noEmit 이므로 산출물과 무관하다.",
+  "//2": "빌드는 tsconfig.build.json(src→dist) 과 tsconfig.entry.json(진입점 제자리) 두 개가 한다.",
   "compilerOptions": {
     "target": "ES2022",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "bin/*.ts",
+    "scripts/*.mts",
+    "postinstall.mts"
+  ]
 }

@@ -1,5 +1,9 @@
 #!/usr/bin/env node
-// scripts/run-tests.mjs — 전체 테스트를 순차 실행하고 실패를 모아서 보고한다.
+// scripts/run-tests.mts — 전체 테스트를 순차 실행하고 실패를 모아서 보고한다.
+//
+// 산출물은 같은 자리의 scripts/run-tests.mjs 다 (`npm run build:entry`).
+// **새 테스트를 등록할 때는 이 .mts 의 STEPS 를 고친다** — .mjs 는 산출물이라
+// 다음 빌드에 날아간다.
 //
 // 왜 `&&` 체인을 대체하는가:
 //   기존 test:all 은 42개 단계를 `&&` 로 이어 붙였다. 앞 단계가 하나라도 실패하면
@@ -22,123 +26,130 @@
 // 컨테이너로 갈아타면 그 부류가 영구히 은폐된다. 두 번 돌려야 둘 다 잡힌다.
 //
 // 종료 코드: 실패 단계가 하나라도 있으면 1.
-
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-
 const STEPS = [
-  "bash scripts/lint-agent-prompts.sh",
-  "node --test test/shell-portability.test.mjs",
-  "node scripts/smoke-test.mjs",
-  "bash scripts/gate-policy-test.sh",
-  "node test/install-lib.test.mjs",
-  "node test/skill-mcp-registry.test.mjs",
-  "node --test test/state-write-guard.test.mjs",
-  "node --test test/state-access-guard.test.mjs",
-  "node --test test/git-exclude-registration.test.mjs",
-  "node --test test/issue-reporter-guard.test.mjs",
-  "node --test test/release-confirm.test.mjs",
-  "node --test test/state-sh-schema.test.mjs",
-  "node --test test/state-sh-init-review-shape.test.mjs",
-  "node --test test/doctor-phantom-scan.test.mjs",
-  "node --test test/mcp-secret-injector.test.mjs",
-  "node --test test/poll-sub-session.test.mjs",
-  "node --test test/tmux-monitor.test.mjs",
-  "node --test test/gate-already-done-block.test.mjs",
-  "node --test test/gate-hybrid-first-entry.test.mjs",
-  "node --test test/gate-post-pr-verify.test.mjs",
-  "node --test test/gate-post-review-verify.test.mjs",
-  "node --test test/gate-requirements-quality.test.mjs",
-  "node --test test/worktree-sync-gate.test.mjs",
-  "node --test test/planner-prompt-early-exit.test.mjs",
-  "node --test test/plugin-bug-fixes.test.mjs",
-  "node --test test/omo-tmux-detection.test.mjs",
-  "node --test test/empty-output-done-override.test.mjs",
-  "node --test test/tmux-monitor-orphan.test.mjs",
-  "node --test test/poll-permission-scope.test.mjs",
-  "node --test test/dispatch-review-fixes.test.mjs",
-  "node --test test/dispatch-stage-redispatch.test.mjs",
-  "node --test test/dispatch-stage-dev-resume-prompt.test.mjs",
-  "node --test test/logger.test.mjs",
-  "node --test test/redact-secrets.test.mjs",
-  "node --test test/commit-atomicity-verify.test.mjs",
-  "node --test test/verdict-reason-injection.test.mjs",
-  "node --test test/verdict-hash-normalize.test.mjs",
-  "node --test test/session-index-fallback.test.mjs",
-  "node --test test/plugin-exports-shape.test.mjs",
-  "node --test test/stale-worktree-recovery.test.mjs",
-  "node --test test/rollback-commits.test.mjs",
-  "node --test test/config-dir-home-fallback.test.mjs",
-  "node --test test/state-path-migration.test.mjs",
-  "node --test test/state-path-relative.test.mjs",
-  "node --test test/with-fallback-no-bun.test.mjs",
-  "node --test test/doctor-exit-code.test.mjs",
-  "node --test test/example-config-portability.test.mjs",
-  "node --test test/research-fanout.test.mjs"
+    "bash scripts/lint-agent-prompts.sh",
+    "node --test test/shell-portability.test.mjs",
+    "node scripts/smoke-test.mjs",
+    "bash scripts/gate-policy-test.sh",
+    "node test/install-lib.test.mjs",
+    "node test/skill-mcp-registry.test.mjs",
+    "node --test test/state-write-guard.test.mjs",
+    "node --test test/state-access-guard.test.mjs",
+    "node --test test/git-exclude-registration.test.mjs",
+    "node --test test/issue-reporter-guard.test.mjs",
+    "node --test test/release-confirm.test.mjs",
+    "node --test test/state-sh-schema.test.mjs",
+    "node --test test/state-sh-init-review-shape.test.mjs",
+    "node --test test/doctor-phantom-scan.test.mjs",
+    "node --test test/mcp-secret-injector.test.mjs",
+    "node --test test/poll-sub-session.test.mjs",
+    "node --test test/tmux-monitor.test.mjs",
+    "node --test test/gate-already-done-block.test.mjs",
+    "node --test test/gate-hybrid-first-entry.test.mjs",
+    "node --test test/gate-post-pr-verify.test.mjs",
+    "node --test test/gate-post-review-verify.test.mjs",
+    "node --test test/gate-requirements-quality.test.mjs",
+    "node --test test/worktree-sync-gate.test.mjs",
+    "node --test test/planner-prompt-early-exit.test.mjs",
+    "node --test test/plugin-bug-fixes.test.mjs",
+    "node --test test/omo-tmux-detection.test.mjs",
+    "node --test test/empty-output-done-override.test.mjs",
+    "node --test test/tmux-monitor-orphan.test.mjs",
+    "node --test test/poll-permission-scope.test.mjs",
+    "node --test test/dispatch-review-fixes.test.mjs",
+    "node --test test/dispatch-stage-redispatch.test.mjs",
+    "node --test test/dispatch-stage-dev-resume-prompt.test.mjs",
+    "node --test test/logger.test.mjs",
+    "node --test test/redact-secrets.test.mjs",
+    "node --test test/commit-atomicity-verify.test.mjs",
+    "node --test test/verdict-reason-injection.test.mjs",
+    "node --test test/verdict-hash-normalize.test.mjs",
+    "node --test test/session-index-fallback.test.mjs",
+    "node --test test/plugin-exports-shape.test.mjs",
+    "node --test test/stale-worktree-recovery.test.mjs",
+    "node --test test/rollback-commits.test.mjs",
+    "node --test test/config-dir-home-fallback.test.mjs",
+    "node --test test/state-path-migration.test.mjs",
+    "node --test test/state-path-relative.test.mjs",
+    "node --test test/with-fallback-no-bun.test.mjs",
+    "node --test test/doctor-exit-code.test.mjs",
+    "node --test test/example-config-portability.test.mjs",
+    "node --test test/research-fanout.test.mjs",
+    "node --test test/entry-artifacts.test.mjs",
+    "node --test test/state-sh-write-atomicity.test.mjs",
+    "node --test test/gate-locale-and-path.test.mjs",
+    "node --test test/model-policy-parity.test.mjs",
+    // npm install -g 전 구간(pack → 전역 설치 → postinstall → doctor)을 검증하는
+    // 유일한 테스트다. 종전에는 STEPS 에 없어서 `npm test` 가 한 번도 실행하지
+    // 않았고, 그 사이 내용이 현행 구현과 반대로 썩어 있었다 (plugin ref 형식,
+    // secrets.env 처리). 등록하지 않으면 같은 일이 반복된다.
+    "node --test test/agent-permission-keys.test.mjs",
+    "node --test test/gate-missing-state-sentinel.test.mjs",
+    "node --test test/sync-state-commit-detection.test.mjs",
+    "node --test test/skill-tls-config.test.mjs",
+    "node --test test/opencode-json-read.test.mjs",
+    "node scripts/test-postinstall.mjs"
 ];
-
 const CYAN = "\u001b[36m", GREEN = "\u001b[32m", RED = "\u001b[31m", YELLOW = "\u001b[33m", OFF = "\u001b[0m";
-const say = (s) => process.stdout.write(s);
-
+const say = (s) => { process.stdout.write(s); };
 // ── 1단계: 호스트 ──
 const results = [];
 for (const [i, step] of STEPS.entries()) {
-  const [cmd, ...args] = step.split(" ");
-  say(`\n${CYAN}[${String(i + 1).padStart(2)}/${STEPS.length}]${OFF} ${step}\n`);
-  const r = spawnSync(cmd, args, { stdio: "inherit" });
-  results.push({ step, code: r.status === null ? 1 : r.status });
+    const [cmd, ...args] = step.split(" ");
+    say(`\n${CYAN}[${String(i + 1).padStart(2)}/${STEPS.length}]${OFF} ${step}\n`);
+    const r = spawnSync(cmd, args, { stdio: "inherit" });
+    results.push({ step, code: r.status === null ? 1 : r.status });
 }
-
 // ── 2단계: Linux 교차 검증 ──
 /**
  * 컨테이너 교차 검증을 돌려야 하는지 판단한다.
  * @returns {{run: true} | {run: false, reason: string, loud: boolean}}
  */
 function linuxCheckPlan() {
-  // 컨테이너 안에서 다시 컨테이너를 띄우지 않는다 (무한 재귀 방지).
-  if (process.env.MAKDOONG2_IN_TEST_CONTAINER === "1") {
-    return { run: false, reason: "이미 테스트 컨테이너 안", loud: false };
-  }
-  // 호스트가 Linux 면 방금 돌린 것이 곧 Linux 결과다.
-  if (process.platform === "linux") {
-    return { run: false, reason: "호스트가 이미 Linux", loud: false };
-  }
-  if (process.env.MAKDOONG2_SKIP_LINUX_CHECK === "1") {
-    return { run: false, reason: "MAKDOONG2_SKIP_LINUX_CHECK=1", loud: true };
-  }
-  if (!existsSync(join(REPO_ROOT, "Dockerfile.test"))) {
-    return { run: false, reason: "Dockerfile.test 없음 (배포 tarball 등)", loud: false };
-  }
-  if (spawnSync("docker", ["--version"], { stdio: "ignore" }).status !== 0) {
-    return { run: false, reason: "docker 없음 — Linux 전용 회귀를 놓칠 수 있다", loud: true };
-  }
-  return { run: true };
+    // 컨테이너 안에서 다시 컨테이너를 띄우지 않는다 (무한 재귀 방지).
+    if (process.env.MAKDOONG2_IN_TEST_CONTAINER === "1") {
+        return { run: false, reason: "이미 테스트 컨테이너 안", loud: false };
+    }
+    // 호스트가 Linux 면 방금 돌린 것이 곧 Linux 결과다.
+    if (process.platform === "linux") {
+        return { run: false, reason: "호스트가 이미 Linux", loud: false };
+    }
+    if (process.env.MAKDOONG2_SKIP_LINUX_CHECK === "1") {
+        return { run: false, reason: "MAKDOONG2_SKIP_LINUX_CHECK=1", loud: true };
+    }
+    if (!existsSync(join(REPO_ROOT, "Dockerfile.test"))) {
+        return { run: false, reason: "Dockerfile.test 없음 (배포 tarball 등)", loud: false };
+    }
+    if (spawnSync("docker", ["--version"], { stdio: "ignore" }).status !== 0) {
+        return { run: false, reason: "docker 없음 — Linux 전용 회귀를 놓칠 수 있다", loud: true };
+    }
+    return { run: true };
 }
-
 const plan = linuxCheckPlan();
 let linuxResult = null;
-
 if (plan.run) {
-  say(`\n${CYAN}[linux]${OFF} Ubuntu 컨테이너에서 교차 검증 (${process.platform} 호스트)\n`);
-  const r = spawnSync("bash", [join(REPO_ROOT, "scripts", "test-ubuntu.sh")], { stdio: "inherit" });
-  linuxResult = { step: "linux 교차 검증 (scripts/test-ubuntu.sh)", code: r.status === null ? 1 : r.status };
-  results.push(linuxResult);
-} else if (plan.loud) {
-  say(`\n${YELLOW}[linux] 교차 검증 건너뜀 — ${plan.reason}${OFF}\n`);
+    say(`\n${CYAN}[linux]${OFF} Ubuntu 컨테이너에서 교차 검증 (${process.platform} 호스트)\n`);
+    const r = spawnSync("bash", [join(REPO_ROOT, "scripts", "test-ubuntu.sh")], { stdio: "inherit" });
+    linuxResult = { step: "linux 교차 검증 (scripts/test-ubuntu.sh)", code: r.status === null ? 1 : r.status };
+    results.push(linuxResult);
 }
-
+else if (plan.loud) {
+    say(`\n${YELLOW}[linux] 교차 검증 건너뜀 — ${plan.reason}${OFF}\n`);
+}
 // ── 요약 ──
 const failed = results.filter((r) => r.code !== 0);
 say(`\n${"=".repeat(70)}\n`);
 if (failed.length === 0) {
-  const suffix = linuxResult ? " (호스트 + Ubuntu 교차 검증)" : "";
-  say(`${GREEN}[run-tests] ${results.length}개 단계 전부 통과${suffix}${OFF}\n`);
-  process.exit(0);
+    const suffix = linuxResult ? " (호스트 + Ubuntu 교차 검증)" : "";
+    say(`${GREEN}[run-tests] ${results.length}개 단계 전부 통과${suffix}${OFF}\n`);
+    process.exit(0);
 }
 say(`${RED}[run-tests] ${failed.length}/${results.length} 단계 실패:${OFF}\n`);
-for (const f of failed) say(`  ${RED}\u2716${OFF} ${f.step}  (exit ${f.code})\n`);
+for (const f of failed)
+    say(`  ${RED}\u2716${OFF} ${f.step}  (exit ${f.code})\n`);
 process.exit(1);

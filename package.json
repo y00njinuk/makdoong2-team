@@ -65,8 +65,10 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:entry": "tsc -p tsconfig.entry.json && node -e \"import('node:fs').then(({chmodSync})=>{for(const f of ['bin/cli.js','postinstall.mjs','scripts/run-tests.mjs','scripts/test-postinstall.mjs']) chmodSync(f, 0o755)})\"",
+    "typecheck": "tsc -p tsconfig.json",
     "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\"",
-    "prepack": "npm run clean && npm run build",
+    "prepack": "npm run clean && npm run build && node --test test/entry-artifacts.test.mjs",
     "postinstall": "node postinstall.mjs",
     "prepare": "husky install",
     "test": "XDG_CONFIG_HOME=\"$(mktemp -d)\" XDG_CACHE_HOME=\"$(mktemp -d)\" npm run test:all",

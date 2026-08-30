@@ -1,0 +1,15 @@
+# 컴파일 산출물 — 소스는 같은 이름의 .ts / .mts 다. 직접 편집하지 말 것.
+# `npm run build:entry` 가 재생성하고 test/entry-artifacts.test.mjs 가 최신성을 강제한다.
+bin/cli.js                   linguist-generated=true text eol=lf
+postinstall.mjs              linguist-generated=true text eol=lf
+scripts/install-lib.mjs      linguist-generated=true text eol=lf
+scripts/model-policy.mjs     linguist-generated=true text eol=lf
+scripts/smoke-test.mjs       linguist-generated=true text eol=lf
+scripts/run-tests.mjs        linguist-generated=true text eol=lf
+scripts/test-postinstall.mjs linguist-generated=true text eol=lf
+
+# 셸 스크립트는 WSL2/Linux 에서 실행되므로 CRLF 유입을 차단한다.
+*.sh    text eol=lf
+*.mjs   text eol=lf
+*.mts   text eol=lf
+*.ts    text eol=lf

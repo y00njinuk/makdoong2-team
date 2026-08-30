@@ -1,0 +1,39 @@
+{
+  "//": "진입점 전용 빌드 — 소스 옆 제자리(in-place) 출력. bin/cli.ts → bin/cli.js, *.mts → *.mjs.",
+  "//2": "파일이 이동하지 않으므로 package.json 의 bin/postinstall/files/main/exports 계약과",
+  "//3": "pkgRoot 경로 계산(postinstall 은 depth 0, bin/cli 는 depth 1)이 그대로 유효하다.",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "rootDir": ".",
+    "outDir": ".",
+
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "removeComments": false,
+    "newLine": "lf",
+
+    "rewriteRelativeImportExtensions": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": false,
+
+    "noEmitOnError": true
+  },
+  "//files": "include 글로브 금지 — rootDir='.' 이므로 src/**·test/** 가 빨려 들어가면 소스 옆에 .js 가 생성된다.",
+  "files": [
+    "bin/cli.ts",
+    "postinstall.mts",
+    "scripts/install-lib.mts",
+    "scripts/model-policy.mts",
+    "scripts/smoke-test.mts",
+    "scripts/run-tests.mts",
+    "scripts/test-postinstall.mts"
+  ]
+}
