@@ -173,9 +173,32 @@ export function validatePolicies(policies: Record<string, AgentModelPolicy> = PO
         `(allowed: ${[...ALLOWED_PRIMARIES].join(", ")})`
       );
     }
+    // tier 라벨 유효성을 먼저 확인한다. 이것이 없으면 `TIER_RANK["ultra"]` 가
+    // undefined 가 되고 `NaN >= primaryRank` 는 **항상 false** 라서 "폴백은
+    // primary 보다 엄격히 낮아야 한다" 는 불변식이 조용히 통과된다. 실측 확인:
+    // 런타임이 {"tier":"ultra"} 를 그대로 수용했다. 미러(scripts/model-policy.mts)
+    // 는 이 검사를 갖고 있어서 CLI 와 런타임의 판정이 갈렸다.
     const primaryRank = TIER_RANK[policy.primary.tier];
+    if (primaryRank === undefined) {
+      throw new Error(
+        `[model-router] agent '${agent}' primary tier '${policy.primary.tier}' is not a valid tier ` +
+        `(low | medium | high | max)`
+      );
+    }
     for (const fb of policy.fallbacks) {
-      if (TIER_RANK[fb.tier] >= primaryRank) {
+      if (typeof fb.id !== "string" || fb.id.length === 0) {
+        throw new Error(
+          `[model-router] agent '${agent}' fallback 에 모델 id 가 없다: ${JSON.stringify(fb)}`
+        );
+      }
+      const fbRank = TIER_RANK[fb.tier];
+      if (fbRank === undefined) {
+        throw new Error(
+          `[model-router] agent '${agent}' fallback '${fb.id}' tier '${fb.tier}' is not a valid tier ` +
+          `(low | medium | high | max)`
+        );
+      }
+      if (fbRank >= primaryRank) {
         throw new Error(
           `[model-router] agent '${agent}' fallback '${fb.id}' (tier=${fb.tier}) is not ` +
           `strictly lower than primary (tier=${policy.primary.tier})`
@@ -205,10 +228,21 @@ export interface ModelPolicyOverrideInput {
   allowed_primaries?: string[];
 }
 
-/** Normalize a fallback override entry → { id, tier }. */
+/**
+ * Normalize a fallback override entry → { id, tier }.
+ *
+ * 입력은 사용자가 쓴 makdoong2-team.json 이라 타입을 신뢰할 수 없다. 종전 구현은
+ * `entry.id` 를 검사하지 않아서 `fallback_models: [{}]` 이 `{id: undefined,
+ * tier:"low"}` 가 됐고, 그것이 `dist/model-chain-cli.js` 를 거쳐
+ * `scripts/with-fallback.sh` 의 `jq -r ".[$i].id"` 에서 `null` 로 나와
+ * **`opencode --model null`** 이 실행됐다. 미러는 이 경우 throw 한다.
+ */
 function normalizeFallback(entry: FallbackOverride): { id: string; tier: ModelTier } {
   if (typeof entry === "string") return { id: entry, tier: "low" };
-  return { id: entry.id, tier: entry.tier ?? "low" };
+  if (entry && typeof entry === "object" && typeof entry.id === "string" && entry.id.length > 0) {
+    return { id: entry.id, tier: entry.tier ?? "low" };
+  }
+  throw new Error(`[model-router] invalid fallback_models entry: ${JSON.stringify(entry)}`);
 }
 
 /** Deep snapshot of a policies dict so we can roll back on validation failure. */
@@ -259,7 +293,18 @@ export function applyConfigOverrides(
   try {
     // 1) Site-level allow-list extension first, so per-agent overrides can
     //    legitimately reference newly-allowed primaries.
-    if (modelPolicy?.allowed_primaries) {
+    if (modelPolicy?.allowed_primaries !== undefined) {
+      // 종전에는 타입 검사 없이 `.filter` 를 불러서, 문자열 하나를 쓴 설정
+      // (`"allowed_primaries": "provider/model"`) 이 TypeError → 전체 롤백을
+      // 유발했다. 그런데 `npx makdoong2-team validate` 는 같은 설정에 OK ✓ 와
+      // 적용된 체인을 출력했다 — CLI 가 실제로 쓰일 모델을 오보한 것이다.
+      // 이제 두 구현이 같은 메시지로 거부한다.
+      if (!Array.isArray(modelPolicy.allowed_primaries)) {
+        throw new Error(
+          `[model-router] model_policy.allowed_primaries 는 문자열 배열이어야 한다 ` +
+          `(받은 값: ${JSON.stringify(modelPolicy.allowed_primaries)})`
+        );
+      }
       _extraAllowedPrimaries = new Set(modelPolicy.allowed_primaries.filter(s => typeof s === "string" && s.length > 0));
       recomputeAllowedPrimaries();
     }
