@@ -60,6 +60,42 @@ export type GithubApiCall =
   | { kind: "forbidden-client"; reason: string };
 
 const MUTATION_METHOD_RE = /(?:-X|--request)[= ]*['"]?(POST|PATCH|PUT|DELETE)\b/i;
+
+/**
+ * `-X` 없이도 메서드를 바꾸는 curl 옵션.
+ *
+ * `curl -T file URL` 과 `--upload-file` 은 **PUT** 을 보낸다. GitHub API 에는
+ * PUT 쓰기 엔드포인트가 여럿 있으므로(라벨 교체, 파일 내용 등) 이것으로 승인
+ * 없이 게시가 가능했다 — `-X` 도 데이터 플래그도 없어서 분류기가 `read` 로 봤고,
+ * frontmatter 의 `"*-d @/*": "ask"` 패턴에도 매치되지 않아 권한 프롬프트조차
+ * 뜨지 않았다. 승인의 두 조각(의사표시·표시 증명)이 **둘 다** 건너뛰어졌다.
+ *
+ * **번들 단축옵션까지 봐야 한다.** curl 은 인자를 취하는 단축옵션을 번들 안에
+ * 둘 수 있어 `-sT file` = `-s -T file` 이 실제 PUT 을 보낸다 (curl 8.x 실측).
+ * 앞 공백을 요구하고 `-T` 만 보던 종전 정규식은 `-sT`·`-sfT` 를 놓쳤다. 그래서
+ * 정규식이 아니라 토큰 단위로 판정한다: 단일 대시(`--` 아님) 번들에 대문자
+ * T/K 가 들어 있으면 각각 업로드·옵션 파일이다.
+ */
+const LONG_UPLOAD_RE = /(^|\s)--upload-file([= ]|$)/;
+const LONG_CONFIG_RE = /(^|\s)--config([= ]|$)/;
+
+/** 명령의 단일 대시 번들 토큰(`-sT` 등)에 주어진 대문자 플래그가 있는가. */
+function hasShortFlag(cmd: string, letter: "T" | "K"): boolean {
+  for (const tok of cmd.split(/\s+/)) {
+    // 단일 대시 번들만 (`--long` 제외, `-` 만인 것 제외).
+    if (!/^-[A-Za-z]/.test(tok)) continue;
+    if (tok.startsWith("--")) continue;
+    // 번들은 첫 인자-취득 플래그에서 끝난다: `-sTvalue` 의 value 는 인자다.
+    // 대문자 T/K 가 나타나면(그 앞은 전부 인자 없는 단축옵션) 해당 플래그가 있다.
+    const flags = tok.slice(1);
+    const idx = flags.indexOf(letter);
+    if (idx >= 0 && /^[A-Za-z]*$/.test(flags.slice(0, idx))) return true;
+  }
+  return false;
+}
+
+const isUploadFlag = (cmd: string): boolean => LONG_UPLOAD_RE.test(cmd) || hasShortFlag(cmd, "T");
+const isConfigFlag = (cmd: string): boolean => LONG_CONFIG_RE.test(cmd) || hasShortFlag(cmd, "K");
 const DATA_FLAG_RE = /(^|[\s'"])(-d|--data|--data-binary|--data-raw|--data-urlencode|--json|-F|--form)([= ]|$)/;
 const PAYLOAD_AT_RE = /(?:-d|--data|--data-binary|--data-raw|--json)[= ]+@(["']?)([^"'\s]+)\1/g;
 
@@ -105,7 +141,18 @@ export function classifyGithubApiCall(cmd: string): GithubApiCall {
     };
   }
 
-  const hasMutationMethod = MUTATION_METHOD_RE.test(cmd);
+  if (isConfigFlag(cmd)) {
+    return {
+      kind: "forbidden-client",
+      reason: "curl -K / --config 는 옵션을 파일에서 읽어오므로 게시 내용을 명령 문자열로 검증할 수 없다. 금지된다.",
+    };
+  }
+
+  // `-T` / `--upload-file` 은 -X 없이 PUT 을 보낸다 → mutation 으로 분류해야
+  // payload 검증과 승인 게이트를 통과한다. 아래 payload 검사에서 `-d @/절대경로`
+  // 표기가 아니므로 problems 가 채워지고 호출부가 차단한다.
+  const hasUploadFlag = isUploadFlag(cmd);
+  const hasMutationMethod = MUTATION_METHOD_RE.test(cmd) || hasUploadFlag;
   const hasDataFlag = DATA_FLAG_RE.test(cmd);
   // curl -G / --get 은 데이터 플래그를 쿼리 스트링으로 변환하는 GET 이다
   // (중복 검색이 --data-urlencode 와 함께 쓴다). mutation method 가 명시되지
@@ -119,6 +166,13 @@ export function classifyGithubApiCall(cmd: string): GithubApiCall {
 
   for (const m of cmd.matchAll(PAYLOAD_AT_RE)) {
     payloadPaths.push(m[2]);
+  }
+
+  if (hasUploadFlag) {
+    problems.push(
+      "-T / --upload-file 은 -X 없이 PUT 을 보내므로 승인 프롬프트(`-d @/…` 패턴)를 띄우지 못한다. " +
+      "게시는 반드시 `curl -X POST -d @/절대경로` 형태로 한다.",
+    );
   }
 
   if (payloadPaths.length === 0) {

@@ -406,3 +406,58 @@ describe("install/uninstall 왕복 — 신규 산출물", () => {
     }
   });
 });
+
+// ── 승인 게이트 우회 (3차) ──
+//
+// 승인은 두 조각이다: (가) frontmatter 의 `"*-d @/*": "ask"` 가 띄우는 permission
+// 프롬프트, (나) 전송 직전 sha256 표시 증명. 아래 두 형태는 **둘 다** 건너뛰었다.
+describe("classifyGithubApiCall — -X 없이 메서드를 바꾸는 경로", () => {
+  const U = "https://api.github.com/repos/o/r/issues";
+
+  test("curl -T / --upload-file 은 PUT 이다 — read 로 분류되면 안 된다", () => {
+    for (const cmd of [`curl -T /tmp/p.json ${U}`, `curl --upload-file /tmp/p.json ${U}`]) {
+      const r = classifyGithubApiCall(cmd);
+      assert.equal(r.kind, "mutation", `${cmd} 가 read 로 새어나갔다`);
+      assert.ok(r.problems.length > 0, "problems 가 비면 호출부가 차단하지 않는다");
+      assert.ok(
+        r.problems.some((p) => /-T|--upload-file/.test(p)),
+        "차단 사유가 무엇인지 알려줘야 한다",
+      );
+    }
+  });
+
+  test("curl -K / --config 는 옵션을 파일에서 읽어와 게이트를 무력화한다", () => {
+    for (const cmd of [`curl -K /tmp/opts ${U}`, `curl --config /tmp/opts ${U}`]) {
+      assert.equal(classifyGithubApiCall(cmd).kind, "forbidden-client", cmd);
+    }
+  });
+
+  test("번들 단축옵션 -sT / -sK 도 우회되지 않는다 (검토 회귀 — 불완전 수정)", () => {
+    // curl 은 인자를 취하는 단축옵션을 번들 끝에 둘 수 있어 `-sT file` = `-s -T file`
+    // 이 실제 PUT 을 보낸다. 앞 공백 + `-T` 만 보던 정규식이 `-sT`·`-sfT`·`-sK` 를 놓쳤다.
+    for (const cmd of [`curl -sT /tmp/x ${U}`, `curl -sfT /tmp/x ${U}`]) {
+      const r = classifyGithubApiCall(cmd);
+      assert.equal(r.kind, "mutation", `${cmd} 가 read 로 새어나갔다`);
+      assert.ok(r.problems.length > 0);
+    }
+    for (const cmd of [`curl -sK /tmp/o ${U}`, `curl -sfK /tmp/o ${U}`]) {
+      assert.equal(classifyGithubApiCall(cmd).kind, "forbidden-client", cmd);
+    }
+    // T/K 없는 번들은 읽기로 유지 (오탐 방지)
+    assert.equal(classifyGithubApiCall(`curl -sL ${U}`).kind, "read");
+    assert.equal(classifyGithubApiCall(`curl -fsSL ${U}`).kind, "read");
+  });
+
+  test("정상 경로와 읽기는 그대로 동작한다", () => {
+    const ok = classifyGithubApiCall(`curl -X POST -d @/tmp/p.json ${U}`);
+    assert.equal(ok.kind, "mutation");
+    assert.deepEqual(ok.problems, [], "승인 가능한 표기인데 problems 가 생겼다");
+
+    assert.equal(classifyGithubApiCall(`curl -s ${U}`).kind, "read");
+    assert.equal(
+      classifyGithubApiCall(`curl -G --data-urlencode "q=x" https://api.github.com/search/issues`).kind,
+      "read",
+      "중복 검색(-G)은 읽기다",
+    );
+  });
+});
