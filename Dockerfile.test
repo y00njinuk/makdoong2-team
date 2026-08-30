@@ -5,11 +5,15 @@
 # ctype tables, /var symlinks, bash 3.2 vs 5.x), so this image pins the Linux
 # side of that matrix and lets `npm run test:ubuntu` reproduce it from any host.
 #
-# Ubuntu 24.04 ships nodejs 18, below the >=20 required by package.json engines,
-# so Node comes from NodeSource rather than the distro archive.
-FROM ubuntu:24.04
+# 베이스는 **사용자가 실제로 쓰는 환경**에 맞춘다 (GitHub 이슈 #5/#6 의 환경표):
+#   Ubuntu 26.04 LTS (WSL2) · node v24.x · tmux 3.6a · bash 5.3
+# 24.04 로 검증하면 tmux 3.4 / bash 5.2 를 보게 되는데, 배포 대상은 3.6a / 5.3 이라
+# 정작 사용자가 겪는 축이 검증되지 않는다.
+#
+# 26.04 의 distro nodejs 는 22.x 라 사용자의 24.x 와 다르므로 NodeSource 를 쓴다.
+FROM ubuntu:26.04
 
-ARG NODE_MAJOR=22
+ARG NODE_MAJOR=24
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl gnupg git jq tmux bash procps locales \

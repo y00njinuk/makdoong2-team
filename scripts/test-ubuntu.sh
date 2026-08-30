@@ -7,7 +7,7 @@
 #   scripts/test-ubuntu.sh bash            # 컨테이너 셸 진입 (디버깅)
 #
 # 왜 필요한가:
-#   플러그인은 Ubuntu 에서 개발·운영되지만 테스트는 macOS 에서도 자주 돌린다.
+#   플러그인은 Ubuntu(WSL2)에서 운영되지만 테스트는 macOS 에서도 자주 돌린다.
 #   두 환경은 libc ctype 테이블, /var 심볼릭 링크, bash 3.2 vs 5.x 에서 갈리며
 #   실제로 이 세 가지가 모두 테스트 실패로 나타난 적이 있다. 이 스크립트는
 #   Linux 쪽 결과를 어느 호스트에서든 재현할 수 있게 한다.
@@ -32,7 +32,7 @@
 #       독립적이므로 macOS 빌드와 내용이 같다.
 set -euo pipefail
 
-IMAGE="${MAKDOONG2_TEST_IMAGE:-makdoong2-team-test:ubuntu-24.04}"
+IMAGE="${MAKDOONG2_TEST_IMAGE:-makdoong2-team-test:ubuntu-26.04}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORKDIR="$ROOT/.docker-test"
 MODULES="$WORKDIR/node_modules"
