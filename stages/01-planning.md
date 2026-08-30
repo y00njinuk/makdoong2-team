@@ -89,6 +89,8 @@ mkdir -p .makdoong2-team/<이슈키>
 
 파일 (repo/worktree root 기준 상대경로): `.makdoong2-team/<이슈키>/requirements-draft.md`
 
+**초안 파일은 반드시 `write` 툴(filePath 인자)로 생성·갱신한다.** bash 리디렉션(`cat > …`, `printf > …` 등)과 `apply_patch` 는 같은 경로라도 훅이 차단한다 — planner 의 유일한 파일 쓰기 수단은 `write` 다. 이 경로의 `write` 는 planner READ-ONLY 원칙의 명시적 예외이며 훅이 허용한다 (issue #8).
+
 초안 구조:
 ```markdown
 # 요구사항 초안 — <이슈키>

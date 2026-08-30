@@ -134,9 +134,63 @@ describe("gate — requirements 품질 게이트 (ambiguity score + spec_hash)",
       const r = verifyScope(wt, "TEST-1");
       assert.equal(r.code, 2, `expected BLOCKED, got ${r.code}\nstderr=${r.stderr}`);
       assert.match(r.stderr, /마커는 있으나 파일이 없다/);
+      // issue #8: 가장 흔한 원인인 "애초에 생성된 적 없음" 이 안내에서 빠지면
+      // 복구 방향을 동기화 문제로 잘못 잡는다. 원인 3가지를 모두 제시해야 한다.
+      assert.match(r.stderr, /생성된 적 없음/, "미생성 가능성을 안내해야 한다");
+      assert.match(r.stderr, /write 툴/, "초안 생성 수단(write 툴)을 안내해야 한다");
+      assert.match(r.stderr, /동기화 누락/, "동기화 누락 가능성도 유지해야 한다");
+      assert.match(r.stderr, /삭제/, "파일 삭제 가능성도 유지해야 한다");
     } finally {
       rmSync(wt, { recursive: true, force: true });
     }
+  });
+});
+
+describe("규약 정합 — planner READ-ONLY 와 초안 생성 의무가 충돌하지 않는다 (issue #8)", () => {
+  // stages/*.md 는 초안 파일 생성을 의무화하고 stage3-scope-verify.sh 가 하드
+  // 요구하는데, 종전 agents/makdoong2-planner.md 는 planner 를 READ-ONLY 로
+  // 규정하며 "초안 파일 생성이 필요하면 team-leader 에게 반환하라" 고 지시했다.
+  // 두 규약이 동시에 참일 수 없고, 그 시점 파이프라인에는 초안을 대신 만들 역할이
+  // 없어 워크플로가 구조적으로 정지했다. planner 프롬프트는 planning 산출물의
+  // write 툴 예외를 명시해야 한다.
+  const planner = readFileSync(join(REPO_ROOT, "agents/makdoong2-planner.md"), "utf8");
+  const specReq = readFileSync(join(REPO_ROOT, "stages/02-requirements.md"), "utf8");
+  const specPlan = readFileSync(join(REPO_ROOT, "stages/01-planning.md"), "utf8");
+  const pluginSrc = readFileSync(join(REPO_ROOT, "src/opencode-plugin.ts"), "utf8");
+
+  test("planner 프롬프트가 planning 산출물의 write 툴 예외를 명시한다", () => {
+    assert.match(planner, /`write` 툴로 직접 생성/, "write 툴 예외 조항이 없다");
+    assert.match(planner, /READ-ONLY 위반이 아니라/, "예외임을 명시해야 apply_patch·bash 우회 시도가 없어진다");
+  });
+
+  test("planner 프롬프트가 초안 생성을 team-leader/dev 로 위임하라고 지시하지 않는다", () => {
+    assert.ok(
+      !/초안 파일 생성이 필요하면 spec을 team-leader에게 반환/.test(planner),
+      "초안 생성을 dev 로 위임하는 종전 조항이 남아 있다 — 02-requirements.md §2-0b 와 상충",
+    );
+  });
+
+  test("두 stage spec 모두 초안 생성 수단으로 write 툴을 명시한다", () => {
+    for (const [name, text] of [["02-requirements.md", specReq], ["01-planning.md", specPlan]]) {
+      assert.match(text, /`write` 툴(\(filePath 인자\))?로 생성/, `${name} 이 write 툴 사용을 명시하지 않는다`);
+      assert.match(text, /apply_patch/, `${name} 이 apply_patch 차단을 경고하지 않는다`);
+    }
+  });
+
+  test("훅의 planner 허용 패턴이 .makdoong2-team/<이슈키>/*.md|json 을 커버한다", () => {
+    assert.match(
+      pluginSrc,
+      /\["makdoong2-planner",\s*\/\(\^\|\\\/\)\\\.makdoong2-team/,
+      "ARTIFACT_RESTRICTED_AGENTS 의 planner 항목이 .makdoong2-team 산출물을 허용하지 않는다",
+    );
+  });
+
+  test("훅 차단 메시지가 write 툴 재시도 경로를 안내한다", () => {
+    assert.match(
+      pluginSrc,
+      /write.{0,40}툴.{0,80}재시도/s,
+      "차단 메시지가 허용된 write 경로로의 재시도를 안내하지 않으면 planner 가 포기를 택한다 (issue #8)",
+    );
   });
 });
 

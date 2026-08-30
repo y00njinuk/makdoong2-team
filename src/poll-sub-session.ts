@@ -51,7 +51,7 @@ export type PollOutcome =
   | { kind: "empty"; reason: string; polls: number; elapsedMs: number }
   | { kind: "timeout"; polls: number; elapsedMs: number; transientFailures: number }
   | { kind: "aborted"; reason: string; polls: number; elapsedMs: number }
-  | { kind: "permission_stall"; polls: number; elapsedMs: number; stalledMs: number; permissionID?: string; permissionType?: string }
+  | { kind: "permission_stall"; polls: number; elapsedMs: number; stalledMs: number; permissionID?: string; permissionType?: string; permissionPatterns?: string[] }
   // 세션이 등장 후 사라진 케이스 (sessionEverAppeared=true → 3회 연속 status absent + no new messages)
   // 또는 message stall 케이스 (sessionEverAppeared=true → busy 지속 + assistant message 0건 + messageStallThresholdMs 초과).
   // 호출자는 session.abort() 를 "실제 gone" 인 경우에만 skip 해야 한다 (skipSessionOps 플래그로 전달).
@@ -504,6 +504,7 @@ export async function pollSubSession(
             stalledMs,
             permissionID: p.id,
             permissionType: p.permission,
+            permissionPatterns: p.patterns,
           };
         }
       }
@@ -534,13 +535,31 @@ export async function pollSubSession(
       );
     }
     if (hasPendingToolCall && !toolExecuting && stalledMs >= toolCallStallThresholdMs) {
-      err(`[pollSubSession] PERMISSION_STALL session=${sessionId} polls=${pollCount} stalledMs=${stalledMs}`);
+      // abort 전에 대기 중인 permission 요청을 1회 조회해 어떤 카테고리·경로가
+      // 대기 중인지 abort 메시지에 남긴다 (issue #8 제안 2). 종전에는 폴러
+      // 로그만으로 대기 대상을 특정할 수 없어 원인 규명에 코드 독해가 필요했다.
+      // best-effort — client.permission 이 없거나(구버전 SDK) 조회가 실패해도
+      // 종전과 동일한 무정보 outcome 으로 진행한다.
+      let stalledPerm: PermissionRequestLike | undefined;
+      if (client.permission) {
+        const permResult = await client.permission.list().catch(() => null);
+        stalledPerm = (permResult?.data ?? []).find(p => p.sessionID === sessionId);
+      }
+      err(
+        `[pollSubSession] PERMISSION_STALL session=${sessionId} polls=${pollCount} stalledMs=${stalledMs}` +
+        (stalledPerm
+          ? ` pending permissionID=${stalledPerm.id} type=${stalledPerm.permission} patterns=${JSON.stringify(stalledPerm.patterns)}`
+          : ` pending permission unknown (permission.list unavailable or empty)`),
+      );
       await client.session.abort({ path: { id: sessionId } }).catch(() => undefined);
       return {
         kind: "permission_stall",
         polls: pollCount,
         elapsedMs: now() - startTime,
         stalledMs,
+        permissionID: stalledPerm?.id,
+        permissionType: stalledPerm?.permission,
+        permissionPatterns: stalledPerm?.patterns,
       };
     }
 
@@ -799,8 +818,12 @@ export function pollOutcomeToLegacy(
     case "permission_stall":
       return {
         text: outcome.permissionType
-          ? `(permission_stall: sub-agent blocked on ${outcome.permissionType} permission (id=${outcome.permissionID}) — auto-rejected and aborted)`
-          : `(permission_stall: sub-agent tool call stalled for ${outcome.stalledMs}ms — likely waiting for external_directory permission approval that cannot be answered in subagent context)`,
+          ? `(permission_stall: sub-agent blocked on ${outcome.permissionType} permission ` +
+            `(id=${outcome.permissionID}${outcome.permissionPatterns ? `, patterns=${JSON.stringify(outcome.permissionPatterns)}` : ""}) ` +
+            `— cannot be answered in subagent context; aborted after ${outcome.stalledMs}ms)`
+          : `(permission_stall: sub-agent tool call stalled for ${outcome.stalledMs}ms — likely waiting for a permission approval ` +
+            `that cannot be answered in subagent context; pending permission could not be identified (permission.list unavailable or empty). ` +
+            `점검: opencode.json 의 permission.external_directory 시드 존재 여부 (npx makdoong2-team doctor))`,
         success: false,
       };
     case "session_gone":

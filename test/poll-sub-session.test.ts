@@ -816,6 +816,79 @@ describe("pollSubSession — permission_stall detection", () => {
   });
 });
 
+describe("pollSubSession — tool-call stall 이 대기 중인 permission 을 특정한다 (issue #8)", () => {
+  // 종전 fallback stall 경로는 stalledMs 만 남겨서, 어떤 권한 카테고리·경로가
+  // 대기 중이었는지 로그만으로 특정할 수 없었다 (원인 규명에 코드 독해가 필요했다).
+  // abort 직전 1회 permission.list() 를 best-effort 조회해 outcome 에 싣는다.
+  const stallOpts = (clock) => ({
+    ...clock,
+    timeoutMs: 60_000,
+    pollIntervalMs: 2_000,
+    toolCallStallThresholdMs: 6_000,
+    // 주기 permission 체크 경로(5폴마다 auto-allow/reject)가 먼저 발화하면
+    // fallback 경로를 검증할 수 없으므로 사실상 비활성화한다.
+    permissionCheckIntervalPolls: 1_000_000,
+  });
+  const stallScripts = () => ({
+    statusScript: [{}],
+    messagesScript: [
+      [userMsg(), asstPendingToolCall("tc1")],
+      [userMsg(), asstPendingToolCall("tc1")],
+      [userMsg(), asstPendingToolCall("tc1")],
+    ],
+  });
+
+  test("permission.list 에 이 세션의 대기 요청이 있으면 outcome 에 id/type/patterns 를 싣는다", async () => {
+    const clock = fakeClock();
+    const client = makeClient(stallScripts());
+    client.permission = {
+      list: async () => ({
+        data: [
+          { id: "perm_other", sessionID: "other", permission: "bash", patterns: ["*"] },
+          { id: "perm_1", sessionID: "s1", permission: "external_directory", patterns: ["/opt/pkg/stages/**"] },
+        ],
+      }),
+      reply: async () => ({}),
+    };
+    const outcome = await pollSubSession(client, "s1", stallOpts(clock));
+    assert.equal(outcome.kind, "permission_stall");
+    assert.equal(outcome.permissionID, "perm_1", "다른 세션의 요청이 아니라 이 세션의 요청을 골라야 한다");
+    assert.equal(outcome.permissionType, "external_directory");
+    assert.deepEqual(outcome.permissionPatterns, ["/opt/pkg/stages/**"]);
+    const legacy = pollOutcomeToLegacy(outcome);
+    assert.match(legacy.text, /external_directory/);
+    assert.match(legacy.text, /\/opt\/pkg\/stages\/\*\*/, "대기 중이던 경로 패턴이 메시지에 남아야 한다");
+  });
+
+  test("permission.list 가 비어 있으면 종전과 같은 무정보 stall — doctor 점검 안내 포함", async () => {
+    const clock = fakeClock();
+    const client = makeClient(stallScripts());
+    client.permission = { list: async () => ({ data: [] }), reply: async () => ({}) };
+    const outcome = await pollSubSession(client, "s1", stallOpts(clock));
+    assert.equal(outcome.kind, "permission_stall");
+    assert.equal(outcome.permissionID, undefined);
+    assert.equal(outcome.permissionType, undefined);
+    const legacy = pollOutcomeToLegacy(outcome);
+    assert.match(legacy.text, /permission_stall/);
+    assert.match(legacy.text, /doctor/, "대기 대상 미상일 때 external_directory 시드 점검을 안내해야 한다");
+  });
+
+  test("client.permission 부재(구버전 SDK)·list 실패에도 stall 판정 자체는 유지된다", async () => {
+    const clock = fakeClock();
+    const clientNoPerm = makeClient(stallScripts());
+    const outcomeNoPerm = await pollSubSession(clientNoPerm, "s1", stallOpts(clock));
+    assert.equal(outcomeNoPerm.kind, "permission_stall");
+    assert.equal(outcomeNoPerm.permissionID, undefined);
+
+    const clock2 = fakeClock();
+    const clientThrow = makeClient(stallScripts());
+    clientThrow.permission = { list: async () => { throw new Error("boom"); }, reply: async () => ({}) };
+    const outcomeThrow = await pollSubSession(clientThrow, "s1", stallOpts(clock2));
+    assert.equal(outcomeThrow.kind, "permission_stall", "list 실패가 stall 판정을 바꾸면 안 된다");
+    assert.equal(outcomeThrow.permissionID, undefined);
+  });
+});
+
 describe("pollSubSession — nudge mechanism", () => {
   const asstPendingToolCall = (id = "a1") => ({
     info: { id, role: "assistant", finish: { reason: "tool_calls" } },

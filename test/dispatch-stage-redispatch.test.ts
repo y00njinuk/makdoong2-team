@@ -12,6 +12,9 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { shouldEscalateStall } from "../dist/stall-escalation.js";
 import { DEFAULT_STALL_ESCALATE_THRESHOLD } from "../dist/config.js";
 
@@ -364,5 +367,41 @@ describe("dispatch_stage — cross-call stall escalation cap", () => {
     assert.equal(DEFAULT_STALL_ESCALATE_THRESHOLD, 5);
     assert.ok(DEFAULT_STALL_ESCALATE_THRESHOLD > MAX_ATTEMPTS,
       "cap must allow at least one full in-call retry cycle before escalating");
+  });
+});
+
+describe("dispatch_stage — hang_history 리셋은 substage done=true 일 때만 (issue #8)", () => {
+  // 종전 리셋 조건은 "dispatch 정상 반환"(세션이 텍스트를 뱉음)이었다. 그래서
+  // 초안 파일 생성에 실패하고 done=false 로 끝난 세션도 리셋을 유발했고,
+  // 재-dispatch 를 반복하는 동안 이력이 매번 비워져 stall_escalate_threshold 가
+  // 사실상 도달 불가였다 — 실측: done=false 인데 "substage succeeded" 리셋 로그
+  // 3건 (issue #8 부수 관찰). 정적 검사로 소스의 게이트 형태를 고정한다.
+  const pluginSrc = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "opencode-plugin.ts"),
+    "utf8",
+  );
+
+  test("리셋 직전에 .done 마커를 읽어 true 일 때만 리셋한다", () => {
+    const m = pluginSrc.match(/if \(success\) \{[\s\S]{0,2000}?\[hang_history\] reset /);
+    assert.ok(m, "success 분기 안의 hang_history 리셋 블록을 찾을 수 없다");
+    const block = m[0];
+    assert.match(block, /\.done`/, "리셋 전에 .done 마커를 조회해야 한다");
+    assert.match(block, /=== "true"/, "done 값이 정확히 \"true\" 일 때만 리셋해야 한다");
+  });
+
+  test("리셋 경로의 state.json 접근은 effectiveWorktree cwd 를 쓴다", () => {
+    // 한 substage 의 state.json 접근은 전부 같은 cwd(effectiveWorktree)여야 한다.
+    // args.worktree 를 쓰면 자동 교정 발동 시 다른 파일에 리셋이 기록된다 (hardrule).
+    const m = pluginSrc.match(/if \(success\) \{[\s\S]{0,2500}?\n {12}\}\n/);
+    assert.ok(m, "success 분기 블록을 찾을 수 없다");
+    const block = m[0];
+    assert.ok(!/cwd\(args\.worktree\)/.test(block),
+      "hang_history 리셋 블록이 args.worktree cwd 를 쓰고 있다 — effectiveWorktree 로 통일할 것");
+    assert.match(block, /cwd\(effectiveWorktree\)/);
+  });
+
+  test("done=false 리셋 스킵이 로그로 관측 가능하다", () => {
+    assert.match(pluginSrc, /\[hang_history\] reset skipped/,
+      "스킵 경로에 debug 로그가 없으면 임계 미도달 원인을 추적할 수 없다");
   });
 });

@@ -245,7 +245,9 @@ bash <SCRIPTS_DIR>/state.sh set {ISSUE_KEY} '.stages."1_planning".substages."sco
 - 범주 하향(major→minor) — escalation만 허용.
 - 다음 phase 작업(dev/test) 선행.
 - **outer-world 에이전트(Sisyphus / Explore / Librarian / oh-my-openagent 계열 카테고리 등) 위임 금지.** 본 에이전트에는 `Task` 툴이 프론트매터에서 제거되어 있어 물리적으로 스폰 불가. 조사가 필요하면 반드시 `skill_mcp` 로 `jira-research` / `confluence-research` / `bitbucket-research` / `github-oss-research` 스킬만 사용. 이는 planning phase가 makdoong2 서브에이전트 체계 내에서 봉인되어야 한다는 아키텍처 원칙이다.
-- **bash를 통한 파일 쓰기 리디렉션 일체 금지 (READ-ONLY 원칙).** 예외: `<SCRIPTS_DIR>/state.sh set ...` 을 통한 state.json 마커 기록만 허용.
+- **bash를 통한 파일 쓰기 리디렉션 일체 금지 (READ-ONLY 원칙).** 예외 2가지:
+  - `<SCRIPTS_DIR>/state.sh set ...` 을 통한 state.json 마커 기록.
+  - **planning 산출물(`.makdoong2-team/<이슈키>/` 아래 `*.md`·`*.json` — `requirements-draft.md` 등)은 `write` 툴로 직접 생성·갱신한다.** 이것은 READ-ONLY 위반이 아니라 stage spec(02-requirements.md §2-0b)이 부과한 **의무**이며, 훅도 이 경로의 `write` 를 명시적으로 허용한다. 단 같은 경로라도 bash 리디렉션·`apply_patch` 는 차단되므로 반드시 `write` 툴을 쓴다.
   - **금지 패턴**: `echo >`, `cat > file`, `cat <<EOF > file`, `tee file`, `sed -i`, `awk ... > file`, `printf > file`, `> file`, `>> file`, `python -c "... open(..., 'w') ..."`, `node -e "... fs.writeFileSync(...) ..."`
   - **위반 예시**:
     ```bash
@@ -264,5 +266,7 @@ bash <SCRIPTS_DIR>/state.sh set {ISSUE_KEY} '.stages."1_planning".substages."sco
     # ✅ 허용: state.json 마커 기록 (state.sh 경유)
     bash <SCRIPTS_DIR>/state.sh set PROJ-123 '.stages."1_planning".substages."scope".done' 'true'
     ```
-  - **위반 결과**: verifier가 `git status`로 untracked 파일 감지 → REJECTED 판정 → 워크플로우 중단
-  - **올바른 절차**: 초안 파일 생성이 필요하면 spec을 team-leader에게 반환하여 dev 단계로 위임한다. Planning 단계는 "무엇을 만들지"만 결정하고, "실제로 만드는 것"은 implementation 단계의 책임이다.
+  - **위반 결과**: 훅이 bash 쓰기·`apply_patch` 를 차단하고, 우회에 성공하더라도 verifier가 `git status`로 untracked 파일 감지 → REJECTED 판정 → 워크플로우 중단
+  - **올바른 절차**:
+    - **planning 산출물(요구사항 초안 등 `.makdoong2-team/<이슈키>/*.md|json`)은 본인이 `write` 툴로 직접 생성한다.** team-leader 반환·dev 위임 대상이 아니다 — 그 시점 파이프라인에는 초안을 대신 만들 역할이 없어 워크플로가 정지한다 (issue #8).
+    - **소스 코드** 파일 생성·변경이 필요하면 spec을 team-leader에게 반환하여 dev 단계로 위임한다. Planning 단계는 "무엇을 만들지"만 결정하고, "실제로 만드는 것"은 implementation 단계의 책임이다.

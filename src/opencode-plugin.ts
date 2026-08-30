@@ -1368,9 +1368,12 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
               `${filePath ? `"${filePath}" 에 ` : ""}쓸 수 없다.\n` +
               (allowed === null
                 ? `이 에이전트는 파일을 쓰지 않는다 — 조사 결과는 최종 응답 텍스트로 반환하라.\n`
-                : `허용된 산출물은 .makdoong2-team/<이슈키>/ 아래의 지정된 파일 하나뿐이다 ` +
-                  `(패턴: ${allowed.source}).\n`) +
-              `코드 변경이 필요하면 그 사실을 산출물/응답에 적고 engineer 단계로 넘겨라.`
+                : `허용된 산출물은 .makdoong2-team/<이슈키>/ 아래의 지정된 파일뿐이다 ` +
+                  `(패턴: ${allowed.source}).\n` +
+                  `그 경로에는 지금 즉시 'write' 툴(filePath 인자)로 쓸 수 있다 — ` +
+                  `bash 리디렉션·apply_patch 우회가 차단된 것이지 산출물 쓰기 자체가 금지된 것이 아니다. ` +
+                  `산출물이 필요하면 포기하지 말고 write 툴로 재시도하라.\n`) +
+              `소스 코드 변경이 필요하면 그 사실을 산출물/응답에 적고 engineer 단계로 넘겨라.`
             );
           }
         }
@@ -2381,13 +2384,32 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
             promptPromise.catch(() => {});
 
             if (success) {
-              const resetPath = `${stageJqPath(args.target_stage as Stage)}.hang_history`;
-              const resetR = await $`bash ${SCRIPTS_DIR}/state.sh set ${args.issue} ${resetPath} ${"[]"}`
-                .cwd(args.worktree).quiet().nothrow();
-              logger.debug(
-                `[hang_history] reset issue=${args.issue} stage=${args.target_stage} ` +
-                `exit=${resetR.exitCode} — substage succeeded`,
-              );
+              // hang_history 리셋 조건은 "dispatch 정상 반환" 이 아니라 "substage
+              // 실제 완료(done=true)" 다. 종전에는 세션이 텍스트만 뱉고 done=false
+              // 로 끝나도 리셋됐고, 재-dispatch 를 반복하는 동안 이력이 매번
+              // 비워져 stall_escalate_threshold 가 사실상 도달 불가였다 (issue #8).
+              // cwd 는 effectiveWorktree — 이 substage 의 다른 state.json 접근과
+              // 같은 파일을 봐야 한다 (args.worktree 를 쓰면 교정 발동 시 갈린다).
+              const resetDonePath = `${stageJqPath(args.target_stage as Stage)}.done`;
+              const resetDoneR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${resetDonePath}`
+                .cwd(effectiveWorktree).quiet().nothrow();
+              const resetDoneValue = resetDoneR.exitCode === 0
+                ? (resetDoneR.stdout?.toString().trim() ?? null)
+                : null;
+              if (resetDoneValue === "true") {
+                const resetPath = `${stageJqPath(args.target_stage as Stage)}.hang_history`;
+                const resetR = await $`bash ${SCRIPTS_DIR}/state.sh set ${args.issue} ${resetPath} ${"[]"}`
+                  .cwd(effectiveWorktree).quiet().nothrow();
+                logger.debug(
+                  `[hang_history] reset issue=${args.issue} stage=${args.target_stage} ` +
+                  `exit=${resetR.exitCode} — substage done=true`,
+                );
+              } else {
+                logger.debug(
+                  `[hang_history] reset skipped issue=${args.issue} stage=${args.target_stage} ` +
+                  `done=${resetDoneValue} — dispatch 는 정상 반환했지만 substage 미완료`,
+                );
+              }
             }
 
             const retryDisallowed =

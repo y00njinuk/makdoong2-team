@@ -33,6 +33,7 @@ import {
   parseJsonc,
   readCachedVersion,
   opencodeCacheRoot,
+  computeExternalDirPaths,
 } from "../scripts/install-lib.mts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -150,7 +151,14 @@ function doDoctor(flags: Flags): never {
    }
 
     const ocPath = join(DEST, "opencode.json");
-    let pluginOk = false, toolsOk = false, ocParseOk = false, ocParseErr = "";
+    // 설치가 심도록 설계된 external_directory 시드. 에이전트 프롬프트가 서브에이전트
+    // 세션에 워크스페이스 외부 경로(<pkgRoot>/stages/*.md 등) 읽기를 지시하므로,
+    // 이 allow 가 없으면 서브에이전트가 응답 불가한 권한 프롬프트에 걸려
+    // PERMISSION_STALL 로 중단된다 (issue #8). 파일 배포만 성공하고 opencode.json
+    // 패치가 남지 않은 부분 설치를 doctor 가 잡아야 한다.
+    const requiredExtDirPaths = computeExternalDirPaths(PKG_ROOT, DEST);
+    let pluginOk = false, toolsOk = false, extDirOk = false, ocParseOk = false, ocParseErr = "";
+    let extDirMissing: string[] = requiredExtDirPaths;
     if (existsSync(ocPath)) {
       try {
         const oc = parseJsonc(readFileSync(ocPath, "utf8"));
@@ -168,12 +176,23 @@ function doDoctor(flags: Flags): never {
         });
         const ocTools = oc.tools;
         toolsOk = !!ocTools && TOOLS.every((t) => ocTools[t] === true);
+        const extDir = oc.permission?.external_directory;
+        extDirMissing = requiredExtDirPaths.filter(
+          (p: string) => !extDir || typeof extDir !== "object" || extDir[p] !== "allow",
+        );
+        extDirOk = extDirMissing.length === 0;
       } catch (e) { ocParseErr = e instanceof Error ? e.message : String(e); }
     }
    check(!existsSync(ocPath) || ocParseOk, "opencode.json parses (JSONC tolerated)",
          `opencode.json is unparseable — install silently skips patching it: ${ocParseErr}`);
-   check(pluginOk, "opencode.json registers the plugin", "opencode.json missing the plugin entry");
-   check(toolsOk, "opencode.json enables custom tools", "opencode.json missing custom tools");
+   check(pluginOk, "opencode.json registers the plugin",
+         "opencode.json missing the plugin entry (run: npx makdoong2-team install)");
+   check(toolsOk, "opencode.json enables custom tools",
+         "opencode.json missing custom tools (run: npx makdoong2-team install)");
+   check(extDirOk, "opencode.json allows external_directory (pkgRoot + configDir)",
+         `opencode.json missing permission.external_directory allow(s): ${extDirMissing.join(", ")} ` +
+         `— sub-agents will hit unanswerable permission prompts and abort with PERMISSION_STALL ` +
+         `(run: npx makdoong2-team install)`);
 
    // The plugin opencode actually loads lives in the `<name>@latest` cache dir,
    // not in the globally installed npm module. When those drift the user runs

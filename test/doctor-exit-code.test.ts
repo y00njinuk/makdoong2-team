@@ -98,3 +98,53 @@ describe("doctor — exit code 회귀 테스트", () => {
     }
   });
 });
+
+describe("doctor — opencode.json external_directory 시드 점검 (issue #8)", () => {
+  // 설치가 심도록 설계된 permission.external_directory allow 가 opencode.json 에
+  // 없으면, 서브에이전트가 워크스페이스 외부 경로(<pkgRoot>/stages/*.md 등)를
+  // 읽는 순간 응답 불가한 권한 프롬프트에 걸려 PERMISSION_STALL 로 중단된다.
+  // 파일 배포만 성공하고 opencode.json 패치가 남지 않은 부분 설치를 종전
+  // doctor 는 정상으로 판정했다 — 이 검사가 그 사각을 메운다.
+  test("(정적) doctor 가 computeExternalDirPaths 기반 external_directory 검사를 수행한다", () => {
+    assert.match(CLI_SRC, /computeExternalDirPaths/,
+      "doctor 가 설치와 같은 함수로 필수 경로를 계산해야 한다 (하드코딩 금지)");
+    assert.match(CLI_SRC, /external_directory/,
+      "doctor 에 permission.external_directory 검사가 없다");
+    assert.match(CLI_SRC, /PERMISSION_STALL/,
+      "누락 시 증상(PERMISSION_STALL)을 안내해야 사용자가 이슈 #8 계열임을 알 수 있다");
+  });
+
+  test("(행동) external_directory 시드가 없으면 doctor 가 exit 1 + 재설치 안내", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "mkd2-doctor-extdir-test-"));
+    try {
+      const installResult = spawnSync(
+        process.execPath,
+        [CLI, "install", "--config", tmp],
+        { encoding: "utf8" }
+      );
+      assert.equal(installResult.status, 0,
+        `install 실패 (exit ${installResult.status}):\n${installResult.stdout}${installResult.stderr}`);
+
+      // 사건 상태 재현: 에이전트 배포는 정상인데 external_directory 시드만 부재.
+      const ocPath = join(tmp, "opencode.json");
+      const oc = JSON.parse(readFileSync(ocPath, "utf8"));
+      assert.ok(oc.permission && oc.permission.external_directory,
+        "전제 확인: install 은 external_directory 를 시드해야 한다");
+      delete oc.permission.external_directory;
+      writeFileSync(ocPath, JSON.stringify(oc, null, 2));
+
+      const doctorResult = spawnSync(
+        process.execPath,
+        [CLI, "doctor", "--config", tmp],
+        { encoding: "utf8" }
+      );
+      const out = (doctorResult.stdout || "") + (doctorResult.stderr || "");
+      assert.equal(doctorResult.status, 1,
+        `external_directory 시드 부재를 doctor 가 잡지 못함 (exit ${doctorResult.status}):\n${out}`);
+      assert.match(out, /external_directory/, "무엇이 빠졌는지 이름을 짚어야 한다");
+      assert.match(out, /makdoong2-team install/, "복구 명령(재설치)을 안내해야 한다");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

@@ -54,8 +54,14 @@ if [ "$SPEC_HASH" != "__MISSING__" ] && [ "$SPEC_HASH" != "null" ] && [ -n "$SPE
     fi
     fail "spec_hash 는 기록됐는데 draft_path 마커도 확정 명세 파일도 없다 — requirements substage 를 재작업하라 (stages/02-requirements.md §2-0, §2-5 9번)"
   fi
+  # "생성된 적 없음" 을 안내에서 빼면 복구 방향을 잘못 잡는다 — 실제로 가장 흔한
+  # 경우인데 종전 메시지는 동기화 누락·삭제만 언급해 리더가 동기화 문제부터
+  # 의심했다 (issue #8).
   [ -f "$ROOT/$DRAFT" ] \
-    || fail "draft_path=${DRAFT} 마커는 있으나 파일이 없다 (기준 경로 ${ROOT}) — worktree 동기화 누락이거나 파일이 삭제됐다"
+    || fail "draft_path=${DRAFT} 마커는 있으나 파일이 없다 (기준 경로 ${ROOT}). 가능한 원인 순서대로:
+  (1) 애초에 생성된 적 없음 — planner 가 마커만 기록하고 파일 생성에 실패한 경우. requirements substage 를 재작업해 write 툴로 초안부터 생성하라 (stages/02-requirements.md §2-0b),
+  (2) worktree 동기화 누락 — 다른 cwd(main repo/worktree)의 같은 상대경로에 파일이 있는지 확인,
+  (3) 파일이 삭제됨 — 삭제 경위 확인 후 requirements 재작업"
   ACTUAL="$(sha256sum "$ROOT/$DRAFT" | cut -d' ' -f1)"
   [ "$ACTUAL" = "$SPEC_HASH" ] \
     || fail "확정 명세 무단 변경 감지 (spec drift) — 동결 후 변경은 사용자 재승인 + spec_hash 재기록 절차만 허용 (stages/02-requirements.md §2-4a)"

@@ -98,6 +98,10 @@ permission:
 
 `MAX_ATTEMPTS` 는 dispatch_stage **호출 1회 내부**의 예산이므로 재호출하면 리셋된다. `hang_history` 누적 상한은 그 리셋을 무력화하기 위한 **호출 간(cross-call) 차단막**이며, 부장님이 우회하면 무한 루프가 된다.
 
+## 서브에이전트 능력을 frontmatter `tools:` 목록으로 판정하지 말 것 (hardrule)
+
+에이전트 정의 파일의 frontmatter `tools:` 는 **whitelist 가 아니다** — 목록에 없는 툴도 permission 설정이 허용하면 실행된다. 실제로 planner frontmatter 에 `Write` 가 없다는 이유로 "planner 는 구조적으로 파일 생성이 불가능하다" 고 단정하고 워크플로를 중단시킨 오진단이 있었다 — 로그상 planner 는 `write` 를 정상 실행해 왔고 차단 이력이 0건이었다 (GitHub issue #8). 서브에이전트가 파일을 못 만들었다면 원인은 **훅 차단 메시지·permission 프롬프트 대기(PERMISSION_STALL)·프롬프트 지시** 중에 있다. frontmatter 를 근거로 사용자에게 에이전트 정의 수정을 요구하지 말고, 실패한 세션의 실제 차단 로그를 근거로 판단하라.
+
 ## verdict 는 셋이다 — REJECTED 와 ERROR 를 절대 섞지 말 것 (hardrule)
 
 `dispatch_verifier` 의 `verdict` 는 `VERIFIED` / `REJECTED` / `ERROR` 세 값이다.

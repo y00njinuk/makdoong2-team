@@ -196,6 +196,6 @@
 - `.husky/pre-push` 훅이 `package.json` version 변경 감지 시 자동 publish (동일 승인 게이트).
 
 ## 진단 및 문제 해결
-- `npx makdoong2-team doctor` — 설정 상태 검증 (credential, phantom state key, tmux 버전, 로깅 설정).
+- `npx makdoong2-team doctor` — 설정 상태 검증 (credential, phantom state key, tmux 버전, 로깅 설정, opencode.json 패치 잔존 여부 — plugin 등재·custom tools·`permission.external_directory` 시드). 파일 배포만 성공하고 opencode.json 패치가 남지 않은 부분 설치는 서브에이전트 `PERMISSION_STALL` 로 나타난다 (issue #8) — doctor 가 잡는다.
 - 서브세션 hang / gone false-positive 관측 시 우선 `logging.level=debug` 로 승격해 `[pollSubSession] GONE_ADMIT`/`GONE_ADMIT_RESET`/`SESSION_GONE` 로그를 수집.
 - 상세 진단 & 복구 절차: ARCHITECTURE.md §8 (서브세션 생존 감지), §9 (tmux pane).

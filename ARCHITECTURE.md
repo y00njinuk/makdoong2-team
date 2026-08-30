@@ -587,6 +587,8 @@ sub-session hang 은 결이 세 가지이고 각각 별도 감지가 필요하�
 
 `busyIndicated = status?.type === "busy" || (!status && messages.length > 0)`. worktree cwd 세션은 status map 에 나타나지 않으므로 loose alive 만으로도 성립한다.
 
+tool-call stall 은 abort 직전에 `client.permission.list()` 를 **1회 best-effort 조회**해 이 세션의 대기 중인 permission 요청(id / 카테고리 / 경로 패턴)을 outcome 과 로그에 싣는다 (issue #8 — 종전에는 `stalledMs` 만 남아 대기 대상을 특정할 수 없었다). 조회 불가·빈 결과면 종전과 동일한 무정보 stall 로 진행하되, 메시지에 `opencode.json` 의 `permission.external_directory` 시드 점검(`npx makdoong2-team doctor`)을 안내한다.
+
 ### 8.1 왜 grace 가 5분인가
 
 이전 로직은 3폴 연속 absent(≈8초)면 gone 으로 판정했다. slow-first-token 모델의 세션 초기화나 tool-heavy substage 중 서버가 잠시 status push 를 멈추는 구간에서 **대량 false positive** 가 났다 — 실측에서 8초 window 하 SESSION_GONE 15건 중 실제로 죽은 세션은 **0건**. 5분으로 올려 tool-heavy 작업의 최대 정적 구간을 흡수한다.
@@ -811,9 +813,11 @@ tmux list-panes -aF '#{pane_id}\t#{@mdn2_session}' | grep ses_XXX
 
 1. `state.sh get <issue> '<S>.hang_history // [] | length'` 로 누적값 조회
 2. `timeout.stall_escalate_threshold` (기본 5) 이상이면 **세션을 만들지 않고** `{ ok: false, escalate: true, stall_streak_exceeded: true, hang_history_len, threshold }` 즉시 반환
-3. substage 성공 시 `hang_history` 를 `[]` 로 리셋 (VERIFIED 시 streak 리셋과 같은 규약)
+3. substage 완료 시 `hang_history` 를 `[]` 로 리셋 (VERIFIED 시 streak 리셋과 같은 규약)
 
-**cwd 정합성 (hardrule)**: `hang_history` 의 read / append / reset 은 **모두 `args.worktree` 컨텍스트**에서 실행해야 한다. `state.sh root()` 가 cwd 의 git toplevel 을 쓰므로, append 만 cwd 없이 실행하면 다른 state.json 에 기록되어 상한 검사가 무력화된다.
+**리셋 조건은 "substage `done=true`" 다 — "dispatch 정상 반환" 이 아니다 (issue #8).** 세션이 텍스트만 뱉고 `done=false` 로 끝나도 리셋되던 종전 조건에서는, 재-dispatch 를 반복하는 동안 이력이 매번 비워져 `stall_escalate_threshold` 가 사실상 도달 불가였다 (실측: `done=false` 인데 "substage succeeded" 리셋 로그 3건). 리셋 직전에 `.done` 마커를 다시 읽어 정확히 `"true"` 일 때만 리셋하고, 아니면 `[hang_history] reset skipped` debug 로그를 남긴다.
+
+**cwd 정합성 (hardrule)**: `hang_history` 의 read / append / reset 은 **모두 `effectiveWorktree` 컨텍스트**에서 실행해야 한다. `state.sh root()` 가 cwd 의 git toplevel 을 쓰므로, 하나라도 다른 cwd(예: LLM 이 준 `args.worktree`)로 실행하면 다른 state.json 에 기록되어 상한 검사가 무력화된다 (§10.2 stall 재디스패치 차단의 전제).
 
 **fail-open**: `shouldEscalateStall` 은 `hangCount` 가 NaN(state 판독 실패)이면 차단하지 않는다. 판독 불가를 차단으로 취급하면 state 를 못 읽는 환경에서 워크플로우 전체가 교착된다.
 
