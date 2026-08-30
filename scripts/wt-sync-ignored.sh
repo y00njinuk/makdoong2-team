@@ -28,7 +28,7 @@ ISSUE="${2:-}"
 [ -d "$WT" ] || { echo "[wt-sync-ignored] worktree 경로 없음: $WT" >&2; exit 1; }
 
 # 메인 repo 식별 (worktree 안/밖 어디서 실행해도 동일)
-MAIN="$(git -C "$WT" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+MAIN="$(git -C "$WT" worktree list --porcelain 2>/dev/null | sed -n 's|^worktree ||p' | head -1)"
 { [ -n "$MAIN" ] && [ -d "$MAIN" ]; } || { echo "[wt-sync-ignored] 메인 repo 식별 실패" >&2; exit 1; }
 if [ "$WT" = "$MAIN" ]; then
   echo "[wt-sync-ignored] worktree와 메인이 동일 경로 — 종료"

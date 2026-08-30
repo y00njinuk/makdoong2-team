@@ -9,7 +9,13 @@ TARGET="${2:?usage: verify.sh <issue> <stage>}"
 
 case "$TARGET" in
   1_planning.jira)
-    JIRA_DONE="$("$HERE/../scripts/state.sh" get "$ISSUE" '.stages."1_planning".substages."jira".done' 2>/dev/null || echo "false")"
+    # state.sh get 은 실패해도 stdout 에 "null" 을 찍으므로 `|| echo` 는 덧붙이기가
+    # 된다 (다른 게이트 q() 와 같은 결함 계열). if 형태로 성공 출력만 취한다 —
+    # 실패(부재/손상)는 "false" 로 두어 first-entry 를 허용한다 (이 검사는 재-dispatch
+    # 차단용이지 존재 검사가 아니다).
+    if ! JIRA_DONE="$("$HERE/../scripts/state.sh" get "$ISSUE" '.stages."1_planning".substages."jira".done' 2>/dev/null)"; then
+      JIRA_DONE="false"
+    fi
     if [ "$JIRA_DONE" = "true" ]; then
       echo "MAKDOONG2-GATE BLOCKED [1_planning.jira]: 이미 done=true 완료됨 — auto_advance_stage 로 다음 단계 진행" >&2
       exit 2

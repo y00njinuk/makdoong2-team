@@ -20,12 +20,22 @@ SCRIPTS="$HERE/../scripts"
 
 fail() { echo "MAKDOONG2-GATE BLOCKED [2_implementation.analysis]: $*" >&2; exit 2; }
 
+# state.sh get 은 실패해도 stdout 에 "null" 한 줄을 찍고 exit 1 한다. 종전
+# `|| echo ""` 은 그 뒤에 빈 줄을 덧붙일 뿐이라 결과가 "null" 이 되고, 아래
+# `[ -n … ]` 존재 검사가 **항상 참**이었다 — state.json 이 없어도 통과한 뒤
+# 3번에서 "scope 미완료 (done=null)" 라는 엉뚱한 진단으로 차단됐다. 실측 확인.
 q() {
-  "$SCRIPTS/state.sh" get "$ISSUE" "$1" 2>/dev/null || echo ""
+  local __v
+  if __v="$("$SCRIPTS/state.sh" get "$ISSUE" "$1" 2>/dev/null)"; then
+    printf "%s" "$__v"
+  else
+    printf "__MISSING__"
+  fi
 }
 
 # 1. state.json 존재 확인
-[ -n "$(q '.issue')" ] || fail "state.json 없음. 1_planning 단계 먼저 완료 필요."
+[ "$(q '.issue')" != "__MISSING__" ] || \
+  fail "state.json 없음 또는 판독 불가. 'bash <SCRIPTS_DIR>/state.sh status ${ISSUE}' 로 확인하고, 없으면 1_planning 단계를 먼저 완료하라."
 
 # 2. 이미 done=true 인 경우 재-dispatch 차단 (SKIP 마킹으로 done 이 이미 세팅되었을 수 있음)
 ANALYSIS_DONE="$(q '.stages."2_implementation".substages."analysis".done')"

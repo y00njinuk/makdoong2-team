@@ -20,12 +20,17 @@ ISSUE="${1:?usage: stage6-post-commit-verify.sh <issue>}"
 P="$("$HERE/../scripts/state.sh" root)/.makdoong2-team/$ISSUE/state.json"
 fail(){ echo "MAKDOONG2-GATE BLOCKED [3_delivery.commit_post]: $1" >&2; exit 2; }
 [ -f "$P" ] || fail "state.json 없음 — planning phase부터 시작하라"
-q(){ "$HERE/../scripts/state.sh" get "$ISSUE" "$1" 2>/dev/null || echo "__MISSING__"; }
+# state.sh get 은 실패해도 stdout 에 "null" 한 줄을 찍고 exit 1 한다 (게이트들이
+# 의존하는 계약). 종전 `|| echo "__MISSING__"` 은 그 위에 한 줄을 **덧붙여**
+# `null\\n__MISSING__` 두 줄을 만들었고, 그 값은 `= "null"` 에도 `= "__MISSING__"`
+# 에도 걸리지 않아 **부재/손상이 "값이 있음" 으로 통과**했다. 실측 확인.
+# if 형태로 성공 출력만 취하고, 실패 시에는 sentinel 하나만 낸다.
+q(){ local __v; if __v="$("$HERE/../scripts/state.sh" get "$ISSUE" "$1" 2>/dev/null)"; then printf "%s" "$__v"; else printf "__MISSING__"; fi; }
 
 assert_worktree_sibling(){
   local wt="$1" main pwt pmain
   [ -d "$wt" ] || fail "worktree 경로가 존재하지 않음: $wt"
-  main="$(git -C "$wt" worktree list --porcelain 2>/dev/null | awk '/^worktree /{print $2; exit}')"
+  main="$(git -C "$wt" worktree list --porcelain 2>/dev/null | sed -n 's|^worktree ||p' | head -1)"
   [ -n "$main" ] || fail "메인 repo 식별 실패"
   [ "$wt" != "$main" ] || fail "worktree가 메인 repo와 동일 경로 — 별도 worktree 필요"
   pwt="$(cd "$(dirname "$wt")" && pwd -P)"
@@ -80,8 +85,17 @@ while IFS= read -r line; do
   - ${SHA} '${SUBJ}' 형식 불일치 (기대: <Type>: ${ISSUE} - <요약>)"
     continue
   fi
-  # wc -m 은 로케일 기준 문자 수 (bash ${#SUBJ} 는 UTF-8 바이트 수로 한글 3배).
-  SUBJ_LEN=$(printf '%s' "$SUBJ" | wc -m)
+  # 제목 길이는 **문자 수**로 센다. 세는 방법이 로케일·구현에 의존하면 안 된다:
+  #   - bash ${#SUBJ} 는 UTF-8 바이트 수라 한글이 3배로 잡힌다.
+  #   - `wc -m` 은 구현마다 다르다 (실측):
+  #       · macOS(BSD wc)          : LC_ALL=C/POSIX 에서 바이트 수를 낸다 (22자 → 36)
+  #       · Ubuntu 26.04(uutils wc): 모든 로케일에서 문자 수를 낸다 (22)
+  #     즉 LANG 이 비면 개발기(macOS)에서만 한글 제목이 3배로 세어져, 17자만 넘어도
+  #     "50자 초과" 로 차단된다. 배포 대상(Ubuntu)에서는 재현되지 않는 비대칭이라
+  #     오히려 발견이 늦는 부류다.
+  # 그래서 UTF-8 연속 바이트(0x80–0xBF)를 지우고 남은 바이트를 센다. 유효한 UTF-8
+  # 에서 이것은 정확히 문자 수와 같고, 로케일에도 wc 구현에도 의존하지 않는다.
+  SUBJ_LEN=$(printf '%s' "${SUBJ}" | LC_ALL=C tr -d '\200-\277' | LC_ALL=C wc -c | tr -d '[:space:]')
   if [ "$SUBJ_LEN" -gt 50 ]; then
     MSG_VIOLATIONS="${MSG_VIOLATIONS}
   - ${SHA} '${SUBJ}' 제목 ${SUBJ_LEN}자 초과 (최대 50자)"

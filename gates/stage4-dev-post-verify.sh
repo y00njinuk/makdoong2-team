@@ -14,8 +14,13 @@ ISSUE="${1:?usage: stage4-dev-post-verify.sh <issue>}"
 
 fail(){ echo "MAKDOONG2-GATE BLOCKED [2_implementation.dev_post]: $1" >&2; exit 2; }
 
-WT="$("$HERE/../scripts/state.sh" get "$ISSUE" '.worktree' 2>/dev/null | tr -d '"' || echo "")"
-[ -n "$WT" ] && [ -d "$WT" ] || fail "worktree 경로 부재 또는 접근 불가: $WT"
+# state.sh get 은 실패해도 stdout 에 "null" 을 찍는다 — 종전 `|| echo ""` 는 그
+# 출력을 지우지 못해 WT 가 리터럴 "null" 이 됐다 (진단 메시지가 엉뚱해진다).
+if ! WT="$("$HERE/../scripts/state.sh" get "$ISSUE" '.worktree' 2>/dev/null | tr -d '"')"; then
+  WT=""
+fi
+[ "$WT" = "null" ] && WT=""
+[ -n "$WT" ] && [ -d "$WT" ] || fail "worktree 경로 부재 또는 접근 불가 (state.json 의 .worktree=${WT:-미기록}) — 'state.sh status $ISSUE' 로 확인하라"
 
 TRACK="$WT/.makdoong2-team/$ISSUE/dev-written-files.txt"
 
@@ -23,10 +28,10 @@ MISSING=""
 if [ -f "$TRACK" ]; then
   while IFS= read -r F; do
     [ -z "$F" ] && continue
-    if git -C "$WT" diff --cached --name-only | grep -qxF "$F"; then
+    if git -C "$WT" -c core.quotePath=false diff --cached --name-only | grep -qxF "$F"; then
       continue
     fi
-    if git -C "$WT" ls-tree -r --name-only HEAD 2>/dev/null | grep -qxF "$F"; then
+    if git -C "$WT" -c core.quotePath=false ls-tree -r --name-only HEAD 2>/dev/null | grep -qxF "$F"; then
       continue
     fi
     if [ ! -e "$WT/$F" ]; then
@@ -37,7 +42,7 @@ if [ -f "$TRACK" ]; then
   done < <(sort -u "$TRACK")
 fi
 
-UNTRACKED="$(git -C "$WT" ls-files --others --exclude-standard 2>/dev/null || true)"
+UNTRACKED="$(git -C "$WT" -c core.quotePath=false ls-files --others --exclude-standard 2>/dev/null || true)"
 
 if [ -n "$MISSING" ] || [ -n "$UNTRACKED" ]; then
   MSG="Engineer 가 편집한 파일이 staging area 에 포함되지 않았다."

@@ -6,7 +6,12 @@ ISSUE="${1:?usage: stage6-commit-verify.sh <issue>}"
 P="$("$HERE/../scripts/state.sh" root)/.makdoong2-team/$ISSUE/state.json"
 fail(){ echo "MAKDOONG2-GATE BLOCKED [3_delivery.commit]: $1" >&2; exit 2; }
 [ -f "$P" ] || fail "state.json 없음 — planning phase부터 시작하라"
-q(){ "$HERE/../scripts/state.sh" get "$ISSUE" "$1" 2>/dev/null || echo "__MISSING__"; }
+# state.sh get 은 실패해도 stdout 에 "null" 한 줄을 찍고 exit 1 한다 (게이트들이
+# 의존하는 계약). 종전 `|| echo "__MISSING__"` 은 그 위에 한 줄을 **덧붙여**
+# `null\\n__MISSING__` 두 줄을 만들었고, 그 값은 `= "null"` 에도 `= "__MISSING__"`
+# 에도 걸리지 않아 **부재/손상이 "값이 있음" 으로 통과**했다. 실측 확인.
+# if 형태로 성공 출력만 취하고, 실패 시에는 sentinel 하나만 낸다.
+q(){ local __v; if __v="$("$HERE/../scripts/state.sh" get "$ISSUE" "$1" 2>/dev/null)"; then printf "%s" "$__v"; else printf "__MISSING__"; fi; }
 U="$(q '.stages."2_implementation".substages."test".unit')"
 case "$U" in
   pass|skip) : ;;
@@ -21,7 +26,13 @@ case "$I" in
 esac
 "$HERE/stage5-coverage-verify.sh" "$ISSUE"
 
-if [ "$(jq -r '.policy.auto_approve."3_delivery.commit"' "$P" 2>/dev/null)" = "false" ]; then
+# HITL 판정 방향은 다른 세 게이트(scope / dev / review)와 **같아야 한다**: 그쪽은
+# 전부 `!= "true"` 로 "명시적으로 auto_approve 하지 않았으면 사람 승인이 필요하다"
+# (fail-closed) 인데, 여기만 `= "false"` 였다. `state.sh init` 이 `"policy": null` 을
+# 심으므로 기본 상태에서 `.policy.auto_approve."3_delivery.commit"` 는 null 이고,
+# 그러면 이 블록 전체가 건너뛰어진다 — **가장 중대한 단계(커밋 생성)의 승인 게이트만
+# 기본값에서 꺼져 있었다**. 방향을 맞춘다.
+if [ "$(q '.policy.auto_approve."3_delivery.commit"')" != "true" ]; then
   # [Check 1] verification_pending=true: 보고서 생성 완료, 사용자 승인 대기 중 → BLOCK
   # (report 존재 여부보다 먼저 확인 — publisher가 보고서를 생성하고 pending을 세팅한 상태)
   if [ "$(q '.stages."3_delivery".substages."commit".verification_pending')" = "true" ]; then
