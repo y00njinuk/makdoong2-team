@@ -1,6 +1,5 @@
 // smoke-test.mts — smoke test for the model-fallback-policy chain logic.
 //
-// 산출물은 같은 자리의 scripts/smoke-test.mjs 다 (`npm run build:entry`).
 //
 // 주의: 이 파일은 **미러(scripts/model-policy.mts)만** 검증한다. 정본
 // src/model-fallback-policy.ts 와의 동치는 test/model-policy-parity.test.ts 가

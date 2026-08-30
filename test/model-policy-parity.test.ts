@@ -37,7 +37,7 @@ import {
   DEFAULT_ALLOWED_PRIMARIES as MIRROR_ALLOWED,
   DEFAULT_POLICIES as MIRROR_POLICIES,
   buildPoliciesFromConfig,
-} from "../scripts/model-policy.mjs";
+} from "../scripts/model-policy.mts";
 
 import {
   DEFAULT_ALLOWED_PRIMARIES as CANON_ALLOWED,

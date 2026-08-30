@@ -109,27 +109,15 @@
 - **3_delivery.commit REJECTED 재작업은 rollback 이 필수**. team-leader 는 git 권한 deny 이므로 rollback 을 대신 수행할 수 없다. publisher 가 재작업 진입 시 프롬프트의 재주입 블록을 감지해 **본인이 직접** `bash <SCRIPTS_DIR>/rollback-commits.sh <이슈키>` 를 최우선으로 실행하도록 makdoong2-publisher.md 에 hardrule 로 명시되어 있다.
 - 재시도 횟수 제한 없음. 단, **동일 REJECTED 사유 (hash 기반) 가 5회 연속 감지되면** dispatch_verifier 응답에 `same_reason_streak_exceeded: true` 가 세팅되어 team-leader 가 무한루프를 중단하고 사용자에게 에스컬레이션.
 
-### 진입점은 TypeScript 소스에서 제자리 컴파일된다 (hardrule)
-- 구현 코드에 손으로 쓴 JavaScript 는 없다. 진입점 7개는 전부 `.ts` / `.mts` 소스이고, `tsc -p tsconfig.entry.json` 이 **같은 디렉토리에 같은 이름의 산출물**을 만든다.
-
-  | 소스 | 산출물 (계약 경로) |
-  |---|---|
-  | `bin/cli.ts` | `bin/cli.js` |
-  | `postinstall.mts` | `postinstall.mjs` |
-  | `scripts/install-lib.mts` | `scripts/install-lib.mjs` |
-  | `scripts/model-policy.mts` | `scripts/model-policy.mjs` |
-  | `scripts/smoke-test.mts` | `scripts/smoke-test.mjs` |
-  | `scripts/run-tests.mts` | `scripts/run-tests.mjs` |
-  | `scripts/test-postinstall.mts` | `scripts/test-postinstall.mjs` |
-
-- **`.js` / `.mjs` 를 직접 편집하지 말 것.** 다음 `npm run build:entry` 가 덮어쓴다. `test/entry-artifacts.test.ts` 가 out-of-tree 재컴파일 후 **바이트 비교**로 최신성을 강제하므로, 산출물만 고치면 테스트가 실패한다.
-- **산출물은 커밋한다.** `dist/` 와 달리 이 7개는 git 에 들어간다 — `package.json` 의 `bin` / `postinstall` 이 가리키는 경로이고, 빌드 전 체크아웃과 `npm i -g <git-url>` 에서도 동작해야 하기 때문이다.
-- 파일이 이동하지 않는 것이 이 방식의 전부다. 그래서 `bin` · `postinstall` · `files` · `main` · `exports` 계약과 pkgRoot 경로 계산(`postinstall` 은 depth 0, `bin/cli` 는 depth 1)이 **한 글자도 바뀌지 않는다**.
-- `tsconfig.entry.json` 은 `include` 글로브를 쓰지 않는다 — `rootDir: "."` 이라 `src/**` 나 `test/**` 가 딸려 들어오면 **소스 옆에 `.js` 가 생성된다**. 반드시 `files` 명시 목록만 쓴다.
-- `npm run typecheck` (루트 `tsconfig.json`, `noEmit`) 가 `src/` + 진입점 전체를 함께 검사한다. 빌드는 `build`(src→dist) 와 `build:entry`(진입점 제자리) 두 개다.
-- **`scripts/model-policy.mts` 는 import 0개 · Node 내장 0개 · `process` 0개를 유지한다.** `bin/cli.js` 가 `dist/` 없이 도는 성질의 근거다 — doctor/validate 는 설치가 깨졌을 때 쓰는 진단 도구인데, 정본(`src/model-fallback-policy.ts`)은 `logger → config` 를 끌고 오고 `config` 는 진단 대상 설정(`logging.mode="file"` + path 누락)에서 throw 한다. 정본과의 동치는 `test/model-policy-parity.test.ts` 가 매트릭스로 강제한다 (주석이 아니라 테스트다 — 종전에는 주석만 있었고 로직은 초기 커밋부터 갈려 있었다).
+### 진입점: 소스는 커밋, 산출물은 커밋하지 않는다 (hardrule)
+- 저장소에는 **소스만 커밋한다.** 진입점은 `.ts`/`.mts` 소스이고(`bin/cli.ts` · `postinstall.mts` · `scripts/install-lib.mts` · `scripts/model-policy.mts`), 컴파일된 `.js`/`.mjs` 는 **`.gitignore` 대상 — repo 에 넣지 않는다.** `dist/`(플러그인 빌드)도 마찬가지다. 소스에서 생성 가능한 것은 소스만 남긴다.
+- **개발·테스트는 소스를 직접 실행한다.** repo 는 `node_modules` 밖이므로 node ≥ 22.18 의 type-stripping 이 `.ts`/`.mts` 를 그대로 실행한다 — `node bin/cli.ts`, `node scripts/run-tests.mts`, `node --test test/*.ts`. 진입점 빌드 없이 `npm test` 가 돈다 (테스트 러너·CLI 테스트가 소스를 스폰).
+- **배포 tarball 에는 빌드된 `.js` 가 들어간다.** node 는 `node_modules/` 안의 `.ts` 를 **type-stripping 하지 않는다**(`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`). 그래서 설치된 패키지의 `bin`(`bin/cli.js`)·`postinstall`(`node postinstall.mjs`)은 실행 가능한 JS 여야 한다. `prepack` 이 `npm run build`(dist 플러그인) + `npm run build:entry`(진입점 4개, `tsconfig.entry.json`)로 만들어 tarball 에 담는다.
+- 정리하면 실행에 필요한 `.js` 의 출처는 두 가지이고 **둘 다 소스에서 생성되며 커밋되지 않는다**: (a) 플러그인 = `dist/` (`tsc -p tsconfig.build.json`), (b) 진입점 = `bin/cli.js`·`*.mjs` (`tsconfig.entry.json`, tarball 전용).
+- `tsconfig.entry.json` 은 `rootDir="."`·`outDir="."` 로 **소스 옆에 제자리 출력**한다 — 파일이 이동하지 않으므로 `bin`·`postinstall`·`files` 계약과 pkgRoot 경로 계산(`postinstall` depth 0, `bin/cli` depth 1)이 그대로 유효하다. `include` 글로브 금지(`files` 명시 목록만) — 안 그러면 `src/**`·`test/**` 가 딸려 소스 옆에 `.js` 가 생긴다.
+- **`scripts/model-policy.mts` 는 import 0개 · Node 내장 0개 · `process` 0개를 유지한다.** `bin/cli` 가 `dist/` 없이 도는 진단 성질의 근거다 (정본 `src/model-fallback-policy.ts` 는 `logger→config` 를 끌고 오고 config 는 진단 대상 설정에서 throw). 정본과의 동치는 `test/model-policy-parity.test.ts` 가 강제한다.
+- **실행에는 node ≥ 22.18 이 필요하다** (`engines.node`). CLI·postinstall·테스트가 type-stripping(또는 설치본의 빌드된 JS)에 의존한다. 플러그인 런타임은 opencode(Bun)가 dist 를 로드하므로 무관하다.
 - 상세: ARCHITECTURE.md §12.6 참조.
-
 ### stall 재디스패치 차단 (hardrule)
 - `MAX_ATTEMPTS`(3) 는 `dispatch_stage` **호출 1회 내부** 예산이다. 재호출하면 리셋되므로 이것만으로는 무한 루프를 막지 못한다.
 - 누적 hang 상한은 `hang_history` 길이로 판정한다. `timeout.stall_escalate_threshold`(기본 5) 이상이면 `dispatch_stage` 가 세션을 만들지 않고 `escalate: true` 로 즉시 반환한다.
@@ -173,7 +161,7 @@
 ### 테스트
 - 새 기능은 반드시 `test/*.test.ts` 회귀 케이스 추가. `npm test` 는 `scripts/run-tests.mjs` 로 모든 단위 테스트를 순차 실행하며 pre-push 훅에서 자동 검증.
 - **테스트는 TypeScript(`test/*.test.ts`)이고 node 네이티브 type-stripping 으로 빌드 없이 실행된다** — 그래서 테스트 실행에는 **node ≥ 22.18**(기본 활성) 이 필요하다 (`package.json` `engines.node`). 산출물(bin/cli.js·postinstall.mjs)은 여전히 node 20 에서도 돌지만, 테스트만 이 하한을 요구한다. 클라이언트(node 24)·교차검증 컨테이너(node 24)는 충족한다. 타입 주석은 점진 도입 대상이며 현재는 실행만 보장한다(strict 타입 게이트 없음).
-- 새 테스트 파일은 **`scripts/run-tests.mts`** 의 `STEPS` 에 반드시 등록하고 `npm run build:entry` 로 산출물을 갱신할 것 — `scripts/run-tests.mjs` 는 산출물이라 직접 고치면 다음 빌드에 날아간다. 등록하지 않으면 `npm test` 가 영영 실행하지 않는다 (`gate-requirements-quality.test.ts` 와 `scripts/test-postinstall.mjs` 가 실제로 그 상태였고, 후자는 그 사이 내용까지 현행 구현과 반대로 썩어 있었다).
+- 새 테스트 파일은 **`scripts/run-tests.mts`** 의 `STEPS` 에 반드시 등록할 것 (`.ts` 는 소스이자 실행 대상이라 별도 빌드가 없다). 등록하지 않으면 `npm test` 가 영영 실행하지 않는다 (`gate-requirements-quality.test.ts` 와 `scripts/test-postinstall.mts` 가 실제로 그 상태였다). 테스트도 `test/*.test.ts` 로 node 네이티브 실행되므로 node ≥ 22.18 이 필요하다.
 - 러너는 실패해도 멈추지 않고 끝까지 돌린 뒤 실패 목록을 보고한다. 실패 1건만 보고 끝내지 말고 전체 목록을 확인할 것.
 - 셸 스크립트에서 변수 뒤에 한글이 붙으면 반드시 `${VAR}` 로 감쌀 것. macOS libc 는 UTF-8 로케일에서 멀티바이트 첫 바이트를 alnum 으로 보고해 변수명이 오염된다 (Linux 에서는 재현되지 않음). `test/shell-portability.test.ts` 가 강제한다.
 - Linux 교차 검증은 `npm test` 가 자동 수행한다 (비-Linux 호스트 + docker 사용 가능 시 컨테이너에서 스위트 재실행, 종료 시 컨테이너·데몬 자동 정리). 별도 명령을 칠 필요 없다.

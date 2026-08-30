@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // scripts/run-tests.mts — 전체 테스트를 순차 실행하고 실패를 모아서 보고한다.
 //
-// 산출물은 같은 자리의 scripts/run-tests.mjs 다 (`npm run build:entry`).
 // **새 테스트를 등록할 때는 이 .mts 의 STEPS 를 고친다** — .mjs 는 산출물이라
 // 다음 빌드에 날아간다.
 //
@@ -37,7 +36,7 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const STEPS = [
   "bash scripts/lint-agent-prompts.sh",
   "node --test test/shell-portability.test.ts",
-  "node scripts/smoke-test.mjs",
+  "node scripts/smoke-test.mts",
   "bash scripts/gate-policy-test.sh",
   "node test/install-lib.test.ts",
   "node test/skill-mcp-registry.test.ts",
@@ -83,7 +82,6 @@ const STEPS = [
   "node --test test/doctor-exit-code.test.ts",
   "node --test test/example-config-portability.test.ts",
   "node --test test/research-fanout.test.ts",
-  "node --test test/entry-artifacts.test.ts",
   "node --test test/state-sh-write-atomicity.test.ts",
   "node --test test/gate-locale-and-path.test.ts",
   "node --test test/model-policy-parity.test.ts",
@@ -96,7 +94,7 @@ const STEPS = [
   "node --test test/sync-state-commit-detection.test.ts",
   "node --test test/skill-tls-config.test.ts",
   "node --test test/opencode-json-read.test.ts",
-  "node scripts/test-postinstall.mjs"
+  "node scripts/test-postinstall.mts"
 ];
 
 const CYAN = "\u001b[36m", GREEN = "\u001b[32m", RED = "\u001b[31m", YELLOW = "\u001b[33m", OFF = "\u001b[0m";

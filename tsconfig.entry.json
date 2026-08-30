@@ -1,7 +1,6 @@
 {
-  "//": "진입점 전용 빌드 — 소스 옆 제자리(in-place) 출력. bin/cli.ts → bin/cli.js, *.mts → *.mjs.",
-  "//2": "파일이 이동하지 않으므로 package.json 의 bin/postinstall/files/main/exports 계약과",
-  "//3": "pkgRoot 경로 계산(postinstall 은 depth 0, bin/cli 는 depth 1)이 그대로 유효하다.",
+  "//": "배포 tarball 용 진입점 빌드. 산출물(.js/.mjs)은 .gitignore 대상 — repo 에 커밋하지 않고 prepack/prepare 가 tarball·설치용으로만 만든다.",
+  "//2": "왜 필요한가: node 는 node_modules 안의 .ts 를 type-stripping 하지 않는다(ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING). 설치된 패키지의 bin/postinstall 은 실행 가능한 .js 여야 한다. (개발 중 repo 에서는 소스를 직접 실행하므로 이 빌드가 필요 없다.)",
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",
@@ -10,30 +9,22 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-
     "rootDir": ".",
     "outDir": ".",
-
     "declaration": false,
-    "declarationMap": false,
     "sourceMap": false,
     "removeComments": false,
     "newLine": "lf",
-
     "rewriteRelativeImportExtensions": true,
     "allowImportingTsExtensions": true,
     "resolveJsonModule": false,
-
     "noEmitOnError": true
   },
-  "//files": "include 글로브 금지 — rootDir='.' 이므로 src/**·test/** 가 빨려 들어가면 소스 옆에 .js 가 생성된다.",
+  "//files": "런타임에 실행되는 진입점만. 테스트 러너(run-tests/smoke-test/test-postinstall)는 repo 에서 소스로 실행되므로 빌드 대상이 아니다.",
   "files": [
     "bin/cli.ts",
     "postinstall.mts",
     "scripts/install-lib.mts",
-    "scripts/model-policy.mts",
-    "scripts/smoke-test.mts",
-    "scripts/run-tests.mts",
-    "scripts/test-postinstall.mts"
+    "scripts/model-policy.mts"
   ]
 }

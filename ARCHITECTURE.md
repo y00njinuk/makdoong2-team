@@ -120,11 +120,8 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 | `stages/*.md` | substage 명세 (진입 게이트, 절차, self_check) |
 | `scripts/model-policy.mts` | `model-fallback-policy.ts` 의 순수 미러 (CLI·smoke-test 공유, import 0개) |
 | `scripts/install-lib.mts` | 배포 로직 (`bin/cli` + `postinstall` 공유) |
-| `bin/cli.ts` | `install` / `uninstall` / `doctor` / `validate`. 무의존 Node ESM |
+| `bin/cli.ts` | `install` / `uninstall` / `doctor` / `validate`. node 네이티브 실행(소스) |
 
-> 위 세 파일의 **실행 대상은 같은 이름의 `.js` / `.mjs` 산출물**이다 (`bin/cli.js`,
-> `scripts/install-lib.mjs`, `scripts/model-policy.mjs`). `tsc -p tsconfig.entry.json`
-> 이 소스 옆 제자리에 만들고 커밋한다 — §12.6 참조.
 
 ---
 
@@ -910,55 +907,45 @@ pre-push 훅 경로는 STEP 1 의 while 루프가 stdin 을 EOF 까지 소진하
 
 ---
 
-### 12.6 진입점 빌드 (제자리 컴파일)
+### 12.6 진입점: 소스만 커밋, 산출물은 tarball 전용
 
-빌드는 두 개다. 목적이 다르고 서로 간섭하지 않는다.
+저장소에는 **소스만 커밋한다.** 컴파일 산출물(`dist/**` 와 진입점 `.js/.mjs`)은
+전부 `.gitignore` 대상이고, 빌드는 필요할 때(개발 타입검사·배포)만 돈다.
 
-| tsconfig | 입력 | 출력 | 목적 |
-|---|---|---|---|
-| `tsconfig.build.json` | `src/**/*.ts` | `dist/**` | 플러그인 런타임 (`main` / `exports`) |
-| `tsconfig.entry.json` | 명시된 7개 진입점 | **같은 디렉토리** | `bin` / `postinstall` / 개발 도구 |
-| `tsconfig.json` | 위 둘 전부 | (`noEmit`) | 에디터 + `npm run typecheck` |
+| 대상 | tsconfig | 출력 | git | 언제 빌드 |
+|---|---|---|---|---|
+| 플러그인 | `tsconfig.build.json` (src→dist) | `dist/**` | ignore | `npm run build` (테스트·prepack) |
+| 진입점 4개 | `tsconfig.entry.json` (제자리) | `bin/cli.js`·`postinstall.mjs`·`scripts/{install-lib,model-policy}.mjs` | ignore | `npm run build:entry` (prepack) |
+| 타입검사 | `tsconfig.json` (noEmit) | — | — | `npm run typecheck` |
 
-#### 왜 제자리 출력인가
+#### 개발은 소스, 배포는 빌드
 
-진입점을 `dist/` 로 옮기면 **경로 계약이 통째로 흔들린다**:
+- **개발/테스트**: repo 는 `node_modules` 밖이라 node ≥ 22.18 의 type-stripping 이
+  `.ts/.mts` 를 직접 실행한다 — `node bin/cli.ts`, `node scripts/run-tests.mts`,
+  `node --test test/*.ts`. 진입점 빌드 없이 `npm test` 가 돈다.
+- **배포**: node 는 **`node_modules/` 안의 `.ts` 를 type-stripping 하지 않는다**
+  (`ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`, 실측). 그래서 설치된 패키지의
+  `bin`(`bin/cli.js`)·`postinstall`(`node postinstall.mjs`)은 빌드된 JS 여야 한다.
+  `prepack` 이 `build`(dist) + `build:entry`(진입점)로 만들어 tarball 에 담는다.
 
-- `postinstall.mjs` 는 `pkgRoot = dirname(import.meta.url)` 을 `..` 없이 그대로 쓴다.
-  한 단계라도 깊어지면 agents/skills 복사가 ENOENT 로 죽고, `external_directory` 에
-  `<pkg>/dist/**` 를 심어 gates/stages 읽기를 조용히 차단하며, 캐시 심링크가 dist 를
-  가리켜 플러그인 로드가 깨진다.
-- `package.json` 의 `bin` · `files` · `postinstall` 이 전부 명시 경로다.
-- `bin/cli.js` 를 shim 으로 바꾸면 CLI 가 `dist/` 에 종속된다. doctor/validate 는
-  **설치가 깨졌을 때 실행하는 진단 도구**인데 `dist/` 는 `.gitignore` 대상이다.
+#### 제약과 경계
 
-`.mts → .mjs`, `.ts → .js` 매핑을 이용해 원래 자리에 원래 이름으로 출력하면 이 문제가
-**발생 자체를 하지 않는다**. `bin/cli` 만 `.ts` 이고 나머지가 `.mts` 인 비대칭은 미관이
-아니라 계약의 직접 반영이다 (요구되는 산출물 이름이 `cli.js` / `*.mjs`).
-
-#### 지켜야 할 것
-
-1. **산출물을 직접 편집하지 않는다.** `test/entry-artifacts.test.ts` 가 out-of-tree
-   재컴파일 후 바이트 비교로 최신성을 강제한다. `.gitattributes` 가 `linguist-generated`
-   로 표시해 PR diff 에서 접힌다.
-2. **`tsconfig.entry.json` 에 `include` 글로브를 쓰지 않는다.** `rootDir: "."` 이라
-   `src/**` 나 `test/**` 가 딸려 오면 소스 옆에 `.js` 가 생성된다. `files` 명시 목록만.
-3. **`noEmitOnError: true` 를 끄지 않는다.** 끄면 타입 에러가 나도 emit 되어 깨진
-   산출물이 커밋될 수 있다.
-4. **`package.json` 의 `"type": "module"` 이 이제 컴파일러 계약이다.** 지우면 tsc 가
-   CJS 를 뱉는다. `entry-artifacts` 테스트가 산출물에 `import`/`export` 가 있고
-   `require(` 가 없음을 고정한다.
-5. `prepack` 이 산출물을 **재생성하지 않고 검증**한다 — 낡았으면 패킹이 실패한다.
-   릴리즈가 조용히 stale 산출물을 담는 경로를 원천 차단한다.
+- **실행에 node ≥ 22.18 필요** (`engines.node`) — dev 는 type-stripping, 설치본은
+  빌드된 JS 를 쓰지만 어느 쪽도 node 20 에서 테스트/실행을 보장하지 않는다.
+  클라이언트(node 24)·컨테이너(node 24)는 충족한다.
+- `tsconfig.entry.json` 은 `rootDir="."`·`outDir="."` 제자리 출력 + `files` 명시
+  목록(글로브 금지)이다. 파일이 이동하지 않아 `bin`·`postinstall`·`files` 계약과
+  pkgRoot 경로 계산(`postinstall` depth 0, `bin/cli` depth 1)이 그대로 유효하다.
+- 테스트 러너(`run-tests`·`smoke-test`·`test-postinstall`)는 빌드 대상이 아니다 —
+  repo 에서 `.mts` 소스로 실행된다. tarball 에는 그 소스가 그대로 들어가지만
+  런타임에 실행되는 것은 진입점 4개의 빌드 JS 뿐이다.
 
 #### 미러(`scripts/model-policy.mts`)의 위치
 
-`bin/cli` 가 `dist/` 없이 도는 성질을 유지하기 위해 남긴다. 정본과 동치임은
-`test/model-policy-parity.test.ts` 가 매트릭스(거부 5종 · 수용 5종 · 데이터 테이블
-동일성)로 강제한다. 종전에는 주석만 "일치를 검증한다" 고 주장했고 실제로는 초기
-커밋부터 로직이 갈려 있었다 — CLI 가 `OK ✓` 를 내는 설정에서 런타임은 롤백해
-다른 모델을 쓰는 상태였다.
-
+`bin/cli` 가 `dist/` 없이 도는 진단 성질을 위해 남긴다 — 정본
+(`src/model-fallback-policy.ts`)은 `logger→config` 를 끌고 오고 config 는 진단
+대상 설정에서 throw 한다. 정본과의 동치는 `test/model-policy-parity.test.ts` 가
+매트릭스로 강제한다.
 
 ## 13. 실패 모드와 복구
 
@@ -995,7 +982,7 @@ pre-push 훅 경로는 STEP 1 의 while 루프가 stdin 을 EOF 까지 소진하
 2. `src/opencode-plugin.ts` — `STAGE_ORDER` 배열에 삽입
 3. `stages/NN-<name>.md` 작성
 4. `agents/makdoong2-<role>.md` + `gates/verify.sh` (+ 전용 `stage*-verify.sh`)
-5. `scripts/smoke-test.mts` 미러 테이블 갱신 후 `npm run build:entry` (`.mjs` 는 산출물 — 직접 편집 금지, §12.6)
+5. `scripts/smoke-test.mts` 미러 테이블 갱신 (소스 직접 실행 — 빌드 불필요, §12.6)
 6. README 매핑표 · `CLAUDE.md` 규약 갱신
 
 ### 새 primary 모델 등록

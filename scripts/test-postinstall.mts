@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // scripts/test-postinstall.mts — integration test for npm install -g postinstall hook
 //
-// 산출물은 같은 자리의 scripts/test-postinstall.mjs 다 (`npm run build:entry`).
 //
 // Simulates global install in isolated HOME directory:
 //   1) npm pack → produces tarball

@@ -65,21 +65,21 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "build:entry": "tsc -p tsconfig.entry.json && node -e \"import('node:fs').then(({chmodSync})=>{for(const f of ['bin/cli.js','postinstall.mjs','scripts/run-tests.mjs','scripts/test-postinstall.mjs']) chmodSync(f, 0o755)})\"",
     "typecheck": "tsc -p tsconfig.json",
     "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\"",
-    "prepack": "npm run clean && npm run build && node --test test/entry-artifacts.test.ts",
+    "prepack": "npm run clean && npm run build && npm run build:entry",
     "postinstall": "node postinstall.mjs",
     "prepare": "husky install",
     "test": "XDG_CONFIG_HOME=\"$(mktemp -d)\" XDG_CACHE_HOME=\"$(mktemp -d)\" npm run test:all",
-    "test:all": "npm run build && node scripts/run-tests.mjs",
+    "test:all": "npm run build && node scripts/run-tests.mts",
     "test:install": "node test/install-lib.test.ts",
-    "test:postinstall": "node scripts/test-postinstall.mjs",
+    "test:postinstall": "node scripts/test-postinstall.mts",
     "test:ubuntu": "bash scripts/test-ubuntu.sh",
     "release": "bash scripts/release.sh",
     "release:patch": "bash scripts/release.sh patch",
     "release:minor": "bash scripts/release.sh minor",
-    "release:major": "bash scripts/release.sh major"
+    "release:major": "bash scripts/release.sh major",
+    "build:entry": "tsc -p tsconfig.entry.json && node -e \"import('node:fs').then(({chmodSync})=>{chmodSync('bin/cli.js',0o755)})\""
   },
   "homepage": "https://github.com/y00njinuk/makdoong2-team#readme",
   "bugs": {

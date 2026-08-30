@@ -27,7 +27,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..");
-const CLI = join(REPO_ROOT, "bin", "cli.js");
+const CLI = join(REPO_ROOT, "bin", "cli.ts");
 const CLI_SRC = readFileSync(CLI, "utf8");
 
 describe("doctor — exit code 회귀 테스트", () => {

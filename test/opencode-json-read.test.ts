@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { parseJsoncLoose, loadOpencodeExternalDirAllows } from "../dist/config.js";
-import { parseJsonc } from "../scripts/install-lib.mjs";
+import { parseJsonc } from "../scripts/install-lib.mts";
 
 /** XDG_CONFIG_HOME 을 임시 디렉터리로 돌린 뒤 opencode.json 을 심는다. */
 function withOpencodeJson(text, fn) {

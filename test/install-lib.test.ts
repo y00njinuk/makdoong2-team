@@ -1,4 +1,4 @@
-// test/install-lib.test.ts — Unit tests for scripts/install-lib.mjs
+// test/install-lib.test.ts — Unit tests for scripts/install-lib.mts
 //
 // Uses Node.js built-in test runner (node:test).
 // Run via: node test/install-lib.test.ts
@@ -15,7 +15,7 @@ import {
   computeExternalDirPaths,
   parseJsonc,
   readCachedVersion,
-} from "../scripts/install-lib.mjs";
+} from "../scripts/install-lib.mts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(HERE, "..");
@@ -46,7 +46,7 @@ describe("install-lib", () => {
       assert.ok(existsSync(join(PKG_ROOT, "gates")), "gates exist in pkgRoot");
       assert.ok(existsSync(join(PKG_ROOT, "stages")), "stages exist in pkgRoot");
       assert.ok(existsSync(join(PKG_ROOT, "scripts/state.sh")), "state.sh exists in pkgRoot");
-      assert.ok(existsSync(join(PKG_ROOT, "scripts/model-policy.mjs")), "model-policy.mjs exists in pkgRoot");
+      assert.ok(existsSync(join(PKG_ROOT, "scripts/model-policy.mts")), "model-policy.mts source exists in pkgRoot");
       assert.ok(existsSync(join(PKG_ROOT, "src/opencode-plugin.ts")), "plugin source exists in pkgRoot");
       
       // Config file in configDir

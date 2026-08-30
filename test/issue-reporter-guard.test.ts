@@ -27,7 +27,7 @@ import {
   displayMismatch,
   sha256Hex,
 } from "../dist/issue-reporter-guard.js";
-import { install, uninstall } from "../scripts/install-lib.mjs";
+import { install, uninstall } from "../scripts/install-lib.mts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = join(HERE, "..");

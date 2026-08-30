@@ -7,3 +7,14 @@ dist/
 
 # Host-side scratch for scripts/test-ubuntu.sh (Linux node_modules + container passwd)
 .docker-test/
+
+# 진입점 컴파일 산출물 — repo 에 커밋하지 않는다. 개발 중에는 소스(.ts/.mts)를
+# node type-stripping 으로 직접 실행하고, 배포 tarball 용 .js 는 prepack 의
+# build:entry 가 만든다 (ARCHITECTURE.md §12.6).
+bin/cli.js
+postinstall.mjs
+scripts/install-lib.mjs
+scripts/model-policy.mjs
+scripts/run-tests.mjs
+scripts/smoke-test.mjs
+scripts/test-postinstall.mjs

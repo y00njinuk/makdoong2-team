@@ -1,7 +1,5 @@
 // scripts/install-lib.mts — Reusable install logic for CLI and postinstall.
 //
-// 산출물은 같은 자리의 scripts/install-lib.mjs 다 (`npm run build:entry`).
-// 그 .mjs 를 직접 편집하지 말 것 — 다음 빌드가 덮어쓴다.
 //
 // Extracted from bin/cli doInstall() to enable both:
 //   1) Manual install via `makdoong2-team install` (CLI)

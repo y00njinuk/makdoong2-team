@@ -1,8 +1,6 @@
 #!/usr/bin/env node
 // postinstall.mts — Auto-install on npm install -g
 //
-// 산출물은 같은 자리의 postinstall.mjs 다 (`npm run build:entry`). 그 .mjs 를
-// 직접 편집하지 말 것 — 다음 빌드가 덮어쓴다.
 //
 // **이 파일은 반드시 패키지 루트에 있어야 한다.** pkgRoot = 자기 디렉토리
 // (`..` 없음)가 계약이라, 한 단계라도 깊어지면 agents/skills 복사가 ENOENT 로

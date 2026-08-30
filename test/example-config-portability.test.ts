@@ -16,7 +16,7 @@ import { spawnSync } from "node:child_process";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "..");
 const EXAMPLE_PATH = join(REPO_ROOT, "opencode.json.example");
-const CLI = join(REPO_ROOT, "bin", "cli.js");
+const CLI = join(REPO_ROOT, "bin", "cli.ts");
 
 // (a)와 (c)에서 공유하는 Windows 전용 spawn 마커 목록
 const WINDOWS_MARKERS = [

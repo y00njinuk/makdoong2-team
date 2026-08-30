@@ -7,7 +7,7 @@ import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const CLI = resolve(HERE, "..", "bin", "cli.js");
+const CLI = resolve(HERE, "..", "bin", "cli.ts");
 
 function setupWorktree(contamination) {
   const wt = mkdtempSync(join(tmpdir(), "makdoong2-doctor-test-"));

@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // bin/cli.ts — makdoong2-team installer & doctor.
 //
-// 산출물은 같은 자리의 bin/cli.js 다 (`npm run build:entry`). 그 .js 를 직접
 // 편집하지 말 것 — 다음 빌드가 덮어쓴다.
 //
 // **dist/ 를 import 하지 않는다.** doctor/validate 는 설치가 깨졌을 때 실행하는

@@ -1,7 +1,5 @@
 // model-policy.mts — pure mirror of src/model-fallback-policy.ts.
 //
-// 산출물은 같은 자리의 scripts/model-policy.mjs 다 (`npm run build:entry`).
-// 그 .mjs 를 직접 편집하지 말 것 — 다음 빌드가 덮어쓴다.
 //
 // 왜 미러인가: bin/cli.js 는 dist/ 없이 돌아야 한다. doctor/validate 는 설치가
 // 깨졌을 때 실행하는 진단 도구인데, dist/ 를 import 하면 (a) .gitignore 대상이라
