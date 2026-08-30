@@ -1,4 +1,4 @@
-// test/skill-tls-config.test.mjs — 사내 엔드포인트 접속의 TLS 검증 설정.
+// test/skill-tls-config.test.ts — 사내 엔드포인트 접속의 TLS 검증 설정.
 //
 // ── 결함 ──
 // 4개 스킬 런처(jira / confluence / bitbucket / bamboo)가 전부 무조건

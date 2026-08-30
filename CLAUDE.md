@@ -58,13 +58,13 @@
 
 ### state.json 조작 (hardrule)
 - state.json **쓰기**는 오직 `scripts/state.sh` (root/issue/init/status/get/set/append/migrate) 를 통해서만 한다.
-- **`state.sh` 안에서도 `cmd > tmp && mv tmp target` 관용구를 쓰지 않는다.** bash 의 errexit 는 `&&` 리스트의 왼쪽 피연산자 실패를 면제하므로, jq 가 죽어도 스크립트는 계속 진행해 **성공 메시지를 찍고 exit 0** 한다. 호출자는 마커가 기록됐다고 믿고 넘어가지만 파일은 그대로다 — issue #6-① 부류의 구조적 정지가 여기서 재생산된다. 쓰기는 전부 `write_json_atomic()` 을 거친다: 대상 존재·JSON 유효성 선검사 → **대상과 같은 디렉토리**에 임시 파일(크로스 디바이스 `mv` 방지) → jq 종료코드 명시 검사 → 결과 유효성 확인 → 교체. `test/state-sh-write-atomicity.test.mjs` 가 강제한다.
+- **`state.sh` 안에서도 `cmd > tmp && mv tmp target` 관용구를 쓰지 않는다.** bash 의 errexit 는 `&&` 리스트의 왼쪽 피연산자 실패를 면제하므로, jq 가 죽어도 스크립트는 계속 진행해 **성공 메시지를 찍고 exit 0** 한다. 호출자는 마커가 기록됐다고 믿고 넘어가지만 파일은 그대로다 — issue #6-① 부류의 구조적 정지가 여기서 재생산된다. 쓰기는 전부 `write_json_atomic()` 을 거친다: 대상 존재·JSON 유효성 선검사 → **대상과 같은 디렉토리**에 임시 파일(크로스 디바이스 `mv` 방지) → jq 종료코드 명시 검사 → 결과 유효성 확인 → 교체. `test/state-sh-write-atomicity.test.ts` 가 강제한다.
 - `python -c "... open('state.json', 'w') ..."`, `jq ... > state.json`, `sed -i state.json`, `cp`/`mv`/`rm`, `git add state.json` 등 인터프리터 서브프로세스나 리다이렉트 우회는 `tool.execute.before` 훅이 물리적으로 차단한다.
 - **읽기는 차단하지 않는다.** `ls` / `cat` / `file` / `head` / `stat` / `jq` / `git check-ignore` 로 state.json 을 조회하는 진단 명령은 통과한다. 존재·유효성 확인은 `bash <SCRIPTS_DIR>/state.sh status <이슈키>` 를 쓴다 (exists / readable / phantom_keys / next 를 key=value 로 보고). 읽기까지 막으면 `state_unreadable` 이 안내하는 복구 절차를 수행할 수단이 사라진다.
 - 판정은 `src/state-access-guard.ts` 의 `classifyStateJsonAccess` 하나가 하고, universal state 훅과 leader 하드룰 2 가 **둘 다** 이것을 쓴다. 한쪽만 고치면 leader 는 여전히 막힌다.
 - **리디렉션·세그먼트 판정은 인용 구간을 걷어낸 문자열로 한다.** 따옴표 안의 `>`·`|`·`;` 는 셸 메타문자가 아니다 — `jq -e '… | length >= 1'` 같은 읽기 전용 술어가 "파일 쓰기" 로 차단됐다 (issue #6-③). `stripQuotedSpans()` 는 따옴표 안쪽만 공백으로 덮고 **문자 오프셋을 보존**한다 (`splitUnquotedSegments()` 가 그 위치를 원문에 대응시켜 자른다). 인용을 걷어내면 가려지는 두 경로는 따로 막았다: `sh -c`/`eval` 은 쓰기 지표에 추가, 큰따옴표 안 명령 치환(`$(`·백틱)과 미종료 따옴표는 덮지 않는다.
  애매한 명령은 차단이 기본값이다 — 읽기 오탐에는 `state.sh status` 우회로가 있지만 쓰기 미탐에는 복구 수단이 없다.
-- 서브커맨드 목록을 늘릴 때는 `state.sh` 의 case, `STATE_SH_SUBCOMMANDS`, usage 한 줄을 함께 고친다 (`test/state-access-guard.test.mjs` 가 세 곳의 정합성을 강제한다).
+- 서브커맨드 목록을 늘릴 때는 `state.sh` 의 case, `STATE_SH_SUBCOMMANDS`, usage 한 줄을 함께 고친다 (`test/state-access-guard.test.ts` 가 세 곳의 정합성을 강제한다).
 - 스키마는 항상 hierarchical: `.stages."<PHASE>".substages."<SUBSTAGE>".<field>`. flat 표기(`"<PHASE>.<SUBSTAGE>"`) 금지. `.policy.auto_approve.*` 만 예외적으로 flat 유지.
 - 상세: ARCHITECTURE.md §5.2 (스키마) / §5.5 (읽기 허용 · `state.sh status` · 복구) 참조.
 
@@ -76,7 +76,7 @@
 - 상세: ARCHITECTURE.md §4.2 참조.
 
 ### issue-reporter 스킬 (사용자-전용 트리거 — hardrule)
-- `makdoong2-issue-reporter` 는 **skill + agent + command 3종 세트**다. skill 이름 == command 파일명 == agent 이름이 모두 일치해야 command 가 opencode 의 skill-derived command 를 덮어써 전권(full-permission) 에이전트로 라우팅된다 (`test/issue-reporter-guard.test.mjs` 가 강제).
+- `makdoong2-issue-reporter` 는 **skill + agent + command 3종 세트**다. skill 이름 == command 파일명 == agent 이름이 모두 일치해야 command 가 opencode 의 skill-derived command 를 덮어써 전권(full-permission) 에이전트로 라우팅된다 (`test/issue-reporter-guard.test.ts` 가 강제).
 - **유일한 트리거는 사용자의 `/makdoong2-issue-reporter` 직접 호출.** team-leader 포함 다른 에이전트가 `skill()` 로 자율 로드하면 `tool.execute.before` 훅이 차단한다. 실패를 관측한 에이전트는 사용자에게 커맨드 실행을 안내만 한다.
 - **에이전트는 어떤 목록에도 노출되지 않는다.** `mode: subagent` + `hidden: true` 로 primary 선택 목록과 `@` 멘션·task 자동완성에서 모두 감춘다. 커맨드의 **`subtask: false` 는 필수** — 이게 빠지면 `mode: subagent` 가 자식 세션으로 격리시켜 직전 대화 컨텍스트를 잃는다. 목록에서 감추는 것만으로는 부족해서(`task` 툴은 mode 를 검사하지 않는다) `issueReporterTaskSpawnViolation` 이 spawn 을 런타임 차단한다.
 - **이슈 본문 양식은 SKILL.md §6 이 고정한다.** 필수 섹션 11 + 조건부 섹션 4(`## 관련 관찰` / `## 참고: 의심 근본 원인 코드` / `## 부수 관찰 (minor)` / `## 제안 (참고)`), 제목 규약, 제출 전 자기 점검 11항목. 양식은 발명이 아니라 이슈 #5 가 실제로 갖췄던 구성을 역으로 규약화한 것이다 — 그 이슈의 타임라인·로그 발췌·반복 차단 표·의심 코드 지목이 그대로 v1.7.0 수정에 쓰였다. **자기 점검은 `cat <payload>` 표시 전에 끝낸다** (표시 후 본문을 고치면 표시 증명이 무효가 되어 승인 절차를 처음부터 다시 밟는다). 조건부 섹션은 3장 수집에서 근거가 나왔을 때만 넣고, 근거 없이 채우지 않는다.
@@ -89,18 +89,18 @@
 - **파일 쓰기 권한의 정식 키는 `edit` 다. `write` 키는 존재하지 않는다.** opencode 의 permission 설정 스키마 키 집합은 `read / edit / glob / grep / list / bash / task / external_directory / todowrite / question / webfetch / websearch / lsp / doom_loop / skill` 이고, `write` · `edit` · `apply_patch` 툴이 **전부 `permission: "edit"`** 로 묻는다 (1.18 바이너리에서 확인).
 - 스키마가 `StructWithRest` 라 모르는 키도 **에러 없이 통과**한다 — 그래서 `write:` 로 적은 규칙은 오타처럼 드러나지 않고 조용히 무시되고 기본값 `ask` 로 떨어진다. 실제로 analyzer / publisher / researcher 의 쓰기 제한이 전부 무효 상태였다.
 - **규칙 평가는 `findLast` 다 — 마지막 매치가 이긴다.** 규칙 목록은 설정 객체의 키 순서 그대로 만들어지므로 **넓은 규칙을 위, 좁은 규칙을 아래**에 둔다. `"**/*": "deny"` 를 맨 아래에 두면 그 위의 allow 가 전부 죽는다.
-- frontmatter 는 1차 방어일 뿐이다. 산출물이 제한된 서브에이전트(analyzer / publisher / planner / researcher)는 `src/opencode-plugin.ts` 의 `ARTIFACT_RESTRICTED_AGENTS` 가 경로를 직접 대조해 2차로 막는다 — glob 매칭 의미에 의존하지 않는 결정론적 방어다. 신규 제한 에이전트를 추가하면 두 곳을 함께 고친다. `test/agent-permission-keys.test.mjs` 가 키·순서를 강제한다.
+- frontmatter 는 1차 방어일 뿐이다. 산출물이 제한된 서브에이전트(analyzer / publisher / planner / researcher)는 `src/opencode-plugin.ts` 의 `ARTIFACT_RESTRICTED_AGENTS` 가 경로를 직접 대조해 2차로 막는다 — glob 매칭 의미에 의존하지 않는 결정론적 방어다. 신규 제한 에이전트를 추가하면 두 곳을 함께 고친다. `test/agent-permission-keys.test.ts` 가 키·순서를 강제한다.
 
 ### 게이트의 state 조회 (hardrule)
 - `state.sh get` 은 **실패해도 stdout 에 `null` 한 줄을 찍고 exit 1** 한다 (게이트들이 의존하는 계약). 따라서 `q(){ … || echo "__MISSING__"; }` 는 그 위에 한 줄을 **덧붙여** `null\n__MISSING__` 두 줄을 만들고, 그 값은 `= "null"` 에도 `= "__MISSING__"` 에도 걸리지 않는다 — **부재/손상이 "값이 있음" 으로 통과**한다.
-- 반드시 `if` 형태로 성공 출력만 취한다: `q(){ local __v; if __v="$(… get …)"; then printf "%s" "$__v"; else printf "__MISSING__"; fi; }`. 12개 게이트가 같은 한 줄을 복제하므로 하나만 고치면 안 된다. `test/gate-missing-state-sentinel.test.mjs` 가 강제한다.
+- 반드시 `if` 형태로 성공 출력만 취한다: `q(){ local __v; if __v="$(… get …)"; then printf "%s" "$__v"; else printf "__MISSING__"; fi; }`. 12개 게이트가 같은 한 줄을 복제하므로 하나만 고치면 안 된다. `test/gate-missing-state-sentinel.test.ts` 가 강제한다.
 - **HITL 승인 게이트는 `!= "true"` (fail-closed) 로 쓴다.** `state.sh init` 이 `"policy": null` 을 심으므로 `= "false"` 로 쓰면 기본 상태에서 승인 블록 전체가 건너뛰어진다 — commit 게이트만 그랬고 하필 가장 중대한 단계였다.
 
 ### 다출처 병렬 조사 (dispatch_research)
 - `1_planning.requirements` 의 교차 조사는 `dispatch_research` 툴 1회 호출로 소스별 세션을 병렬 spawn 한다. planner 가 `skill_mcp` 를 순차 호출하지 않는다.
 - 병렬화를 프롬프트가 아니라 플러그인 코드에 둔 이유: "병렬로 호출하라" 는 지시는 모델이 순차로 불러도 감지할 방법이 없다.
 - 부분 성공이 정상 동작이다. 한 소스 실패로 fan-out 전체를 재실행하지 않는다.
-- 순수 계약(소스 레지스트리·정규화·파싱·병합)은 `src/research-fanout.ts`, 회귀는 `test/research-fanout.test.mjs`.
+- 순수 계약(소스 레지스트리·정규화·파싱·병합)은 `src/research-fanout.ts`, 회귀는 `test/research-fanout.test.ts`.
 - 상세: ARCHITECTURE.md §3.6 참조.
 
 ### REJECTED verdict 재작업 flow (dispatch_verifier + dispatch_stage 자동 연계)
@@ -122,12 +122,12 @@
   | `scripts/run-tests.mts` | `scripts/run-tests.mjs` |
   | `scripts/test-postinstall.mts` | `scripts/test-postinstall.mjs` |
 
-- **`.js` / `.mjs` 를 직접 편집하지 말 것.** 다음 `npm run build:entry` 가 덮어쓴다. `test/entry-artifacts.test.mjs` 가 out-of-tree 재컴파일 후 **바이트 비교**로 최신성을 강제하므로, 산출물만 고치면 테스트가 실패한다.
+- **`.js` / `.mjs` 를 직접 편집하지 말 것.** 다음 `npm run build:entry` 가 덮어쓴다. `test/entry-artifacts.test.ts` 가 out-of-tree 재컴파일 후 **바이트 비교**로 최신성을 강제하므로, 산출물만 고치면 테스트가 실패한다.
 - **산출물은 커밋한다.** `dist/` 와 달리 이 7개는 git 에 들어간다 — `package.json` 의 `bin` / `postinstall` 이 가리키는 경로이고, 빌드 전 체크아웃과 `npm i -g <git-url>` 에서도 동작해야 하기 때문이다.
 - 파일이 이동하지 않는 것이 이 방식의 전부다. 그래서 `bin` · `postinstall` · `files` · `main` · `exports` 계약과 pkgRoot 경로 계산(`postinstall` 은 depth 0, `bin/cli` 는 depth 1)이 **한 글자도 바뀌지 않는다**.
 - `tsconfig.entry.json` 은 `include` 글로브를 쓰지 않는다 — `rootDir: "."` 이라 `src/**` 나 `test/**` 가 딸려 들어오면 **소스 옆에 `.js` 가 생성된다**. 반드시 `files` 명시 목록만 쓴다.
 - `npm run typecheck` (루트 `tsconfig.json`, `noEmit`) 가 `src/` + 진입점 전체를 함께 검사한다. 빌드는 `build`(src→dist) 와 `build:entry`(진입점 제자리) 두 개다.
-- **`scripts/model-policy.mts` 는 import 0개 · Node 내장 0개 · `process` 0개를 유지한다.** `bin/cli.js` 가 `dist/` 없이 도는 성질의 근거다 — doctor/validate 는 설치가 깨졌을 때 쓰는 진단 도구인데, 정본(`src/model-fallback-policy.ts`)은 `logger → config` 를 끌고 오고 `config` 는 진단 대상 설정(`logging.mode="file"` + path 누락)에서 throw 한다. 정본과의 동치는 `test/model-policy-parity.test.mjs` 가 매트릭스로 강제한다 (주석이 아니라 테스트다 — 종전에는 주석만 있었고 로직은 초기 커밋부터 갈려 있었다).
+- **`scripts/model-policy.mts` 는 import 0개 · Node 내장 0개 · `process` 0개를 유지한다.** `bin/cli.js` 가 `dist/` 없이 도는 성질의 근거다 — doctor/validate 는 설치가 깨졌을 때 쓰는 진단 도구인데, 정본(`src/model-fallback-policy.ts`)은 `logger → config` 를 끌고 오고 `config` 는 진단 대상 설정(`logging.mode="file"` + path 누락)에서 throw 한다. 정본과의 동치는 `test/model-policy-parity.test.ts` 가 매트릭스로 강제한다 (주석이 아니라 테스트다 — 종전에는 주석만 있었고 로직은 초기 커밋부터 갈려 있었다).
 - 상세: ARCHITECTURE.md §12.6 참조.
 
 ### stall 재디스패치 차단 (hardrule)
@@ -135,7 +135,7 @@
 - 누적 hang 상한은 `hang_history` 길이로 판정한다. `timeout.stall_escalate_threshold`(기본 5) 이상이면 `dispatch_stage` 가 세션을 만들지 않고 `escalate: true` 로 즉시 반환한다.
 - **한 substage 의 state.json 접근은 전부 같은 cwd 로 한다 — `effectiveWorktree`.** `state.sh root()` 가 cwd 의 git toplevel 을 쓰므로 cwd 가 갈리면 서로 다른 파일이 된다. 그래서 `dispatch_stage` 는 worktree 확정(자동 교정 포함)을 **가장 먼저** 하고, 그 뒤의 done 검사 · `hang_history` read/append · `verify.sh` 가 모두 그 값을 쓴다. 종전에는 앞의 둘만 `args.worktree`(LLM 이 준 값)를 써서, 교정이 발동하면 hang_history 가 main repo 쪽에 쌓이는데 finally 의 reverse sync 가 worktree 사본으로 그 파일을 덮어써 **기록한 이력이 매 시도마다 지워졌다** — 누적 상한이 영영 도달하지 못했다. 예외는 `.worktree` 값 자체를 조회하는 한 줄뿐이다(교정 대상을 찾는 호출이라 `args.worktree` 가 맞다).
 - `escalate: true` 수신 시 재디스패치·모델 교체·stage 건너뛰기 모두 금지. 사용자 에스컬레이션만 허용 (모델 교체로 해소되지 않음이 실측 확인됨).
-- 신규 helper 를 `src/opencode-plugin.ts` 에 **export 하지 않는다**. opencode 로더가 모든 named export 를 plugin factory 로 호출하므로 별도 파일(`src/*.ts`)에 두고 import 한다. `test/plugin-exports-shape.test.mjs` 가 export 집합을 고정한다.
+- 신규 helper 를 `src/opencode-plugin.ts` 에 **export 하지 않는다**. opencode 로더가 모든 named export 를 plugin factory 로 호출하므로 별도 파일(`src/*.ts`)에 두고 import 한다. `test/plugin-exports-shape.test.ts` 가 export 집합을 고정한다.
 - 상세: ARCHITECTURE.md §10.2 참조.
 - VERIFIED 판정 시 위 필드들이 자동 초기화 (`null` / `0`).
 - 상세: ARCHITECTURE.md §10.1 참조.
@@ -162,7 +162,7 @@
   - `stage8-post-review-verify.sh`: review-comment-plan.json 존재·정합, per-commit 코멘트 ≥1, 총합 정합, all_comments_inline
 - **verifier** (dispatch_verifier / makdoong2-verifier): substage 종료 후 최종 판정. post-verify 재실행 + Bitbucket API 교차검증.
 - **완료 조건이 entry 에 들어가면 first-entry 자체가 불가능해진다** (PROJ-40406 review 데드락 사례). 신규 substage 추가 시 항상 이 원칙을 준수한다.
-- **필수 마커 정의는 게이트 · stage spec 의 self_check · verifier 세 곳이 항상 일치해야 한다.** 한 곳만 갖고 있으면 substage 가 `done=true` + VERIFIED 로 끝난 뒤 **다음 게이트가 하드 차단**하는 정지가 난다. 실제 사례: `stage3-scope-verify.sh` 는 `spec_hash` 가 있으면 `draft_path` 를 요구하는데, `02-requirements.md` 의 self_check 8항목에도 verifier 기준에도 `draft_path` 가 없어서 마커를 빠뜨린 채 통과됐다 (issue #6-①). verifier 가 **마커가 아니라 파일 존재**를 보고 있었던 것이 검출 실패의 직접 원인이다 — 파일은 멀쩡했다. 마커를 추가할 때는 세 곳을 한 번에 고치고, `test/gate-requirements-quality.test.mjs` 의 "스펙 정합" 블록에 케이스를 추가한다.
+- **필수 마커 정의는 게이트 · stage spec 의 self_check · verifier 세 곳이 항상 일치해야 한다.** 한 곳만 갖고 있으면 substage 가 `done=true` + VERIFIED 로 끝난 뒤 **다음 게이트가 하드 차단**하는 정지가 난다. 실제 사례: `stage3-scope-verify.sh` 는 `spec_hash` 가 있으면 `draft_path` 를 요구하는데, `02-requirements.md` 의 self_check 8항목에도 verifier 기준에도 `draft_path` 가 없어서 마커를 빠뜨린 채 통과됐다 (issue #6-①). verifier 가 **마커가 아니라 파일 존재**를 보고 있었던 것이 검출 실패의 직접 원인이다 — 파일은 멀쩡했다. 마커를 추가할 때는 세 곳을 한 번에 고치고, `test/gate-requirements-quality.test.ts` 의 "스펙 정합" 블록에 케이스를 추가한다.
 
 
 ### 리뷰 인라인 코멘트 (hardrule)
@@ -171,19 +171,20 @@
 - `.stages."3_delivery".substages."review".comments_per_commit` 는 커밋 SHA → posting 수 매핑. 모든 값 ≥ 1, 항목 수 = `atomic_review.count_commits`, 총합 = `.comments`.
 
 ### 테스트
-- 새 기능은 반드시 `test/*.test.mjs` 회귀 케이스 추가. `npm test` 는 `scripts/run-tests.mjs` 로 모든 단위 테스트를 순차 실행하며 pre-push 훅에서 자동 검증.
-- 새 테스트 파일은 **`scripts/run-tests.mts`** 의 `STEPS` 에 반드시 등록하고 `npm run build:entry` 로 산출물을 갱신할 것 — `scripts/run-tests.mjs` 는 산출물이라 직접 고치면 다음 빌드에 날아간다. 등록하지 않으면 `npm test` 가 영영 실행하지 않는다 (`gate-requirements-quality.test.mjs` 와 `scripts/test-postinstall.mjs` 가 실제로 그 상태였고, 후자는 그 사이 내용까지 현행 구현과 반대로 썩어 있었다).
+- 새 기능은 반드시 `test/*.test.ts` 회귀 케이스 추가. `npm test` 는 `scripts/run-tests.mjs` 로 모든 단위 테스트를 순차 실행하며 pre-push 훅에서 자동 검증.
+- **테스트는 TypeScript(`test/*.test.ts`)이고 node 네이티브 type-stripping 으로 빌드 없이 실행된다** — 그래서 테스트 실행에는 **node ≥ 22.18**(기본 활성) 이 필요하다 (`package.json` `engines.node`). 산출물(bin/cli.js·postinstall.mjs)은 여전히 node 20 에서도 돌지만, 테스트만 이 하한을 요구한다. 클라이언트(node 24)·교차검증 컨테이너(node 24)는 충족한다. 타입 주석은 점진 도입 대상이며 현재는 실행만 보장한다(strict 타입 게이트 없음).
+- 새 테스트 파일은 **`scripts/run-tests.mts`** 의 `STEPS` 에 반드시 등록하고 `npm run build:entry` 로 산출물을 갱신할 것 — `scripts/run-tests.mjs` 는 산출물이라 직접 고치면 다음 빌드에 날아간다. 등록하지 않으면 `npm test` 가 영영 실행하지 않는다 (`gate-requirements-quality.test.ts` 와 `scripts/test-postinstall.mjs` 가 실제로 그 상태였고, 후자는 그 사이 내용까지 현행 구현과 반대로 썩어 있었다).
 - 러너는 실패해도 멈추지 않고 끝까지 돌린 뒤 실패 목록을 보고한다. 실패 1건만 보고 끝내지 말고 전체 목록을 확인할 것.
-- 셸 스크립트에서 변수 뒤에 한글이 붙으면 반드시 `${VAR}` 로 감쌀 것. macOS libc 는 UTF-8 로케일에서 멀티바이트 첫 바이트를 alnum 으로 보고해 변수명이 오염된다 (Linux 에서는 재현되지 않음). `test/shell-portability.test.mjs` 가 강제한다.
+- 셸 스크립트에서 변수 뒤에 한글이 붙으면 반드시 `${VAR}` 로 감쌀 것. macOS libc 는 UTF-8 로케일에서 멀티바이트 첫 바이트를 alnum 으로 보고해 변수명이 오염된다 (Linux 에서는 재현되지 않음). `test/shell-portability.test.ts` 가 강제한다.
 - Linux 교차 검증은 `npm test` 가 자동 수행한다 (비-Linux 호스트 + docker 사용 가능 시 컨테이너에서 스위트 재실행, 종료 시 컨테이너·데몬 자동 정리). 별도 명령을 칠 필요 없다.
 - 교차 검증 이미지는 **사용자가 실제로 쓰는 환경**에 맞춘다 — Ubuntu 26.04 LTS · node 24 · tmux 3.6a · bash 5.3 (GitHub 이슈 #5/#6 의 환경표). 24.04 로 검증하면 tmux 3.4 / bash 5.2 를 보게 되어 정작 사용자가 겪는 축이 빠진다.
 - **Ubuntu 26.04 의 coreutils 는 GNU 가 아니라 uutils(Rust) 다.** `wc -m` 처럼 구현마다 갈리는 도구에 의존하지 말 것 — 실측으로 BSD(macOS)와 uutils 가 다른 답을 냈다 (`gates/stage6-post-commit-verify.sh` 의 제목 길이 계산 참조).
 - 호스트 실행을 컨테이너 실행으로 대체하지 말 것 — Darwin libc 에서만 재현되는 결함이 실재하며 (rollback-commits.sh 사례), 컨테이너로 갈아타면 그 부류가 영구히 은폐된다. 두 번 도는 것이 의도된 설계다.
-- pollSubSession / dispatch_stage 로직 수정 시 특히 `test/poll-sub-session.test.mjs`, `test/dispatch-stage-redispatch.test.mjs` 확장 필수.
+- pollSubSession / dispatch_stage 로직 수정 시 특히 `test/poll-sub-session.test.ts`, `test/dispatch-stage-redispatch.test.ts` 확장 필수.
 
 ## 릴리즈 프로세스
 - `npm run release:patch|minor|major` — 2회 사용자 승인 게이트를 거쳐 공개 npm registry 배포. 상세: ARCHITECTURE.md §12.5.
-- **승인 프롬프트는 stdin 전용 (`scripts/lib/confirm.sh`). `/dev/tty` 를 다시 들이지 말 것** — 제어 터미널이 없는 환경에서 열리지 않아 릴리즈 자체를 막았다. `test/release-confirm.test.mjs` 가 재유입을 차단한다.
+- **승인 프롬프트는 stdin 전용 (`scripts/lib/confirm.sh`). `/dev/tty` 를 다시 들이지 말 것** — 제어 터미널이 없는 환경에서 열리지 않아 릴리즈 자체를 막았다. `test/release-confirm.test.ts` 가 재유입을 차단한다.
 - 터미널이 없으면 파이프로 승인을 전달한다: `printf 'y\ny\n' | npm run release:minor`
 - `confirm()` 의 반환 `2`(물어볼 수 없음)는 `1`(거부)과 **반드시 구별해서** 처리한다. 섞으면 환경 문제가 "사용자가 거부함" 으로 둔갑해 원인이 은폐된다.
 - `--yes` 플래그는 CI 전용. 대화형에서 사용 금지.

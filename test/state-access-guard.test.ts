@@ -1,4 +1,4 @@
-// test/state-access-guard.test.mjs — state.json 접근 명령의 읽기/쓰기 분류 회귀.
+// test/state-access-guard.test.ts — state.json 접근 명령의 읽기/쓰기 분류 회귀.
 //
 // 배경 (issue #5): 종전 가드는 "명령에 state.json 경로가 있는가" 만 보고 차단해서
 // state_unreadable 복구 절차가 지시하는 읽기 전용 진단(ls/file/head)까지 막았고,

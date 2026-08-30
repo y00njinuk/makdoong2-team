@@ -408,7 +408,7 @@ export function looksLikeFileWrite(cmd: string): boolean {
   // state.json 가드(WRITE_INDICATORS_RAW)는 `-c`/`-e` 자체를 통째로 막지만 여기는
   // 그러지 않는다 — 이 함수는 **모든 파일**에 대한 판정이고, 읽기 전용 인라인
   // 스크립트는 planner/analyzer 의 정상 능력으로 이미 허용돼 있다
-  // (test/state-write-guard.test.mjs 가 고정). 대신 쓰기 API 목록을 넓힌다.
+  // (test/state-write-guard.test.ts 가 고정). 대신 쓰기 API 목록을 넓힌다.
   if (/\bpython3?\s+-c\s+["'][\s\S]*?(?:open\s*\([^)]*["']\s*,\s*["'][wax]|\.write_text\s*\(|\.write_bytes\s*\(|shutil\.(?:copy|move|rmtree)|os\.(?:remove|unlink|rename|replace|truncate)|json\.dump\s*\()/.test(cmd)) return true;
   if (/\bnode\s+-e\s+["'][\s\S]*?(?:writeFileSync|writeFile\b|appendFileSync|appendFile\b|createWriteStream|renameSync|rmSync|unlinkSync|cpSync|copyFileSync|truncateSync|mkdirSync)/.test(cmd)) return true;
 

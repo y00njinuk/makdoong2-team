@@ -1,4 +1,4 @@
-// test/issue-reporter-guard.test.mjs — makdoong2-issue-reporter 사용자-전용 트리거 회귀.
+// test/issue-reporter-guard.test.ts — makdoong2-issue-reporter 사용자-전용 트리거 회귀.
 //
 // 검증 대상:
 //   1. issueReporterSkillLoadViolation — 전용 에이전트 외의 skill() 자율 로드 차단
@@ -8,7 +8,7 @@
 //   3. SEALED_SUBAGENTS 등록 (CLAUDE.md hardrule: 신규 서브에이전트는 반드시 등록)
 //   4. install()/uninstall() 왕복 — 신규 산출물 배포·제거
 //
-// Run via: node --test test/issue-reporter-guard.test.mjs  (dist 빌드 필요)
+// Run via: node --test test/issue-reporter-guard.test.ts  (dist 빌드 필요)
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

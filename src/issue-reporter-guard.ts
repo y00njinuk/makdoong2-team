@@ -2,7 +2,7 @@
 //
 // Lives in its own module rather than opencode-plugin.ts because opencode's
 // plugin loader invokes EVERY named export of the plugin entry file as a
-// plugin factory (see test/plugin-exports-shape.test.mjs). Helpers must be
+// plugin factory (see test/plugin-exports-shape.test.ts). Helpers must be
 // imported, never re-exported from the entry file.
 //
 // 정책: makdoong2-issue-reporter 스킬의 유일한 트리거는 사용자의 직접 호출

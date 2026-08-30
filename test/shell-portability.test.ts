@@ -1,4 +1,4 @@
-// test/shell-portability.test.mjs — 셸 스크립트 크로스 플랫폼 회귀 테스트
+// test/shell-portability.test.ts — 셸 스크립트 크로스 플랫폼 회귀 테스트
 //
 // 배경:
 //   scripts/rollback-commits.sh 에 `취소된 커밋 $N개` 가 있었다. bash 는 `$NAME`
@@ -11,7 +11,7 @@
 // 그래서 런타임이 아니라 정적으로 막는다. `${NAME}` 로 감싸면 어느 libc 에서든
 // 파싱이 명확해진다.
 //
-// Run via: node --test test/shell-portability.test.mjs
+// Run via: node --test test/shell-portability.test.ts
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

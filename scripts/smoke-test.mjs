@@ -3,7 +3,7 @@
 // 산출물은 같은 자리의 scripts/smoke-test.mjs 다 (`npm run build:entry`).
 //
 // 주의: 이 파일은 **미러(scripts/model-policy.mts)만** 검증한다. 정본
-// src/model-fallback-policy.ts 와의 동치는 test/model-policy-parity.test.mjs 가
+// src/model-fallback-policy.ts 와의 동치는 test/model-policy-parity.test.ts 가
 // 따로 강제한다 — 예전 주석은 이 파일이 정본까지 검증한다고 적었으나 거짓이었다.
 //
 // Run: node scripts/smoke-test.mjs

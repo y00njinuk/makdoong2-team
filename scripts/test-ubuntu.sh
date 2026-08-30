@@ -18,7 +18,7 @@
 #     (macOS 용 node_modules 를 덮어쓰지 않기 위함 — 네이티브 바이너리가 다르다)
 #   - 호스트 uid 를 담은 /etc/passwd 를 만들어 넣는다. 이게 없으면 os.homedir()
 #     가 HOME 미설정 시 getpwuid 폴백에서 ENOENT 로 죽어 실제 Ubuntu 장비에서는
-#     나지 않는 실패가 발생한다 (test/config-dir-home-fallback.test.mjs).
+#     나지 않는 실패가 발생한다 (test/config-dir-home-fallback.test.ts).
 #   - package-lock.json 이 바뀐 경우에만 npm ci 를 다시 돌린다.
 #   - 호스트 uid/gid 로 실행해 root 소유 파일이 생기지 않게 한다.
 #

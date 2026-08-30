@@ -1,7 +1,7 @@
-// test/install-lib.test.mjs — Unit tests for scripts/install-lib.mjs
+// test/install-lib.test.ts — Unit tests for scripts/install-lib.mjs
 //
 // Uses Node.js built-in test runner (node:test).
-// Run via: node test/install-lib.test.mjs
+// Run via: node test/install-lib.test.ts
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

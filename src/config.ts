@@ -192,7 +192,7 @@ export function loadConfig(): Makdoong2Config {
  *
  * `scripts/install-lib.mts` 의 `parseJsonc` 와 **동작이 같아야 한다** — 한쪽은
  * opencode.json 을 쓰고 한쪽은 읽으므로, 갈리면 install 이 성공했다고 보고한
- * 설정을 런타임이 못 읽는 상태가 된다. `test/opencode-json-read.test.mjs` 가
+ * 설정을 런타임이 못 읽는 상태가 된다. `test/opencode-json-read.test.ts` 가
  * 두 구현의 동치를 강제한다. (install-lib 은 `bin/cli` 의 dist-무의존 성질 때문에
  * dist 를 import 할 수 없어 공용 모듈로 합치지 못한다.)
  */

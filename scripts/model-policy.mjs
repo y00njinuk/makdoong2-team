@@ -10,7 +10,7 @@
 // **진단해야 할 그 설정 때문에 진단 도구가 죽는다**.
 //
 // 그래서 이 파일은 import 0개 · Node 내장 0개 · process 0개를 유지한다.
-// 정본과의 동치는 주석이 아니라 test/model-policy-parity.test.mjs 가 강제한다.
+// 정본과의 동치는 주석이 아니라 test/model-policy-parity.test.ts 가 강제한다.
 //
 // 소비자:
 //   - scripts/smoke-test.mts (체인 로직 테스트)

@@ -1,4 +1,4 @@
-// test/sync-state-commit-detection.test.mjs — PostToolUse 훅이 커밋 완료를
+// test/sync-state-commit-detection.test.ts — PostToolUse 훅이 커밋 완료를
 // **실제로 일어났을 때만** 기록하는지 고정한다.
 //
 // ── 결함 ──

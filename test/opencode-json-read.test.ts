@@ -1,4 +1,4 @@
-// test/opencode-json-read.test.mjs — 런타임이 opencode.json 을 실제로 읽는지,
+// test/opencode-json-read.test.ts — 런타임이 opencode.json 을 실제로 읽는지,
 // 그리고 install 이 쓰는 파서와 읽는 파서가 같은 동작인지 고정한다.
 //
 // ── 결함 ──

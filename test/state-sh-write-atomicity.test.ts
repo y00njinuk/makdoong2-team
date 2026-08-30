@@ -1,4 +1,4 @@
-// test/state-sh-write-atomicity.test.mjs — state.sh 쓰기가 조용히 실패하지 않음을 고정한다.
+// test/state-sh-write-atomicity.test.ts — state.sh 쓰기가 조용히 실패하지 않음을 고정한다.
 //
 // 결함(수정 전): set/append/migrate 가 전부 아래 형태였다.
 //

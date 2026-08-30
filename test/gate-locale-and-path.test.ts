@@ -1,9 +1,9 @@
-// test/gate-locale-and-path.test.mjs — 로케일·경로·파일명 때문에 게이트가
+// test/gate-locale-and-path.test.ts — 로케일·경로·파일명 때문에 게이트가
 // 구조적으로 차단되는 결함의 회귀.
 //
 // 세 결함 모두 배포 대상(Ubuntu WSL2 + 한글 커밋 규약)에서만 드러나고 개발기
 // (macOS, LANG=ko_KR.UTF-8, ASCII 경로)에서는 재현되지 않아 정적 이식성 검사
-// (test/shell-portability.test.mjs)로도 잡히지 않았다. 그래서 여기서는 텍스트를
+// (test/shell-portability.test.ts)로도 잡히지 않았다. 그래서 여기서는 텍스트를
 // 훑는 대신 **실제로 실행해서** 동작을 고정한다.
 //
 //  ① worktree 경로 파싱: `awk '/^worktree /{print $2}'` 는 첫 공백에서 자른다.

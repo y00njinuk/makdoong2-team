@@ -31,7 +31,7 @@ git -C "$WT" reset --soft "$BASE"
 # 0xEA — the lead byte of the Hangul counter suffix that follows — as alnum in
 # UTF-8 locales. The name absorbs that byte, becomes unbound, and set -u aborts.
 # glibc keeps high bytes non-alnum, so this only bites on macOS.
-# Guarded by test/shell-portability.test.mjs.
+# Guarded by test/shell-portability.test.ts.
 echo "[rollback] HEAD를 ${BASE} 로 soft-reset 완료 (취소된 커밋 ${N}개, working tree/index 변경은 보존됨)"
 
 # 3_delivery.commit 관련 state 초기화 (base_sha는 보존 — 동일 기준점으로 재커밋)

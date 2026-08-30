@@ -59,7 +59,7 @@ const HTTP_AUTH_HEADER_RE =
 // 헤더 접두 없이 스킴만 나오는 형태. 8자 최소 길이만 두고 **의도적으로 과잉
 // 마스킹**한다 — 산문의 "Bearer strategy_here" 가 지워지는 것은 실제 토큰이
 // 새는 것보다 낫다는 것이 이 sanitizer 의 명시적 선택이다
-// (test/redact-secrets.test.mjs 의 "conservative: over-masking …" 케이스가 고정).
+// (test/redact-secrets.test.ts 의 "conservative: over-masking …" 케이스가 고정).
 const HTTP_AUTH_BARE_RE = /\b(Bearer|Basic|Token|Digest)\s+([A-Za-z0-9+/=._~\-]{8,})/g;
 
 // `curl -u user:pass` / `--user user:pass`.

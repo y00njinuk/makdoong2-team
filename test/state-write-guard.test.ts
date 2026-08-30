@@ -80,7 +80,7 @@ describe("looksLikeSealedStateWrite — sealed sub-agent state.json guard", () =
   test("allows read-only diagnostics on state.json (issue #5)", () => {
     // state_unreadable 복구 절차가 요구하는 존재/유효성 확인 명령. 이걸 막으면
     // next_action 을 따를 방법이 사라져 leader 가 자체 abort 한다.
-    // 분류 계약 전체는 test/state-access-guard.test.mjs 참조.
+    // 분류 계약 전체는 test/state-access-guard.test.ts 참조.
     const p = "/w/.makdoong2-team/PROJ-1/state.json";
     assert.equal(looksLikeSealedStateWrite(`ls -la ${p}`), false);
     assert.equal(looksLikeSealedStateWrite(`file ${p}; head -c 500 ${p}`), false);

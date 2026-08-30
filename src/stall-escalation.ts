@@ -2,7 +2,7 @@
 //
 // Lives in its own module rather than opencode-plugin.ts because opencode's
 // plugin loader invokes EVERY named export of the plugin entry file as a
-// plugin factory (see test/plugin-exports-shape.test.mjs and the PROJ-40406
+// plugin factory (see test/plugin-exports-shape.test.ts and the PROJ-40406
 // root-cause analysis). Helpers must therefore be imported, never re-exported
 // from the entry file.
 

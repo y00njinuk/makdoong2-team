@@ -1,4 +1,4 @@
-// test/gate-missing-state-sentinel.test.mjs — 게이트가 "state.json 부재/손상" 을
+// test/gate-missing-state-sentinel.test.ts — 게이트가 "state.json 부재/손상" 을
 // 실제로 감지하는지 고정한다.
 //
 // ── 결함 ──

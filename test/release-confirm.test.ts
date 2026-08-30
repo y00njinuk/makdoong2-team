@@ -1,4 +1,4 @@
-// test/release-confirm.test.mjs — 릴리스 승인 프롬프트(scripts/lib/confirm.sh) 회귀.
+// test/release-confirm.test.ts — 릴리스 승인 프롬프트(scripts/lib/confirm.sh) 회귀.
 //
 // 배경 (실제로 릴리스를 막았던 결함):
 //   confirm() 이 `read -r reply </dev/tty` 로 읽었다. 제어 터미널이 없는 환경
@@ -12,7 +12,7 @@
 //
 // 그래서 고정한다: stdin 전용, 그리고 종료 코드 2(물어볼 수 없음)를 1(거부)과 분리.
 //
-// Run via: node --test test/release-confirm.test.mjs
+// Run via: node --test test/release-confirm.test.ts
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

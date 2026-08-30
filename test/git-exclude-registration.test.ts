@@ -1,4 +1,4 @@
-// test/git-exclude-registration.test.mjs — 플러그인 자기 상태 디렉터리의 git exclude 등록 회귀.
+// test/git-exclude-registration.test.ts — 플러그인 자기 상태 디렉터리의 git exclude 등록 회귀.
 //
 // 배경 (issue #6-②): 플러그인은 `.makdoong2-team/` 를 작업 트리 안에 만들면서
 // git exclude 에는 등록하지 않았다. 그래서 그 패턴이 없는 저장소에서는

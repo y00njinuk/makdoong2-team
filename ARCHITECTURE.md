@@ -93,7 +93,7 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 | `src/logger.ts` | level 임계값 + stdin/file 모드 (§11) |
 | `src/model-chain-cli.ts` | 체인 JSON 을 stdout 으로 노출 (Track B 소비용) |
 
-> **주의**: opencode 플러그인 로더는 진입 파일의 **모든 named export 를 plugin factory 로 호출**한다. 신규 helper 는 반드시 별도 파일에 두고 import 한다. `test/plugin-exports-shape.test.mjs` 가 export 집합을 고정해 회귀를 막는다.
+> **주의**: opencode 플러그인 로더는 진입 파일의 **모든 named export 를 plugin factory 로 호출**한다. 신규 helper 는 반드시 별도 파일에 두고 import 한다. `test/plugin-exports-shape.test.ts` 가 export 집합을 고정해 회귀를 막는다.
 
 ### 훅 · 셸 (LLM 호출 0)
 
@@ -260,7 +260,7 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 - **1차 (문서)** — 각 SKILL.md 상단 "사전 조건" + planner/publisher 프롬프트 `0-pre` 블록의 `mcp_name → skill_name` 매핑
 - **2차 (훅)** — 플러그인 init 시 `${configDir}/skills/*/SKILL.md` frontmatter 를 스캔해 registry 구축. `tool.execute.after` 가 "not found" 응답을 감지하면 정확한 skill 이름을 프리펜드한다. 미등록 mcp_name 에는 개입하지 않는다 — registry 는 whitelist 가 아니라 **정보성 룩업**이다
 
-관련: `src/skill-mcp-registry.ts`, `test/skill-mcp-registry.test.mjs`.
+관련: `src/skill-mcp-registry.ts`, `test/skill-mcp-registry.test.ts`.
 
 ### 4.5 SessionStart (외부 wire-up)
 
@@ -283,12 +283,12 @@ makdoong2-team 자체의 결함을 GitHub 이슈(y00njinuk/makdoong2-team)로 �
    그러면서도 **인라인 실행은 유지된다**: opencode 의 subtask 판정은 `mode === "subagent" && subtask !== false || subtask === true` 이므로, 커맨드의 `subtask: false` 가 `mode: subagent` 를 이겨 자식 세션을 만들지 않고 현재 세션의 에이전트를 전환한다. 덕분에 직전 대화 컨텍스트를 그대로 보고, 마스킹 최종 확인 같은 사용자 문답도 같은 세션에서 이어진다. **`subtask: false` 를 빼면 격리되어 둘 다 잃는다.**
 
    목록에서 감추는 것과 부를 수 없는 것은 다르다 — opencode 의 `task` 툴은 `subagent_type` 의 mode 를 검사하지 않아 이름만 알면 spawn 된다. 그 간극은 `tool.execute.before` 의 `issueReporterTaskSpawnViolation` 이 닫는다.
-2. **command 이름 == skill 이름 (hardrule).** opencode 는 스킬을 자동으로 같은 이름의 커맨드로 노출하는데, 그 커맨드에는 `agent` 필드가 없어 현재 에이전트(권한 제한된 team-leader)로 실행된다. cfg.command 가 먼저 채워지고 같은 이름의 skill-derived command 는 건너뛰어지므로, 같은 이름의 command 파일을 배포해 이를 덮어쓴다. 이름이 어긋나면 권한 없는 진입점이 살아남는다 — `test/issue-reporter-guard.test.mjs` 가 일치를 강제한다.
+2. **command 이름 == skill 이름 (hardrule).** opencode 는 스킬을 자동으로 같은 이름의 커맨드로 노출하는데, 그 커맨드에는 `agent` 필드가 없어 현재 에이전트(권한 제한된 team-leader)로 실행된다. cfg.command 가 먼저 채워지고 같은 이름의 skill-derived command 는 건너뛰어지므로, 같은 이름의 command 파일을 배포해 이를 덮어쓴다. 이름이 어긋나면 권한 없는 진입점이 살아남는다 — `test/issue-reporter-guard.test.ts` 가 일치를 강제한다.
 3. **유일한 트리거는 사용자 직접 호출.** 에이전트가 실패를 관측했다고 자율적으로 이슈를 등록하지 않는다. 1차 방어는 SKILL.md description 의 명시, 2차 방어는 `tool.execute.before` 훅 — 전용 에이전트 외의 식별된 에이전트가 `skill()` 로 로드하면 throw 하고 `/makdoong2-issue-reporter` 실행 안내를 반환한다 (`src/issue-reporter-guard.ts`). agent 미상 세션은 outer-world 가드와 동일하게 passthrough.
 
 issue-reporter 는 SEALED_SUBAGENTS 에도 등록되어 있다 — 워크플로우에 참여하지 않지만, outer-world 로 위임하면 마스킹·사용자 승인 게이트가 위임처에서 우회될 수 있기 때문이다. state.json 은 읽기(`state.sh get`)만 허용한다.
 
-**PAT 부재는 실패가 아니라 요청 사유다.** 토큰은 `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/.github` 에서 읽는데, 파일이 없거나 토큰 패턴을 추출하지 못하면 조용히 종료하지 않는다. 수집·분석은 그대로 끝내고, 등록 직전에 발급 URL(fine-grained / classic)과 **최소 권한**(fine-grained: Issues Read and write, classic: `public_repo`, Gist 를 쓸 때만 각각 Gists / `gist` 추가), 저장 명령(`chmod 600` 포함)을 제시하며 사용자에게 발급을 요청하고 대기한다. 발급·저장 주체는 사용자이고 에이전트는 토큰 값을 재출력하지 않는다. `401`/`403` 도 같은 경로를 타되 받은 상태 코드와 `message` 를 덧붙여 재발급을 요청한다. 사용자가 거부하면 본문 전체를 마크다운으로 출력해 수동 등록으로 넘긴다. 절차 원문은 SKILL.md §1.1, 회귀는 `test/issue-reporter-guard.test.mjs` → "PAT 부재 — 토큰 발급 요청 절차".
+**PAT 부재는 실패가 아니라 요청 사유다.** 토큰은 `${XDG_CONFIG_HOME:-$HOME/.config}/opencode/.github` 에서 읽는데, 파일이 없거나 토큰 패턴을 추출하지 못하면 조용히 종료하지 않는다. 수집·분석은 그대로 끝내고, 등록 직전에 발급 URL(fine-grained / classic)과 **최소 권한**(fine-grained: Issues Read and write, classic: `public_repo`, Gist 를 쓸 때만 각각 Gists / `gist` 추가), 저장 명령(`chmod 600` 포함)을 제시하며 사용자에게 발급을 요청하고 대기한다. 발급·저장 주체는 사용자이고 에이전트는 토큰 값을 재출력하지 않는다. `401`/`403` 도 같은 경로를 타되 받은 상태 코드와 `message` 를 덧붙여 재발급을 요청한다. 사용자가 거부하면 본문 전체를 마크다운으로 출력해 수동 등록으로 넘긴다. 절차 원문은 SKILL.md §1.1, 회귀는 `test/issue-reporter-guard.test.ts` → "PAT 부재 — 토큰 발급 요청 절차".
 
 #### 4.6.1 이슈 양식 (SKILL.md §6)
 
@@ -303,7 +303,7 @@ issue-reporter 는 SEALED_SUBAGENTS 에도 등록되어 있다 — 워크플로�
 | **자기 점검을 `cat` 표시 *전*에 배치** | 표시 후 본문을 고치면 sha256 표시 증명이 무효가 되어 4.6.2 승인 절차를 처음부터 다시 밟아야 한다. 점검을 뒤로 미루면 그 비용을 사용자가 낸다 |
 | **열린 이슈 목록을 문서에 하드코딩하지 않는다** (§5) | 과거 §5 에는 #1·#4 스냅샷 표가 있었는데 두 이슈가 삭제되어(`410 Gone`) 중복 판정이 삭제된 이슈를 가리켰다. 목록은 매 실행 시 검색으로 얻는다 |
 
-회귀는 `test/issue-reporter-guard.test.mjs` → "이슈 양식 (§6)" 이 강제한다 — 섹션 목록·자기 점검·제목 규약의 존재, 그리고 삭제된 이슈(#1/#4)를 다시 참조하지 않는 것.
+회귀는 `test/issue-reporter-guard.test.ts` → "이슈 양식 (§6)" 이 강제한다 — 섹션 목록·자기 점검·제목 규약의 존재, 그리고 삭제된 이슈(#1/#4)를 다시 참조하지 않는 것.
 
 #### 4.6.2 GitHub 게시 승인 게이트 (원문 확인 강제)
 
@@ -316,7 +316,7 @@ issue-reporter 는 SEALED_SUBAGENTS 에도 등록되어 있다 — 워크플로�
 
 (나)가 따로 필요한 이유는 permission 프롬프트에 **curl 명령만 보이고 본문은 파일 안에 있기 때문**이다. 프롬프트만으로는 무엇이 게시되는지 알 수 없으므로, 세션에 출력된 원문을 동의의 근거로 삼는다.
 
-**패턴과 허용 표기는 한 쌍이다 (hardrule).** 프롬프트는 frontmatter 패턴이 명령 문자열에 매치될 때만 뜨므로, 훅이 허용하는 전송 표기가 그 패턴에 걸리지 않으면 **질문 없이 게시된다**. 그래서 `classifyGithubApiCall` 은 payload 표기를 정확히 `-d @/절대경로` 하나로 고정하고(`APPROVABLE_PAYLOAD_RE`), 의미가 같은 `--data @file`·`--data-binary @file`·`-d=@file` 을 전부 problems 로 차단한다. 한쪽을 고치면 반드시 다른 쪽도 고쳐야 하며, `test/issue-reporter-guard.test.mjs` 의 "frontmatter 의 ask 패턴과 훅이 허용하는 표기가 한 쌍이다" 가 이를 강제한다.
+**패턴과 허용 표기는 한 쌍이다 (hardrule).** 프롬프트는 frontmatter 패턴이 명령 문자열에 매치될 때만 뜨므로, 훅이 허용하는 전송 표기가 그 패턴에 걸리지 않으면 **질문 없이 게시된다**. 그래서 `classifyGithubApiCall` 은 payload 표기를 정확히 `-d @/절대경로` 하나로 고정하고(`APPROVABLE_PAYLOAD_RE`), 의미가 같은 `--data @file`·`--data-binary @file`·`-d=@file` 을 전부 problems 로 차단한다. 한쪽을 고치면 반드시 다른 쪽도 고쳐야 하며, `test/issue-reporter-guard.test.ts` 의 "frontmatter 의 ask 패턴과 훅이 허용하는 표기가 한 쌍이다" 가 이를 강제한다.
 
 > **플러그인 훅으로 승인을 가로챌 수 없다.** `@opencode-ai/plugin` 타입에는 `"permission.ask"` 훅이 선언되어 있지만, 실행 중인 opencode 1.18.23 바이너리의 훅 트리거 목록(`chat.*`, `command.execute.before`, `tool.definition`, `tool.execute.before/after`, `shell.env`, `file.open`, `tab.new`, `experimental.*`)에 **존재하지 않는다** — 1.18.15 타입에만 남은 잔재다. 승인 여부를 플러그인이 코드로 결정할 방법은 없고, frontmatter 패턴이 유일한 수단이다. 또한 permission 이 `allow` 로 해석되면 요청 객체 자체가 만들어지지 않으므로(`Permission.ask` 는 ask 가 하나도 없으면 즉시 return), 훅이 있었더라도 개입 지점이 없다.
 
@@ -352,7 +352,7 @@ payload 작성(리터럴 절대경로 JSON)
 
 > **2026-08 변경**: 이전에는 사용자가 별도 셸에서 `scripts/issue-reporter-approve.sh <payload>` 를 직접 실행해 `<payload>.approved` 마커(sha256)를 만드는 방식이었다. 그 한 번의 실행이 (가)와 (나)를 동시에 만족시켰지만, 세션을 벗어나 터미널을 오가야 했다. 승인을 세션 안의 질문으로 옮기면서 (가)는 opencode permission 으로, (나)는 표시 증명으로 나누어 넘겼다. 스크립트와 마커 계약은 제거되었다.
 
-관련: `src/issue-reporter-guard.ts`, `test/issue-reporter-guard.test.mjs`.
+관련: `src/issue-reporter-guard.ts`, `test/issue-reporter-guard.test.ts`.
 
 ---
 
@@ -394,7 +394,7 @@ payload 작성(리터럴 절대경로 JSON)
 
 이중 안전망으로 **verifier 의 analysis 판정도 `.makdoong2-team/` 를 제외**하고 `git status` 를 읽는다 — 위 두 등록 경로를 타지 않은 in-flight 워크플로우를 구제하기 위해서다.
 
-회귀: `test/git-exclude-registration.test.mjs`.
+회귀: `test/git-exclude-registration.test.ts`.
 
 ### 5.2 스키마 (hardrule: hierarchical)
 
@@ -432,7 +432,7 @@ payload 작성(리터럴 절대경로 JSON)
 
 오염된 state 는 `state.sh migrate <issue>` 로 이관한다 (idempotent). `state.sh init` 을 다시 부르면 자동 migrate 된다.
 
-**스키마 회귀 6층 방어**: ① agent 프롬프트가 계층 표기만 사용 → ② `lint-agent-prompts.sh` 정적 lint (`npm test` 최상단 + pre-push) → ③ `state.sh` 런타임 exit 65 → ④ `state.sh init` 자동 치유 → ⑤ `doctor` phantom 키 스캔 → ⑥ `test/state-sh-schema.test.mjs`, `test/doctor-phantom-scan.test.mjs`.
+**스키마 회귀 6층 방어**: ① agent 프롬프트가 계층 표기만 사용 → ② `lint-agent-prompts.sh` 정적 lint (`npm test` 최상단 + pre-push) → ③ `state.sh` 런타임 exit 65 → ④ `state.sh init` 자동 치유 → ⑤ `doctor` phantom 키 스캔 → ⑥ `test/state-sh-schema.test.ts`, `test/doctor-phantom-scan.test.ts`.
 
 ### 5.3 산출물 경로는 상대경로만 (hardrule)
 
@@ -455,7 +455,7 @@ if [[ "$REL" == /* ]]; then ABS="$REL"; else ABS="$(bash <SCRIPTS_DIR>/state.sh 
 ```
 
 **자동 마이그레이션**: dev 분기 프롬프트에 삽입되는 `buildDraftPathReadSnippet` 이 legacy 절대경로를 감지하면 상대경로로 재저장한다 (idempotent). 갱신분은 다음 reverse sync 로 메인 repo 에 전파된다.
-**회귀 방지**: `test/state-path-relative.test.mjs` (15 시나리오), `test/state-path-migration.test.mjs` (6 시나리오).
+**회귀 방지**: `test/state-path-relative.test.ts` (15 시나리오), `test/state-path-migration.test.ts` (6 시나리오).
 
 ### 5.4 worktree 자동 생성과 격리
 
@@ -519,7 +519,7 @@ next=…                 # 정상이 아닐 때만, 실행할 복구 명령
 
 exit 0 = 존재 && 판독 가능, exit 1 = 그 외. `state.sh get` 은 값 조회 전용이라 부재와 `null` 값을 stdout 으로 구분하지 못한다(exit code 만 다름) — 존재 확인에는 `status` 를 쓴다.
 
-**회귀 방지**: `test/state-access-guard.test.mjs` (분류 계약 + 두 훅 일치 + 서브커맨드 목록 정합성), `test/state-sh-schema.test.mjs` (`status` 출력, usage).
+**회귀 방지**: `test/state-access-guard.test.ts` (분류 계약 + 두 훅 일치 + 서브커맨드 목록 정합성), `test/state-sh-schema.test.ts` (`status` 출력, usage).
 
 ---
 
@@ -550,7 +550,7 @@ exit 0 = 존재 && 판독 가능, exit 1 = 그 외. `state.sh get` 은 값 조�
 - publisher 프롬프트: `git add .` / `-A` / `-u` 금지, 파일별 `git add -- "$FILE"` 강제
 - `gates/stage6-post-commit-verify.sh`: 각 커밋 SHA 를 순회하며 `git show --name-only --pretty=""` 로 파일 수를 세고 1 초과면 REJECT. 메시지 형식 `<Type>: <이슈키> - <요약>`, Type 허용값, 이슈키 일치, 제목 길이, 마침표, 결합어, 이슈 종료 키워드(Resolves/Closes/Fixes/See also) 도 함께 강제
 - verifier 가 같은 스크립트를 재실행해 이중 확인
-- 회귀: `test/commit-atomicity-verify.test.mjs` (8 케이스)
+- 회귀: `test/commit-atomicity-verify.test.ts` (8 케이스)
 
 ---
 
@@ -636,7 +636,7 @@ message_stall 감지 시 즉시 `client.session.abort()` 를 쏘지만, 서버�
 
 ### 8.7 관련 파일
 
-`src/poll-sub-session.ts` (감지 본체) · `src/opencode-plugin.ts` (재시도 루프, alive 신호, `sessionDeletedWaiters`) · `test/poll-sub-session.test.mjs` · `test/dispatch-stage-redispatch.test.mjs`.
+`src/poll-sub-session.ts` (감지 본체) · `src/opencode-plugin.ts` (재시도 루프, alive 신호, `sessionDeletedWaiters`) · `test/poll-sub-session.test.ts` · `test/dispatch-stage-redispatch.test.ts`.
 
 ---
 
@@ -736,7 +736,7 @@ tmux list-panes -aF '#{pane_id}\t#{@mdn2_session}' | grep ses_XXX
 
 ### 9.6 관련 파일
 
-`src/tmux-monitor.ts` · `src/opencode-plugin.ts` (`cleanup_panes`, init reap, orphan-scan 가드) · `test/tmux-monitor-orphan.test.mjs` · `test/tmux-monitor.test.mjs`.
+`src/tmux-monitor.ts` · `src/opencode-plugin.ts` (`cleanup_panes`, init reap, orphan-scan 가드) · `test/tmux-monitor-orphan.test.ts` · `test/tmux-monitor.test.ts`.
 
 ---
 
@@ -764,7 +764,7 @@ tmux list-panes -aF '#{pane_id}\t#{@mdn2_session}' | grep ses_XXX
 
 **commit REJECTED 의 rollback** — 부장님은 git 권한이 없으므로 직접 되돌리지 않는다. publisher 가 재작업 진입 시 **다른 어떤 작업보다 먼저** `rollback-commits.sh <이슈키>` 를 실행해 `git reset --soft` 로 base_sha 까지 되돌린 뒤(working tree/index 는 보존) 커밋 계획부터 새로 세운다.
 
-회귀: `test/verdict-reason-injection.test.mjs` (8 케이스).
+회귀: `test/verdict-reason-injection.test.ts` (8 케이스).
 
 ### 10.2 stall — 재디스패치 차단
 
@@ -780,7 +780,7 @@ tmux list-panes -aF '#{pane_id}\t#{@mdn2_session}' | grep ses_XXX
 
 **fail-open**: `shouldEscalateStall` 은 `hangCount` 가 NaN(state 판독 실패)이면 차단하지 않는다. 판독 불가를 차단으로 취급하면 state 를 못 읽는 환경에서 워크플로우 전체가 교착된다.
 
-관련: `src/stall-escalation.ts` · `src/config.ts` (`DEFAULT_STALL_ESCALATE_THRESHOLD`) · `agents/makdoong2-team-leader.md` ("stall 재디스패치 금지") · `test/dispatch-stage-redispatch.test.mjs`.
+관련: `src/stall-escalation.ts` · `src/config.ts` (`DEFAULT_STALL_ESCALATE_THRESHOLD`) · `agents/makdoong2-team-leader.md` ("stall 재디스패치 금지") · `test/dispatch-stage-redispatch.test.ts`.
 
 ---
 
@@ -807,7 +807,7 @@ tmux list-panes -aF '#{pane_id}\t#{@mdn2_session}' | grep ses_XXX
 
 **Additive scaffolding**: 기존 설정 파일에 `logging.mode`/`path` 가 없으면 install 시 누락 키만 시드한다. `level` 값은 덮어쓰지 않는다.
 
-관련: `src/config.ts` · `src/logger.ts` · `bin/cli.js` doctor · `test/logger.test.mjs` · `test/install-lib.test.mjs`.
+관련: `src/config.ts` · `src/logger.ts` · `bin/cli.js` doctor · `test/logger.test.ts` · `test/install-lib.test.ts`.
 
 ---
 
@@ -906,7 +906,7 @@ printf 'y\ny\n' | npm run release:minor
 
 pre-push 훅 경로는 STEP 1 의 while 루프가 stdin 을 EOF 까지 소진하므로 `confirm` 이 항상 `2` 를 반환한다. **의도된 동작이다** — 훅이 사람을 붙잡고 묻는 대신 push 를 막고 정규 경로(`npm run release:<bump>`)를 안내한다. CI 는 `AUTO_YES=1`.
 
-회귀: `test/release-confirm.test.mjs` (EOF→2 분리, `/dev/tty` 재유입 차단, confirm 중복 정의 차단).
+회귀: `test/release-confirm.test.ts` (EOF→2 분리, `/dev/tty` 재유입 차단, confirm 중복 정의 차단).
 
 ---
 
@@ -938,7 +938,7 @@ pre-push 훅 경로는 STEP 1 의 while 루프가 stdin 을 EOF 까지 소진하
 
 #### 지켜야 할 것
 
-1. **산출물을 직접 편집하지 않는다.** `test/entry-artifacts.test.mjs` 가 out-of-tree
+1. **산출물을 직접 편집하지 않는다.** `test/entry-artifacts.test.ts` 가 out-of-tree
    재컴파일 후 바이트 비교로 최신성을 강제한다. `.gitattributes` 가 `linguist-generated`
    로 표시해 PR diff 에서 접힌다.
 2. **`tsconfig.entry.json` 에 `include` 글로브를 쓰지 않는다.** `rootDir: "."` 이라
@@ -954,7 +954,7 @@ pre-push 훅 경로는 STEP 1 의 while 루프가 stdin 을 EOF 까지 소진하
 #### 미러(`scripts/model-policy.mts`)의 위치
 
 `bin/cli` 가 `dist/` 없이 도는 성질을 유지하기 위해 남긴다. 정본과 동치임은
-`test/model-policy-parity.test.mjs` 가 매트릭스(거부 5종 · 수용 5종 · 데이터 테이블
+`test/model-policy-parity.test.ts` 가 매트릭스(거부 5종 · 수용 5종 · 데이터 테이블
 동일성)로 강제한다. 종전에는 주석만 "일치를 검증한다" 고 주장했고 실제로는 초기
 커밋부터 로직이 갈려 있었다 — CLI 가 `OK ✓` 를 내는 설정에서 런타임은 롤백해
 다른 모델을 쓰는 상태였다.

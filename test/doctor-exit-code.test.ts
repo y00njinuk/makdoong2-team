@@ -1,4 +1,4 @@
-// test/doctor-exit-code.test.mjs — doctor exit code 회귀 테스트
+// test/doctor-exit-code.test.ts — doctor exit code 회귀 테스트
 //
 // 결함: bin/cli.js의 configDirChecks 배열에 "skills/makdoong2-team"이 포함되어 있으나
 // scripts/install-lib.mjs는 해당 디렉토리를 배포하지 않음
@@ -15,7 +15,7 @@
 //   exit code에 영향 없음 (cli.js 174-182번 라인 확인).
 //   그래도 secrets를 더미 값으로 채워 원인을 명확히 한다.
 //
-// 실행: node --test test/doctor-exit-code.test.mjs
+// 실행: node --test test/doctor-exit-code.test.ts
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

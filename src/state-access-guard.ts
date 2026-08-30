@@ -2,7 +2,7 @@
 //
 // 왜 별도 모듈인가: opencode 플러그인 로더는 진입 파일(opencode-plugin.ts)의 모든
 // named export 를 plugin factory 로 호출한다 (ARCHITECTURE.md §2). 신규 helper 는
-// 이 파일에 두고 import 한다. `test/plugin-exports-shape.test.mjs` 가 진입 파일의
+// 이 파일에 두고 import 한다. `test/plugin-exports-shape.test.ts` 가 진입 파일의
 // export 집합을 고정한다.
 //
 // ── 배경 (issue #5) ──

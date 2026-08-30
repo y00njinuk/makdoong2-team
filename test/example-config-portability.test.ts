@@ -1,9 +1,9 @@
-// test/example-config-portability.test.mjs — opencode.json.example 이식성 회귀 테스트
+// test/example-config-portability.test.ts — opencode.json.example 이식성 회귀 테스트
 //
 // opencode.json.example 및 fresh install이 생성하는 opencode.json이
 // Windows 전용 MCP spawn 명령을 포함하지 않음을 검증한다.
 //
-// Run via: node --test test/example-config-portability.test.mjs
+// Run via: node --test test/example-config-portability.test.ts
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";

@@ -1,4 +1,4 @@
-// test/agent-permission-keys.test.mjs — 에이전트 frontmatter 의 permission 규칙이
+// test/agent-permission-keys.test.ts — 에이전트 frontmatter 의 permission 규칙이
 // 런타임에서 **실제로 평가되는 형태**인지 고정한다.
 //
 // ── 배경 ──

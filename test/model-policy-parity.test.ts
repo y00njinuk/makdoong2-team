@@ -1,4 +1,4 @@
-// test/model-policy-parity.test.mjs — 정본과 CLI 미러의 동치를 강제한다.
+// test/model-policy-parity.test.ts — 정본과 CLI 미러의 동치를 강제한다.
 //
 // ── 왜 필요한가 ──
 // 모델 정책은 두 벌로 존재한다.

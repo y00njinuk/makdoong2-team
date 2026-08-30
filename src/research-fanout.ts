@@ -2,7 +2,7 @@
 //
 // Why a separate module: the opencode plugin loader calls EVERY named export of
 // the entry file as a plugin factory (see ARCHITECTURE.md §2). New helpers must
-// live outside opencode-plugin.ts and be imported. `test/plugin-exports-shape.test.mjs`
+// live outside opencode-plugin.ts and be imported. `test/plugin-exports-shape.test.ts`
 // pins the entry file's export set.
 //
 // Everything here is deterministic and side-effect free so the fan-out contract

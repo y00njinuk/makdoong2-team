@@ -50,7 +50,7 @@
   "license": "MIT",
   "engines": {
     "opencode": ">=1.18.0",
-    "node": ">=20.0.0",
+    "node": ">=22.18.0",
     "tmux": ">=3.0"
   },
   "peerDependencies": {
@@ -68,12 +68,12 @@
     "build:entry": "tsc -p tsconfig.entry.json && node -e \"import('node:fs').then(({chmodSync})=>{for(const f of ['bin/cli.js','postinstall.mjs','scripts/run-tests.mjs','scripts/test-postinstall.mjs']) chmodSync(f, 0o755)})\"",
     "typecheck": "tsc -p tsconfig.json",
     "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\"",
-    "prepack": "npm run clean && npm run build && node --test test/entry-artifacts.test.mjs",
+    "prepack": "npm run clean && npm run build && node --test test/entry-artifacts.test.ts",
     "postinstall": "node postinstall.mjs",
     "prepare": "husky install",
     "test": "XDG_CONFIG_HOME=\"$(mktemp -d)\" XDG_CACHE_HOME=\"$(mktemp -d)\" npm run test:all",
     "test:all": "npm run build && node scripts/run-tests.mjs",
-    "test:install": "node test/install-lib.test.mjs",
+    "test:install": "node test/install-lib.test.ts",
     "test:postinstall": "node scripts/test-postinstall.mjs",
     "test:ubuntu": "bash scripts/test-ubuntu.sh",
     "release": "bash scripts/release.sh",

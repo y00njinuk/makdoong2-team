@@ -1,4 +1,4 @@
-// test/entry-artifacts.test.mjs — 진입점 산출물의 계약을 고정한다.
+// test/entry-artifacts.test.ts — 진입점 산출물의 계약을 고정한다.
 //
 // 배경: bin/cli.js · postinstall.mjs · scripts/*.mjs 는 손으로 쓴 JS 가 아니라
 // 같은 이름의 .ts / .mts 를 `tsc -p tsconfig.entry.json` 으로 제자리 컴파일한
