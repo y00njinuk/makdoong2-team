@@ -381,23 +381,29 @@ describe("dispatch_stage — hang_history 리셋은 substage done=true 일 때�
     "utf8",
   );
 
-  test("리셋 직전에 .done 마커를 읽어 true 일 때만 리셋한다", () => {
-    const m = pluginSrc.match(/if \(success\) \{[\s\S]{0,2000}?\[hang_history\] reset /);
-    assert.ok(m, "success 분기 안의 hang_history 리셋 블록을 찾을 수 없다");
-    const block = m[0];
-    assert.match(block, /\.done`/, "리셋 전에 .done 마커를 조회해야 한다");
-    assert.match(block, /=== "true"/, "done 값이 정확히 \"true\" 일 때만 리셋해야 한다");
+  // issue #9 에서 이 판정이 `classifyStageCompletion` (src/stage-completion.ts) 으로
+  // 옮겨졌다. 불변식은 그대로다 — 리셋은 .done 을 다시 읽어 정확히 "true" 일 때만
+  // 한다. 값 자체의 매핑은 test/stage-completion.test.ts 가 단위로 검증한다.
+  const completionBlock = pluginSrc.slice(
+    pluginSrc.indexOf("const readMarker ="),
+    pluginSrc.indexOf("const retryDisallowed ="),
+  );
+
+  test("리셋 직전에 .done 마커를 읽어 판정한다", () => {
+    assert.ok(completionBlock.length > 0, "완료 판정 블록을 찾을 수 없다");
+    assert.match(completionBlock, /readMarker\("done"\)/, "리셋 전에 .done 마커를 조회해야 한다");
+    assert.match(completionBlock, /classifyStageCompletion\(/,
+      "판정은 순수 함수 classifyStageCompletion 이 한다");
+    assert.match(completionBlock, /if \(completion\.resetHangHistory\)/,
+      "리셋은 판정 결과로만 게이트되어야 한다 — dispatch 정상 반환이 아니라");
   });
 
   test("리셋 경로의 state.json 접근은 effectiveWorktree cwd 를 쓴다", () => {
     // 한 substage 의 state.json 접근은 전부 같은 cwd(effectiveWorktree)여야 한다.
     // args.worktree 를 쓰면 자동 교정 발동 시 다른 파일에 리셋이 기록된다 (hardrule).
-    const m = pluginSrc.match(/if \(success\) \{[\s\S]{0,2500}?\n {12}\}\n/);
-    assert.ok(m, "success 분기 블록을 찾을 수 없다");
-    const block = m[0];
-    assert.ok(!/cwd\(args\.worktree\)/.test(block),
-      "hang_history 리셋 블록이 args.worktree cwd 를 쓰고 있다 — effectiveWorktree 로 통일할 것");
-    assert.match(block, /cwd\(effectiveWorktree\)/);
+    assert.ok(!/cwd\(args\.worktree\)/.test(completionBlock),
+      "완료 판정·리셋 블록이 args.worktree cwd 를 쓰고 있다 — effectiveWorktree 로 통일할 것");
+    assert.match(completionBlock, /cwd\(effectiveWorktree\)/);
   });
 
   test("done=false 리셋 스킵이 로그로 관측 가능하다", () => {

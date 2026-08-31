@@ -15,7 +15,7 @@
 | [7](#7-모델-폴백) | 모델 폴백 |
 | [8](#8-서브세션-생존-감지와-재시도) | 서브세션 생존 감지와 재시도 |
 | [9](#9-tmux-막둥이-pane) | tmux 막둥이 pane |
-| [10](#10-무한루프-차단) | 무한루프 차단 (REJECTED / stall) |
+| [10](#10-무한루프-차단) | 무한루프 차단 (REJECTED / stall / 마커 없는 종료) |
 | [11](#11-로깅) | 로깅 |
 | [12](#12-배포와-설치-레이아웃) | 배포와 설치 레이아웃 |
 | [13](#13-실패-모드와-복구) | 실패 모드와 복구 |
@@ -83,6 +83,7 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 | `src/model-fallback-policy.ts` | primary → fallback 체인 단일 정의 + invariant 검증 |
 | `src/agent-stage-config.ts` | `Stage` 타입, 에이전트 spec, stage → spec 파일 매핑 |
 | `src/stall-escalation.ts` | `hang_history` 기반 재디스패치 차단 판정 (§10.2) |
+| `src/stage-completion.ts` | substage 마커로 완료 여부 판정 — `done` / `paused` / `incomplete` / `unknown` (§10.3) |
 | `src/research-fanout.ts` | 병렬 리서치 fan-out 의 순수 계약 — 소스 레지스트리, 쿼리 정규화, 출력 파싱, 병합 (§3.6) |
 | `src/skill-mcp-registry.ts` | SKILL.md frontmatter 스캔 → `mcp_name → skill_name` 룩업 |
 | `src/mcp-secret-injector.ts` | MCP 초기화 전 secret in-place 주입 |
@@ -158,7 +159,8 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 8. stall/gone 감지 시 최대 3회 자동 재시도 (§8.4)
 9. tmux pane spawn / close, worktree state reverse sync (finally)
 
-반환: `{ ok: true, stage, agent, model, session_id, output }` (`output` ≤ 8000자) 또는 실패 스키마 (§8.6).
+반환: `{ ok, stage, agent, model, session_id, output, completion, stage_done }` (`output` ≤ 8000자) 또는 실패 스키마 (§8.6).
+**완료 판정은 `completion` / `stage_done` 으로 한다 — `output` 문구가 아니다** (§10.3).
 
 ### 3.3 `dispatch_verifier` — 3자 검증
 
@@ -204,7 +206,21 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 4. `parseResearchOutput()` — 마지막 ```json 펜스 우선, 없으면 균형 잡힌 중괄호 스캔. **파싱 실패는 실패로 기록한다** (빈 성공으로 뭉개지 않는다)
 5. `mergeResearchFindings()` → `.makdoong2-team/<이슈>/research-findings.json` 기록 + `…requirements.research_path` 마커 (상대경로, §5.3)
 
-**실패 격리**: 소스 하나가 죽어도 나머지 결과는 그대로 남는다. 한 소스라도 성공하면 `ok: true` 이고, 호출자는 `failed` 배열로 결손을 판단한다. 전 소스 실패 시에만 `ok: false`.
+**실패 격리**: 소스 하나가 죽어도 나머지 결과는 그대로 남는다. 한 소스라도 성공하면 `ok: true` 이고 전 소스 실패 시에만 `ok: false`.
+
+**결손은 필드로 알린다 — 추론시키지 않는다 (issue #9).** 종전에는 3개 중 1개만 성공한 fan-out 과 3개 모두 성공한 fan-out 이 `ok: true` 로 동일하게 보였고, 차이는 호출자가 스스로 알아채야 하는 `failed` 배열뿐이었다. 실제로 이틀 연속 confluence·bitbucket 이 정확히 10분에 타임아웃했는데 planner 는 jira 단독 결과를 완전한 근거로 취급했고, 그 뒤 결손을 직접 메우려다 세션 예산을 소진하고 **마커를 하나도 기록하지 못한 채** 종료했다 (각 27분·17분). 그래서 `classifyFanoutOutcome()` 이 결손을 자체 필드로 승격한다:
+
+| 반환 필드 | 값 |
+|---|---|
+| `status` | `"ok"` / `"partial"` / `"failed"` |
+| `partial` | 일부만 성공했으면 `true` |
+| `next_action` | 상태별 지시문 — 부분 성공이면 (1) gaps 명시 (2) **직접 조사로 메우지 말 것** (3) 마커 기록은 생략 불가 |
+
+부분 성공은 `logger.warn` 으로도 남긴다 (기본 로깅 레벨이 `error` 라 debug 로는 보이지 않는다).
+
+**실패한 소스를 자동 재시도하지 않는 이유**: 관측된 두 실패는 모두 예산을 다 쓴 타임아웃이었다. 그 자리에서 재시도하면 같은 결과에 `timeout_ms` 를 한 번 더 쓰고 부모 세션의 시한까지 밀어낸다. 결손을 호출자에게 넘겨 focus 를 좁혀 재호출할지, gaps 로 남기고 진행할지 판단하게 한다.
+
+순수 계약은 `src/research-fanout.ts`, 회귀는 `test/research-fanout.test.ts`.
 
 **설정**: `research.max_parallel` (기본 3, 상한 6), `research.timeout_minutes` (기본 10 — substage 상한보다 짧게 둬서, 답하지 못하는 소스를 기다리는 대신 실패로 기록하고 나머지 결과를 살린다).
 
@@ -229,6 +245,8 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 | 훅 | 시점 | 하는 일 |
 |---|---|---|
 | `chat.params` | 매 LLM 호출 | `sessionID → agent` 매핑 저장. **hook input 에 agent ID 가 없어서** 우회 조달하는 용도 |
+
+> **`chat.params` 는 정체성을 downgrade 하지 않는다 (hardrule).** 이 매핑이 sealed 판정의 유일한 입력이므로, 이미 sealed 로 확정된 세션에 makdoong2 소속이 아닌 agent 이름이 들어오면 **무시하고 `logger.warn`** 한다. 실제로 80% NUDGE 프롬프트가 `agent` 를 싣지 않아 opencode 가 기본 에이전트(`build`)로 그 turn 을 돌렸고, `chat.params` 가 매핑을 덮어써 그 뒤로 해당 세션의 outer-world 차단과 산출물 경로 제한이 조용히 풀렸다 (issue #9). 1차 방어는 모든 프롬프트 호출부가 `agent` 를 싣는 것이고(`test/stage-completion.test.ts` 가 5개 호출부 전부를 강제), 이 규칙은 새 호출부가 또 빠뜨려도 보안 속성이 유지되게 하는 2차 방어다.
 | `tool.execute.before` | 툴 실행 전 | 부모 세션 캐치 · sealed workflow · leader 하드룰 · `guard-bash.sh` |
 | `tool.execute.after` | 툴 실행 후 | `sync-state.sh` 전달 · skill_mcp 오류 보정 |
 
@@ -822,6 +840,31 @@ tmux list-panes -aF '#{pane_id}\t#{@mdn2_session}' | grep ses_XXX
 **fail-open**: `shouldEscalateStall` 은 `hangCount` 가 NaN(state 판독 실패)이면 차단하지 않는다. 판독 불가를 차단으로 취급하면 state 를 못 읽는 환경에서 워크플로우 전체가 교착된다.
 
 관련: `src/stall-escalation.ts` · `src/config.ts` (`DEFAULT_STALL_ESCALATE_THRESHOLD`) · `agents/makdoong2-team-leader.md` ("stall 재디스패치 금지") · `test/dispatch-stage-redispatch.test.ts`.
+
+### 10.3 마커 없는 조용한 종료 — `completion` / `stage_done`
+
+**문제였던 것.** `pollSubSession` 의 `kind: "text"` 는 "최종 assistant turn 이 나왔다" 는 뜻이지 "substage 가 끝났다" 가 아니다. 예산을 전부 쓰고 `"[1_planning 조기종료 — 시한 80% 도달] … 변경한 state.json 마커: 없음"` 이라고 말하며 끝난 세션도 완주한 세션과 **정확히 같은 outcome kind** 를 낸다. `dispatch_stage` 는 이것을 `ok: true` 로 반환했고, 부장님은 `output` 의 자연어를 읽고 사용자에게 "조회 및 템플릿 검증 완료" 라고 보고했다. 27분(`elapsed_ms≈1,624,653`) 뒤 state.json 은 그대로였다 (issue #9).
+
+`hang_history` 도 비어 있었다. `done=false` 라 리셋은 건너뛰었지만(§10.2) **기록도 하지 않았기 때문**에, 이 실패 모드는 호출 간 상한(`stall_escalate_threshold`)에 영영 도달하지 못하고 매 호출이 타임아웃 전체를 태우며 무한 반복될 수 있었다.
+
+**해결.** 완료 판정을 게이트·verifier 가 읽는 그 `.done` 마커로 옮긴다. `src/stage-completion.ts` 의 `classifyStageCompletion()` 이 순수 함수로 판정하고, `dispatch_stage` 는 그 결과를 그대로 싣는다.
+
+| `completion` | 조건 | `stage_done` | `ok` | 부수 효과 |
+|---|---|---|---|---|
+| `done` | `.done == "true"` | `true` | `true` | `hang_history` 리셋 |
+| `paused` | `.done != true` 이고 `.interview_required == "true"` | `false` | `true` | 없음 — 의도된 중단 |
+| `incomplete` | `.done == "false"` 이고 pause 마커 없음 | `false` | **`false`** | `hang_history` append (`reason: "no_done_marker"`) |
+| `unknown` | 마커를 읽지 못함 (`null` / 리터럴 `"null"`) | `null` | `true` | 없음 — fail-open |
+
+**정확히 `"false"` 를 읽었을 때만 실패로 뒤집는다.** 판독 실패를 실패로 취급하면 state.json 을 못 읽는 환경에서 끝난 작업이 재시도 루프로 들어간다 (`shouldEscalateStall` 의 fail-open 과 같은 이유).
+
+**`paused` 를 따로 둔 이유**: planner 는 `interview_required=true` 를 기록하고 의도적으로 중단할 수 있다 (§1 통합 Planning). 이것을 `incomplete` 로 묶으면 정상 흐름이 실패로 보고되고 `hang_history` 에 누적돼 결국 재디스패치가 차단된다.
+
+**마커 읽기 cwd**: `readMarker()` 는 `effectiveWorktree` 에서 실행한다 — §10.2 의 cwd 정합성 하드룰과 같은 이유다.
+
+**80% NUDGE 문구도 함께 고쳤다.** 종전 문구는 2번 항목에서 `state.sh` 마커 기록을 요구하면서 마지막 줄에서 "새 tool 호출 추가 금지" 라고 못박아 서로 모순됐다. planner 는 Jira 검증 6/6 을 끝내고도 마커를 남기지 않았다. 지금은 마커 기록이 금지의 **명시적 예외**이고, 마커 없이 종료하면 substage 전체가 재실행된다는 대가를 문구가 직접 알린다.
+
+부장님 규약은 `agents/makdoong2-team-leader.md` "substage 완료 판정은 `stage_done` 으로 한다" 절에 있다. 회귀: `test/stage-completion.test.ts`.
 
 ---
 

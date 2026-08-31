@@ -102,6 +102,25 @@ permission:
 
 에이전트 정의 파일의 frontmatter `tools:` 는 **whitelist 가 아니다** — 목록에 없는 툴도 permission 설정이 허용하면 실행된다. 실제로 planner frontmatter 에 `Write` 가 없다는 이유로 "planner 는 구조적으로 파일 생성이 불가능하다" 고 단정하고 워크플로를 중단시킨 오진단이 있었다 — 로그상 planner 는 `write` 를 정상 실행해 왔고 차단 이력이 0건이었다 (GitHub issue #8). 서브에이전트가 파일을 못 만들었다면 원인은 **훅 차단 메시지·permission 프롬프트 대기(PERMISSION_STALL)·프롬프트 지시** 중에 있다. frontmatter 를 근거로 사용자에게 에이전트 정의 수정을 요구하지 말고, 실패한 세션의 실제 차단 로그를 근거로 판단하라.
 
+## substage 완료 판정은 `stage_done` 으로 한다 — 출력 문구로 판단하지 말 것 (hardrule)
+
+`dispatch_stage` 반환 JSON 의 `completion` / `stage_done` 이 완료 판정의 유일한 근거다. `output` 은 서브에이전트가 쓴 자연어이고, 자기 작업을 실제보다 후하게 서술한다.
+
+| `completion` | `stage_done` | `ok` | 뜻 | 올바른 조치 |
+|---|---|---|---|---|
+| `done` | `true` | `true` | substage 완료 | `dispatch_verifier` 로 진행 |
+| `paused` | `false` | `true` | 서브에이전트가 `interview_required=true` 를 기록하고 **의도적으로** 중단 | 사용자 인터뷰 수행 후 답변을 `context` 에 실어 재dispatch |
+| `incomplete` | `false` | `false` | 최종 텍스트는 나왔지만 **마커가 하나도 없음** | 아래 규약 |
+| `unknown` | `null` | `true` | `.done` 마커를 읽지 못함 | `state.sh status <이슈키>` 로 상태 먼저 확인 |
+
+**`completion: "incomplete"` 규약**:
+
+1. **사용자에게 "완료" 로 보고하지 않는다.** 소요 시간(`elapsed_ms`)과 `output` 의 미완료 사유를 그대로 전달한다. 실제로 27분을 소모하고 마커가 0개인 dispatch 를 "조회 및 템플릿 검증 완료 / 조사 완료" 로 보고한 사고가 있었다 (GitHub issue #9).
+2. `next_action` 을 그대로 따른다 (하드룰 4). 해결 가능한 사유면 `context` 에 지시를 실어 재dispatch 하고, 사용자 개입이 필요하면 보고 후 대기한다.
+3. 이 경우는 `hang_history` 에 `reason: "no_done_marker"` 로 자동 기록된다. 반복하면 `stall_escalate_threshold` 에서 재dispatch 가 차단되므로, 같은 조건으로 무한히 재호출하지 않는다.
+
+`ok: true` 만 보고 넘어가지 말 것 — `paused` 와 `unknown` 도 `ok: true` 이며, 둘 다 substage 는 끝나지 않았다.
+
 ## verdict 는 셋이다 — REJECTED 와 ERROR 를 절대 섞지 말 것 (hardrule)
 
 `dispatch_verifier` 의 `verdict` 는 `VERIFIED` / `REJECTED` / `ERROR` 세 값이다.

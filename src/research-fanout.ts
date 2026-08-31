@@ -386,3 +386,71 @@ export function summarizeOutcomes(outcomes: SourceOutcome[]): string[] {
       : `${o.label}: 실패 — ${o.error ?? "unknown"} (${Math.round(o.elapsed_ms / 1000)}s)`,
   );
 }
+
+export type FanoutStatus = "ok" | "partial" | "failed";
+
+export interface FanoutOutcome {
+  status: FanoutStatus;
+  /** `false` only when NO source produced anything. */
+  ok: boolean;
+  /** `true` when some sources succeeded and others did not. */
+  partial: boolean;
+  next_action: string;
+}
+
+/**
+ * Turn the merged counts into the caller-facing verdict.
+ *
+ * Why this is not just `ok = okCount > 0`: a fan-out that covered 1 of 3 sources
+ * returned the same shape as one that covered all 3, and the only difference was
+ * a `failed` array the caller had to notice on its own. It did not — on two
+ * consecutive days Confluence and Bitbucket both timed out at exactly 10 minutes,
+ * the planner treated the Jira-only result as its evidence base, and then spent
+ * the rest of its budget trying to make up the difference by hand and recorded
+ * no markers at all (GitHub #9). A shortfall has to arrive as its own field with
+ * its own instruction, not as something to infer.
+ *
+ * Deliberately NOT an automatic retry of the failed sources: both failures were
+ * full-budget timeouts, so retrying in place spends another `timeout_ms` for the
+ * same result and pushes the parent session past its own deadline. The caller
+ * gets the shortfall and decides — narrower focus, a later round, or proceed
+ * with recorded gaps.
+ */
+export function classifyFanoutOutcome(
+  counts: { requested: number; ok: number; failed: number },
+  artifactPath: string | null,
+  failedSources: string[],
+): FanoutOutcome {
+  if (counts.ok === 0) {
+    return {
+      status: "failed",
+      ok: false,
+      partial: false,
+      next_action:
+        "모든 소스 조사가 실패했다. failed 사유를 사용자에게 그대로 보고하라. " +
+        "조사 결과를 추측으로 대체하지 말 것.",
+    };
+  }
+  if (counts.failed === 0) {
+    return {
+      status: "ok",
+      ok: true,
+      partial: false,
+      next_action: `조사 결과를 읽고 요구사항 체크리스트에 반영하라: ${artifactPath ?? "(artifact 미기록)"}`,
+    };
+  }
+  return {
+    status: "partial",
+    ok: true,
+    partial: true,
+    next_action:
+      `부분 성공 — ${counts.requested} 개 소스 중 ${counts.failed} 개 실패 (${failedSources.join(", ")}). ` +
+      `성공한 소스의 결과로 진행하되 다음 셋을 반드시 지킨다: ` +
+      `(1) 실패한 소스에서 확인하려던 항목을 산출물의 gaps/미확인 항목에 명시적으로 남긴다. ` +
+      `(2) 실패한 소스를 직접 조사해 메우려 하지 말 것 — 세션 예산을 소진하고 마커를 하나도 남기지 못한 ` +
+      `실패 사례가 있다. 필요하면 focus 를 좁혀 dispatch_research 를 1회만 다시 호출한다. ` +
+      `(3) 실패 소스가 요구사항 확정에 필수면 마커를 먼저 기록한 뒤 사용자에게 보고한다. ` +
+      `조사 완결성과 무관하게 substage 마커 기록은 생략하지 않는다. ` +
+      `조사 결과: ${artifactPath ?? "(artifact 미기록)"}`,
+  };
+}

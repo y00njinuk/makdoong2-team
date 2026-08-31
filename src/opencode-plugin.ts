@@ -33,6 +33,7 @@ import {
 import { nextModel, applyConfigOverrides, POLICIES } from "./model-fallback-policy.ts";
 import { agentForStage, STAGE_SPEC_FILES, type Stage } from "./agent-stage-config.ts";
 import { shouldEscalateStall } from "./stall-escalation.ts";
+import { classifyStageCompletion, INCOMPLETE_HANG_REASON } from "./stage-completion.ts";
 import {
   buildStateWriteBlockMessage,
   classifyStateJsonAccess,
@@ -47,6 +48,7 @@ import {
   RESEARCH_SOURCES,
   DEFAULT_RESEARCH_TIMEOUT_MINUTES,
   buildResearchPrompt,
+  classifyFanoutOutcome,
   mergeResearchFindings,
   normalizeQueries,
   parseResearchOutput,
@@ -1189,9 +1191,24 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     },
 
     "chat.params": async (input) => {
-      if (input.sessionID && input.agent) {
-        sessionAgent.set(input.sessionID, input.agent);
+      if (!input.sessionID || !input.agent) return;
+      // 정체성은 downgrade 하지 않는다 (2차 방어).
+      // sessionAgent 는 sealed 서브에이전트 판정의 입력이므로, 한 번 sealed 로
+      // 확정된 세션이 makdoong2 소속이 아닌 이름으로 덮어써지면 그 세션의
+      // outer-world 차단·산출물 경로 제한이 조용히 풀린다. agent 를 빠뜨린
+      // 프롬프트 하나로 그렇게 되어선 안 된다 — 실제로 NUDGE 가 그랬다 (issue #9).
+      // 호출부(1차 방어)는 전부 agent 를 싣지만, 새 호출부가 또 빠뜨려도
+      // 보안 속성은 유지되어야 한다.
+      const known = sessionAgent.get(input.sessionID);
+      if (known && SEALED_SUBAGENTS.has(known) && !SEALED_SUBAGENTS.has(input.agent)) {
+        logger.warn(
+          `[makdoong2-team hook] chat.params agent downgrade ignored: session=${input.sessionID} ` +
+          `known="${known}" incoming="${input.agent}" — sealed 정체성을 유지한다. ` +
+          `이 프롬프트 호출부가 agent 를 싣지 않았을 가능성이 높다.`,
+        );
+        return;
       }
+      sessionAgent.set(input.sessionID, input.agent);
     },
 
     // ─────────────────────────────────────────────────────────────
@@ -2125,18 +2142,26 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
               `  monitor: opencode attach http://127.0.0.1:44707 --session ${subSessionID}`,
             );
 
+            // 종전 문구는 2번에서 state.sh 마커 기록을 요구하면서 마지막 줄에서
+            // "새 tool 호출 추가 금지" 라고 못박아 서로 모순됐다. 실제로 planner 가
+            // Jira 검증 6/6 을 끝내고도 "마커 기록 전 시한 도달" 이라며 마커를
+            // 하나도 남기지 않고 종료해 27분이 통째로 버려졌다 (GitHub issue #9).
+            // 마커 기록은 금지의 예외임을 문구 안에서 명시한다.
             const nudgeText = [
-              "⚠ 작업 시한 80% 도달 — 현재 작업을 마무리하고 즉시 세션을 종료하시오.",
+              "⚠ 작업 시한 80% 도달 — 지금부터는 마커 기록과 요약만 하고 즉시 세션을 종료하시오.",
               "",
-              "허용된 남은 작업:",
-              "1. 진행 중인 단일 tool call 완료",
-              `2. bash ${SCRIPTS_DIR}/state.sh 로 .done 마커 확인 후 완료 시 true 설정`,
+              "순서대로 수행:",
+              "1. 진행 중인 단일 tool call 만 마무리한다. 새 조사·탐색·구현은 시작하지 않는다.",
+              `2. **이미 끝낸 작업의 state.json 마커를 지금 전부 기록한다.** bash ${SCRIPTS_DIR}/state.sh set 호출은`,
+              "   아래 금지 규칙의 예외이며 필요한 횟수만큼 호출한다. 완료한 substage 는 .done=true 까지 기록한다.",
+              "   마커 없이 종료하면 그 작업은 수행되지 않은 것으로 판정되어 substage 전체가 처음부터 재실행된다",
+              "   — 지금까지의 결과가 통째로 버려진다. 기록할 시간이 없다는 판단은 하지 말 것.",
               "3. 3줄 이상 한국어 요약 텍스트 출력:",
               "   - 처리한 substage 결과 (완료/차단/조기종료)",
               "   - 변경한 state.json 마커 목록",
               "   - 다음 단계 안내",
               "",
-              "금지: 새 tool 호출 추가. 요약 텍스트 출력 직후 즉시 종료.",
+              "금지: 새로운 조사·구현 tool 호출. 허용: state.sh 마커 기록. 요약 출력 직후 즉시 종료.",
             ].join("\n");
 
             const engineerNudge = async (sid: string, elapsedMs: number) => {
@@ -2145,6 +2170,13 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 .promptAsync({
                   path: { id: sid },
                   body: {
+                    // agent 를 빼면 opencode 가 기본 에이전트(`build`)로 이 turn 을
+                    // 돌리고, `chat.params` 가 sessionAgent[sid] 를 그 값으로 덮어쓴다.
+                    // 그 순간부터 이 세션은 sealed sub-agent 로 인식되지 않아
+                    // outer-world 위임 차단과 산출물 경로 제한이 전부 풀린다.
+                    // 실측 로그에서 NUDGE 직후 bash 호출이 agent="build" 로 기록됐다
+                    // (GitHub issue #9 부수 관찰). 여기서만 누락돼 있었다.
+                    agent: spec.id,
                     parts: [{ type: "text", text: nudgeText }],
                     model: { providerID: activeProviderID, modelID: activeModelID },
                   } as Record<string, unknown>,
@@ -2383,33 +2415,67 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
 
             promptPromise.catch(() => {});
 
-            if (success) {
-              // hang_history 리셋 조건은 "dispatch 정상 반환" 이 아니라 "substage
-              // 실제 완료(done=true)" 다. 종전에는 세션이 텍스트만 뱉고 done=false
-              // 로 끝나도 리셋됐고, 재-dispatch 를 반복하는 동안 이력이 매번
-              // 비워져 stall_escalate_threshold 가 사실상 도달 불가였다 (issue #8).
-              // cwd 는 effectiveWorktree — 이 substage 의 다른 state.json 접근과
-              // 같은 파일을 봐야 한다 (args.worktree 를 쓰면 교정 발동 시 갈린다).
-              const resetDonePath = `${stageJqPath(args.target_stage as Stage)}.done`;
-              const resetDoneR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${resetDonePath}`
+            // 완료 판정은 sub-agent 의 문장이 아니라 substage 마커로 한다 (issue #9).
+            // pollSubSession 의 kind="text" 는 "최종 turn 이 나왔다" 일 뿐이고,
+            // 예산을 다 쓰고 "조기종료 — 마커 기록 없음" 이라고 말한 세션도 같은 kind 를
+            // 낸다. 그 둘을 구분하는 유일한 값이 게이트·verifier 가 읽는 그 .done 이다.
+            // cwd 는 effectiveWorktree — 이 substage 의 다른 state.json 접근과
+            // 같은 파일을 봐야 한다 (args.worktree 를 쓰면 교정 발동 시 갈린다).
+            const readMarker = async (field: string): Promise<string | null> => {
+              const r = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${`${stageJqPath(args.target_stage as Stage)}.${field}`}`
                 .cwd(effectiveWorktree).quiet().nothrow();
-              const resetDoneValue = resetDoneR.exitCode === 0
-                ? (resetDoneR.stdout?.toString().trim() ?? null)
-                : null;
-              if (resetDoneValue === "true") {
-                const resetPath = `${stageJqPath(args.target_stage as Stage)}.hang_history`;
-                const resetR = await $`bash ${SCRIPTS_DIR}/state.sh set ${args.issue} ${resetPath} ${"[]"}`
-                  .cwd(effectiveWorktree).quiet().nothrow();
-                logger.debug(
-                  `[hang_history] reset issue=${args.issue} stage=${args.target_stage} ` +
-                  `exit=${resetR.exitCode} — substage done=true`,
-                );
-              } else {
-                logger.debug(
-                  `[hang_history] reset skipped issue=${args.issue} stage=${args.target_stage} ` +
-                  `done=${resetDoneValue} — dispatch 는 정상 반환했지만 substage 미완료`,
-                );
-              }
+              return r.exitCode === 0 ? (r.stdout?.toString().trim() ?? null) : null;
+            };
+            const completion = classifyStageCompletion({
+              outcomeKind: finalOutcome.kind,
+              success,
+              doneValue: success ? await readMarker("done") : null,
+              interviewRequiredValue: success ? await readMarker("interview_required") : null,
+            });
+
+            if (completion.resetHangHistory) {
+              // 리셋 조건은 "dispatch 정상 반환" 이 아니라 "substage 실제 완료(done=true)"
+              // 다. 종전에는 세션이 텍스트만 뱉고 done=false 로 끝나도 리셋됐고,
+              // 재-dispatch 를 반복하는 동안 이력이 매번 비워져
+              // stall_escalate_threshold 가 사실상 도달 불가였다 (issue #8).
+              const resetPath = `${stageJqPath(args.target_stage as Stage)}.hang_history`;
+              const resetR = await $`bash ${SCRIPTS_DIR}/state.sh set ${args.issue} ${resetPath} ${"[]"}`
+                .cwd(effectiveWorktree).quiet().nothrow();
+              logger.debug(
+                `[hang_history] reset issue=${args.issue} stage=${args.target_stage} ` +
+                `exit=${resetR.exitCode} — substage done=true`,
+              );
+            } else if (success) {
+              logger.debug(
+                `[hang_history] reset skipped issue=${args.issue} stage=${args.target_stage} ` +
+                `completion=${completion.completion} — dispatch 는 정상 반환했지만 substage 미완료`,
+              );
+            }
+
+            if (completion.recordHang) {
+              // hang_history 는 dispatch_stage 호출 사이를 넘어 살아남는 유일한
+              // 카운터다. 여기에 남기지 않으면 이 실패 모드는 cross-call 상한
+              // (stall_escalate_threshold) 에 영영 도달하지 못하고, 매 호출이
+              // 타임아웃 전체를 태우며 무한히 재실행된다 (issue #9).
+              const incompleteEntry = JSON.stringify({
+                attempt,
+                at: new Date().toISOString(),
+                reason: INCOMPLETE_HANG_REASON,
+                elapsed_ms: finalOutcome.elapsedMs,
+                polls: finalOutcome.polls,
+                session_id: subSessionID,
+                model: activeModelFull,
+                fallback_depth: activeFallbackDepth,
+                final: true,
+              });
+              const incompleteJqPath = stageJqPath(args.target_stage as Stage) + ".hang_history";
+              const incompleteR = await $`bash ${SCRIPTS_DIR}/state.sh append ${args.issue} ${incompleteJqPath} ${incompleteEntry}`
+                .cwd(effectiveWorktree).quiet().nothrow();
+              logger.warn(
+                `[dispatch_stage] STAGE_INCOMPLETE issue=${args.issue} stage=${args.target_stage} ` +
+                `session=${subSessionID} outcome_kind=${finalOutcome.kind} elapsed_ms=${finalOutcome.elapsedMs} ` +
+                `— 최종 텍스트는 나왔으나 .done=false. hang_history append exit=${incompleteR.exitCode}`,
+              );
             }
 
             const retryDisallowed =
@@ -2422,7 +2488,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
               : undefined;
 
             finalResultJson = JSON.stringify({
-              ok: success,
+              ok: completion.ok,
               stage: args.target_stage,
               agent: spec.id,
               model: activeModelFull,
@@ -2432,6 +2498,9 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
               fallback_depth: activeFallbackDepth,
               output: finalLegacy.text.slice(0, 8000),
               outcome_kind: finalOutcome.kind,
+              // 완료 여부는 이 두 필드로 읽는다. output 문구를 해석하지 말 것 (issue #9).
+              stage_done: completion.stageDone,
+              completion: completion.completion,
               polls: finalOutcome.polls,
               elapsed_ms: finalOutcome.elapsedMs,
               transient_failures:
@@ -2440,9 +2509,10 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                   : undefined,
               retry_disallowed: retryDisallowed || undefined,
               retry_disallowed_reason: retryDisallowedReason,
-              reason: success
+              next_action: completion.nextAction,
+              reason: completion.ok
                 ? overriddenReason
-                : finalLegacy.text,
+                : (completion.incompleteReason ?? finalLegacy.text),
             });
           } finally {
             if (effectiveWorktree !== cwd) {
@@ -3106,30 +3176,44 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
           }
 
           const okCount = artifact.counts.ok;
+          const failedOutcomes = outcomes.filter((o) => o.status === "failed");
+          const fanout = classifyFanoutOutcome(
+            artifact.counts,
+            artifactWritten ? relPath : null,
+            failedOutcomes.map((o) => o.label),
+          );
           logger.debug(
             `[dispatch_research] fan-out done issue=${args.issue} ok=${okCount}/${outcomes.length} ` +
-            `findings=${artifact.counts.findings_total} elapsed_ms=${Date.now() - startedAll}`,
+            `findings=${artifact.counts.findings_total} status=${fanout.status} ` +
+            `elapsed_ms=${Date.now() - startedAll}`,
           );
+          if (fanout.partial) {
+            // debug 가 아니라 warn — 기본 로깅 레벨에서도 보여야 하는 결손이다.
+            logger.warn(
+              `[dispatch_research] PARTIAL issue=${args.issue} ok=${okCount}/${artifact.counts.requested} ` +
+              `failed=${failedOutcomes.map((o) => `${o.source}:${o.error ?? "unknown"}`).join(" | ")}`,
+            );
+          }
 
           return JSON.stringify({
             // 부분 성공도 ok=true. 한 소스가 죽었다고 나머지 조사 결과를 버리면
-            // fan-out 의 실패 격리가 의미를 잃는다. 호출자는 failed 배열을 본다.
-            ok: okCount > 0,
+            // fan-out 의 실패 격리가 의미를 잃는다. 결손은 status/partial 로 알린다.
+            ok: fanout.ok,
+            status: fanout.status,
+            partial: fanout.partial,
             issue: args.issue,
             artifact_path: artifactWritten ? relPath : null,
             artifact_error: artifactError,
             elapsed_ms: Date.now() - startedAll,
             counts: artifact.counts,
             summary: summarizeOutcomes(outcomes),
-            failed: outcomes.filter((o) => o.status === "failed").map((o) => ({
+            failed: failedOutcomes.map((o) => ({
               source: o.source,
               error: o.error,
             })),
             rejected,
             deferred,
-            next_action: okCount > 0
-              ? `조사 결과를 읽고 요구사항 체크리스트에 반영하라: ${relPath}`
-              : "모든 소스 조사가 실패했다. failed 사유를 사용자에게 보고하라.",
+            next_action: fanout.next_action,
           });
         },
       }),

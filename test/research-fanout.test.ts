@@ -22,6 +22,7 @@ const {
   normalizeQueries,
   buildResearchPrompt,
   parseResearchOutput,
+  classifyFanoutOutcome,
   mergeResearchFindings,
   summarizeOutcomes,
 } = mod;
@@ -325,5 +326,59 @@ describe("merge + summary", () => {
     assert.equal(lines.length, 2);
     assert.match(lines[0], /findings 2건/);
     assert.match(lines[1], /실패 — 인증 실패/);
+  });
+});
+
+/**
+ * Regression: a partial fan-out has to arrive as its own field, not as something
+ * the caller infers from a `failed` array (GitHub issue #9). On two consecutive
+ * days Confluence and Bitbucket both timed out at exactly 10 minutes, the caller
+ * read `ok:true` and treated the Jira-only result as a complete evidence base.
+ */
+describe("classifyFanoutOutcome — the shortfall is a field, not an inference", () => {
+  it("all sources ok → status ok, not partial", () => {
+    const r = classifyFanoutOutcome({ requested: 3, ok: 3, failed: 0 }, "p.json", []);
+    assert.equal(r.status, "ok");
+    assert.equal(r.ok, true);
+    assert.equal(r.partial, false);
+    assert.match(r.next_action, /p\.json/);
+  });
+
+  it("some sources failed → status partial, ok stays true", () => {
+    const r = classifyFanoutOutcome(
+      { requested: 3, ok: 1, failed: 2 },
+      "p.json",
+      ["Confluence", "Bitbucket"],
+    );
+    assert.equal(r.status, "partial");
+    assert.equal(r.partial, true);
+    assert.equal(r.ok, true,
+      "surviving sources stay valid — failure isolation is the point of the fan-out");
+    assert.match(r.next_action, /Confluence/);
+    assert.match(r.next_action, /Bitbucket/);
+  });
+
+  it("partial next_action forbids filling the gap by hand and demands markers anyway", () => {
+    const r = classifyFanoutOutcome({ requested: 3, ok: 1, failed: 2 }, "p.json", ["Confluence"]);
+    assert.match(r.next_action, /직접 조사해 메우려 하지 말/,
+      "the planner spent its remaining budget doing exactly this and recorded no markers");
+    assert.match(r.next_action, /마커 기록은 생략하지 않는다/);
+    assert.match(r.next_action, /gaps/);
+  });
+
+  it("every source failed → status failed and ok:false", () => {
+    const r = classifyFanoutOutcome({ requested: 2, ok: 0, failed: 2 }, "p.json", ["Jira", "Confluence"]);
+    assert.equal(r.status, "failed");
+    assert.equal(r.ok, false);
+    assert.equal(r.partial, false);
+    assert.match(r.next_action, /추측으로 대체하지 말/);
+  });
+
+  it("a missing artifact path never renders as undefined in the instruction", () => {
+    for (const counts of [{ requested: 1, ok: 1, failed: 0 }, { requested: 2, ok: 1, failed: 1 }]) {
+      const r = classifyFanoutOutcome(counts, null, ["Confluence"]);
+      assert.ok(!r.next_action.includes("undefined"), JSON.stringify(counts));
+      assert.match(r.next_action, /artifact 미기록/);
+    }
   });
 });

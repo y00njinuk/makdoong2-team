@@ -83,6 +83,7 @@ const STEPS = [
   "node --test test/doctor-exit-code.test.ts",
   "node --test test/example-config-portability.test.ts",
   "node --test test/research-fanout.test.ts",
+  "node --test test/stage-completion.test.ts",
   "node --test test/state-sh-write-atomicity.test.ts",
   "node --test test/gate-locale-and-path.test.ts",
   "node --test test/model-policy-parity.test.ts",
