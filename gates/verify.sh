@@ -23,8 +23,6 @@ case "$TARGET" in
     echo "MAKDOONG2-GATE OK: $TARGET (jira validation handled by extension gate)" ;;
   1_planning.requirements)
     "$HERE/stage2-requirements-verify.sh" "$ISSUE" ;;
-  1_planning.scope)
-    "$HERE/stage3-scope-verify.sh" "$ISSUE" ;;
   2_implementation.analysis)
     "$HERE/stage-analysis-verify.sh" "$ISSUE" ;;
   2_implementation.dev)
