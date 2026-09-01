@@ -71,7 +71,7 @@
 ### 파일 편집 (sealed sub-agent + team-leader)
 - `makdoong2-team-leader` 는 Write/Edit/Patch/Multiedit 툴 부재 → 직접 파일 편집·생성 불가. 모든 파일 조작은 `dispatch_stage` 로 위임.
 - **team-leader 는 git 명령(`commit` / `push` / `add` / `rm` / `worktree`) permission 이 deny** → 3_delivery.* 는 publisher 가 worktree 에서 직접 실행. team-leader 는 오케스트레이션만 수행.
-- Sealed sub-agent (`planner` / `analyzer` / `engineer` / `publisher` / `verifier` / `researcher`) 는 outer-world 위임 툴(`call_omo_agent`, `delegate_task`, `background_task`, `task_*`) 호출 금지. `tool.execute.before` 훅이 런타임 차단.
+- Sealed sub-agent (`planner` / `analyzer` / `engineer` / `publisher` / `verifier`) 는 outer-world 위임 툴(`call_omo_agent`, `delegate_task`, `background_task`, `task_*`) 호출 금지. `tool.execute.before` 훅이 런타임 차단.
 - **신규 서브에이전트를 추가하면 `SEALED_SUBAGENTS` 에도 반드시 등록한다.** 프론트매터에서 Task 툴을 빼는 것은 1차 방어일 뿐이고, 이 집합에 빠지면 런타임 2차 방어가 그 에이전트만 통과시킨다.
 - 상세: ARCHITECTURE.md §4.2 참조.
 
@@ -87,21 +87,34 @@
 
 ### 에이전트 permission 키 (hardrule)
 - **파일 쓰기 권한의 정식 키는 `edit` 다. `write` 키는 존재하지 않는다.** opencode 의 permission 설정 스키마 키 집합은 `read / edit / glob / grep / list / bash / task / external_directory / todowrite / question / webfetch / websearch / lsp / doom_loop / skill` 이고, `write` · `edit` · `apply_patch` 툴이 **전부 `permission: "edit"`** 로 묻는다 (1.18 바이너리에서 확인).
-- 스키마가 `StructWithRest` 라 모르는 키도 **에러 없이 통과**한다 — 그래서 `write:` 로 적은 규칙은 오타처럼 드러나지 않고 조용히 무시되고 기본값 `ask` 로 떨어진다. 실제로 analyzer / publisher / researcher 의 쓰기 제한이 전부 무효 상태였다.
+- 스키마가 `StructWithRest` 라 모르는 키도 **에러 없이 통과**한다 — 그래서 `write:` 로 적은 규칙은 오타처럼 드러나지 않고 조용히 무시되고 기본값 `ask` 로 떨어진다. 실제로 analyzer / publisher / researcher(당시) 의 쓰기 제한이 전부 무효 상태였다.
 - **규칙 평가는 `findLast` 다 — 마지막 매치가 이긴다.** 규칙 목록은 설정 객체의 키 순서 그대로 만들어지므로 **넓은 규칙을 위, 좁은 규칙을 아래**에 둔다. `"**/*": "deny"` 를 맨 아래에 두면 그 위의 allow 가 전부 죽는다.
-- frontmatter 는 1차 방어일 뿐이다. 산출물이 제한된 서브에이전트(analyzer / publisher / planner / researcher)는 `src/opencode-plugin.ts` 의 `ARTIFACT_RESTRICTED_AGENTS` 가 경로를 직접 대조해 2차로 막는다 — glob 매칭 의미에 의존하지 않는 결정론적 방어다. 신규 제한 에이전트를 추가하면 두 곳을 함께 고친다. `test/agent-permission-keys.test.ts` 가 키·순서를 강제한다.
+- frontmatter 는 1차 방어일 뿐이다. 산출물이 제한된 서브에이전트(analyzer / publisher / planner)는 `src/opencode-plugin.ts` 의 `ARTIFACT_RESTRICTED_AGENTS` 가 경로를 직접 대조해 2차로 막는다 — glob 매칭 의미에 의존하지 않는 결정론적 방어다. 신규 제한 에이전트를 추가하면 두 곳을 함께 고친다. `test/agent-permission-keys.test.ts` 가 키·순서를 강제한다.
+
+### 워크스페이스 밖 경로 (hardrule)
+- opencode 의 `external_directory` 는 **"수정" 이 아니라 "cwd 밖"** 이 기준이다. 읽기도, bash 명령이 경로를 언급하기만 해도 발화한다 (`Tool.assertExternalDirectory` / `ShellTool.ask`).
+- **`/tmp` 금지.** 서브에이전트에서 그 접근은 프롬프트가 아니라 즉시 거부 + `session.abort` 이고, 거기 쓴 것은 worktree 동기화·커밋 대상이 아니라 조용히 사라진다. 임시 파일은 `<worktree>/.makdoong2-team/<이슈키>/tmp/` 하나뿐이다. 예외는 사용자-전용 `makdoong2-issue-reporter` 의 payload 경로다.
+- **플러그인은 자기 실행 경로를 스스로 허용한다** (`pluginOwnAllowPatterns()`). opencode.json 시드에만 의존하면 부분 설치에서 서브에이전트가 `state.sh` 조차 못 부르고 죽는다 (issue #8). 시드는 1차, 이것이 2차 방어다.
+- main↔worktree 상태 동기화는 **플러그인이** 한다 (`wt-sync-ignored.sh` forward/reverse). 에이전트가 경계를 직접 건널 일은 없다.
+- **리더에게 돌려주는 `next_action` 에 절대경로를 싣지 않는다.** bash 명령이 참조하는 디렉토리만으로 승인이 발화하므로, 안내를 따르는 순간 primary 세션이 사용자를 멈춰 세운다. `state.sh status/init <이슈키>` 는 경로 인자 없이 cwd 기준으로 동작한다. 동기화가 필요하면 리더에게 시키지 말고 플러그인이 직접 시도한다 (`SELF_HEAL`).
+- 거부 사유 3종(`outside_allowed_roots` / `non_external_permission` / `tool_call_stall`)은 처방이 서로 달라 뭉개지 않는다. 상세: ARCHITECTURE.md §4.2a. 회귀: `test/permission-scope-hardening.test.ts`.
 
 ### 게이트의 state 조회 (hardrule)
 - `state.sh get` 은 **실패해도 stdout 에 `null` 한 줄을 찍고 exit 1** 한다 (게이트들이 의존하는 계약). 따라서 `q(){ … || echo "__MISSING__"; }` 는 그 위에 한 줄을 **덧붙여** `null\n__MISSING__` 두 줄을 만들고, 그 값은 `= "null"` 에도 `= "__MISSING__"` 에도 걸리지 않는다 — **부재/손상이 "값이 있음" 으로 통과**한다.
 - 반드시 `if` 형태로 성공 출력만 취한다: `q(){ local __v; if __v="$(… get …)"; then printf "%s" "$__v"; else printf "__MISSING__"; fi; }`. 12개 게이트가 같은 한 줄을 복제하므로 하나만 고치면 안 된다. `test/gate-missing-state-sentinel.test.ts` 가 강제한다.
 - **HITL 승인 게이트는 `!= "true"` (fail-closed) 로 쓴다.** `state.sh init` 이 `"policy": null` 을 심으므로 `= "false"` 로 쓰면 기본 상태에서 승인 블록 전체가 건너뛰어진다 — commit 게이트만 그랬고 하필 가장 중대한 단계였다.
 
-### 다출처 병렬 조사 (dispatch_research)
-- `1_planning.requirements` 의 교차 조사는 `dispatch_research` 툴 1회 호출로 소스별 세션을 병렬 spawn 한다. planner 가 `skill_mcp` 를 순차 호출하지 않는다.
-- 병렬화를 프롬프트가 아니라 플러그인 코드에 둔 이유: "병렬로 호출하라" 는 지시는 모델이 순차로 불러도 감지할 방법이 없다.
-- 부분 성공이 정상 동작이다. 한 소스 실패로 fan-out 전체를 재실행하지 않는다.
-- 순수 계약(소스 레지스트리·정규화·파싱·병합)은 `src/research-fanout.ts`, 회귀는 `test/research-fanout.test.ts`.
-- 상세: ARCHITECTURE.md §3.6 참조.
+### 다출처 교차 조사 (planner 인라인)
+- `1_planning.requirements` 의 교차 조사는 **planner 자신의 세션**에서 한다. 소스마다 `skill(name=...)` 로드 → 그 스킬의 `skill_mcp` 호출 순서를 지킨다.
+- 소스당 호출 상한 5회. 부분 조사가 정상 종료이며, 조사 완결성을 이유로 substage 마커 기록을 미루지 않는다.
+- 결과는 별도 아티팩트가 아니라 `requirements-draft.md` 의 `## 수집된 정보` 에 정리한다.
+- **`dispatch_research` fan-out 과 `makdoong2-researcher` 는 제거됐다.** 격리·병렬은 작동했지만 실패 원인이 사라진 자식 세션 안에 갇혀 진단이 불가능했다 — 실패가 흔한 경로에서는 격리의 이득보다 관측 불가의 손실이 크다. 상세: ARCHITECTURE.md §3.6.
+
+### scope substage 는 requirements 로 흡수됐다 (hardrule)
+- `1_planning.scope` 는 더 이상 존재하지 않는다. 범위 확정은 `1_planning.requirements` 안에서 함께 수행하고 `self_check` 의 `paths_explicit` / `test_scope_defined` / `atomic_units` / `scope_out_listed` 4항목으로 판정한다.
+- **게이트를 지울 때 검사를 함께 옮긴다.** `stage3-scope-verify.sh` 의 승인·모호성·spec drift 검사는 다음 관문인 `stage-analysis-verify.sh` 로 이관했다. 게이트만 지우면 그 검증이 파이프라인에서 통째로 사라진다.
+- 마커 정의 3곳 일치 원칙은 그대로다 — 게이트(`stage-analysis-verify.sh`) · stage spec self_check(`01-planning.md` / `02-requirements.md`) · verifier(`makdoong2-verifier.md`).
+- 기존 state 는 `state.sh migrate` 가 scope 를 requirements 로 **AND 로 접어** 옮긴다. OR 로 접으면 아직 끝나지 않은 scope 가 통과로 둔갑한다.
 
 ### verdict 는 셋이다 — `ERROR` 를 `REJECTED` 로 환원하지 않는다 (hardrule)
 - `dispatch_verifier` 의 `verdict` 는 `VERIFIED` / `REJECTED` / **`ERROR`** 다. `ERROR` 는 "검증이 **수행되지 않았다**"(verifier 세션 인프라 실패)이고 `REJECTED`(콘텐츠 반려)와 **조치가 정반대**다 — 전자는 verifier 만 재호출, 후자는 stage 재실행.
@@ -167,7 +180,7 @@
   - `stage8-post-review-verify.sh`: review-comment-plan.json 존재·정합, per-commit 코멘트 ≥1, 총합 정합, all_comments_inline
 - **verifier** (dispatch_verifier / makdoong2-verifier): substage 종료 후 최종 판정. post-verify 재실행 + Bitbucket API 교차검증.
 - **완료 조건이 entry 에 들어가면 first-entry 자체가 불가능해진다** (PROJ-40406 review 데드락 사례). 신규 substage 추가 시 항상 이 원칙을 준수한다.
-- **필수 마커 정의는 게이트 · stage spec 의 self_check · verifier 세 곳이 항상 일치해야 한다.** 한 곳만 갖고 있으면 substage 가 `done=true` + VERIFIED 로 끝난 뒤 **다음 게이트가 하드 차단**하는 정지가 난다. 실제 사례: `stage3-scope-verify.sh` 는 `spec_hash` 가 있으면 `draft_path` 를 요구하는데, `02-requirements.md` 의 self_check 8항목에도 verifier 기준에도 `draft_path` 가 없어서 마커를 빠뜨린 채 통과됐다 (issue #6-①). verifier 가 **마커가 아니라 파일 존재**를 보고 있었던 것이 검출 실패의 직접 원인이다 — 파일은 멀쩡했다. 마커를 추가할 때는 세 곳을 한 번에 고치고, `test/gate-requirements-quality.test.ts` 의 "스펙 정합" 블록에 케이스를 추가한다.
+- **필수 마커 정의는 게이트 · stage spec 의 self_check · verifier 세 곳이 항상 일치해야 한다.** 한 곳만 갖고 있으면 substage 가 `done=true` + VERIFIED 로 끝난 뒤 **다음 게이트가 하드 차단**하는 정지가 난다. 실제 사례: 당시 `stage3-scope-verify.sh`(현 `stage-analysis-verify.sh`) 는 `spec_hash` 가 있으면 `draft_path` 를 요구하는데, `02-requirements.md` 의 self_check 8항목에도 verifier 기준에도 `draft_path` 가 없어서 마커를 빠뜨린 채 통과됐다 (issue #6-①). verifier 가 **마커가 아니라 파일 존재**를 보고 있었던 것이 검출 실패의 직접 원인이다 — 파일은 멀쩡했다. 마커를 추가할 때는 세 곳을 한 번에 고치고, `test/gate-requirements-quality.test.ts` 의 "스펙 정합" 블록에 케이스를 추가한다.
 
 
 ### 리뷰 인라인 코멘트 (hardrule)
