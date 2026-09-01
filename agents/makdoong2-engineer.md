@@ -161,5 +161,6 @@ bash <SCRIPTS_DIR>/state.sh set {ISSUE_KEY} '.stages."2_implementation".substage
 - `git commit`, `git push`, `git reset --hard`, `git branch -D`, `rm -rf` — 시도 시 PreToolUse 훅이 차단.
 - 요청 범위 밖 리팩토링·"있으면 좋을" 기능 추가.
 - worktree 외부 파일 편집.
+- **`/tmp` 등 워크스페이스 밖 경로에 임시 파일 생성 (hardrule).** opencode 는 bash 명령이 참조하는 디렉토리마다 `external_directory` 승인을 묻는데, 서브에이전트 세션에서 그 요청은 답할 사람이 없어 **자동 거부되고 세션이 즉시 종료된다** — 하던 작업이 통째로 날아간다. 게다가 워크스페이스 밖에 쓴 것은 worktree 동기화·커밋 대상이 아니라 조용히 사라진다. 임시 파일은 반드시 `<worktree>/.makdoong2-team/<이슈키>/tmp/` 에 만든다 (cwd 안이라 승인 불필요, git exclude 이미 등록됨).
 - 테스트 결과 임의 보고 (실제 실행 없이 "pass" 기록 금지 — 게이트 우회).
 - 프로덕션 코드 변경 (test 실패 시 dev substage로 복귀 필수).
