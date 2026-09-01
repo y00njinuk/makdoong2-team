@@ -46,12 +46,22 @@ export interface PollClientLike {
   };
 }
 
+export type PermissionStallReason =
+  | "outside_allowed_roots"
+  | "non_external_permission"
+  | "tool_call_stall";
+
 export type PollOutcome =
   | { kind: "text"; text: string; polls: number; elapsedMs: number }
   | { kind: "empty"; reason: string; polls: number; elapsedMs: number }
   | { kind: "timeout"; polls: number; elapsedMs: number; transientFailures: number }
   | { kind: "aborted"; reason: string; polls: number; elapsedMs: number }
-  | { kind: "permission_stall"; polls: number; elapsedMs: number; stalledMs: number; permissionID?: string; permissionType?: string; permissionPatterns?: string[] }
+  // permissionReason 은 **처방이 정반대인 두 실패를 구분**한다:
+  //   outside_allowed_roots  — 허용 경로 밖 접근. 대안 경로를 알려주면 회복 가능
+  //   non_external_permission — external_directory 가 아닌 권한(edit/bash 등)이 도달.
+  //                             경로 문제가 아니라 에이전트 설정 문제다
+  //   tool_call_stall        — 권한 요청 없이 툴 호출만 멈춰 있는 경우
+  | { kind: "permission_stall"; polls: number; elapsedMs: number; stalledMs: number; permissionID?: string; permissionType?: string; permissionPatterns?: string[]; permissionReason?: PermissionStallReason }
   // 세션이 등장 후 사라진 케이스 (sessionEverAppeared=true → 3회 연속 status absent + no new messages)
   // 또는 message stall 케이스 (sessionEverAppeared=true → busy 지속 + assistant message 0건 + messageStallThresholdMs 초과).
   // 호출자는 session.abort() 를 "실제 gone" 인 경우에만 skip 해야 한다 (skipSessionOps 플래그로 전달).
@@ -488,10 +498,17 @@ export async function pollSubSession(
             .reply({ path: { requestID: p.id }, body: { reply: "once" } })
             .catch(() => undefined);
         } else {
+          // 두 실패를 뭉뚱그리지 않는다. "허용 경로 밖" 은 대안 경로를 알려주면
+          // 회복 가능하고, "external_directory 가 아닌 권한" 은 경로와 무관한
+          // 에이전트 설정 문제라 조치가 정반대다. 종전에는 한 문장이었다.
+          const reason: PermissionStallReason =
+            p.permission === "external_directory"
+              ? "outside_allowed_roots"
+              : "non_external_permission";
           err(
             `[pollSubSession] PERMISSION_STALL session=${sessionId} polls=${pollCount}` +
             ` permissionID=${p.id} type=${p.permission} patterns=${JSON.stringify(p.patterns)}` +
-            ` — auto-rejecting (outside worktree scope or non-external_directory)`
+            ` reason=${reason} — auto-rejecting`
           );
           await client.permission
             .reply({ path: { requestID: p.id }, body: { reply: "reject" } })
@@ -505,6 +522,7 @@ export async function pollSubSession(
             permissionID: p.id,
             permissionType: p.permission,
             permissionPatterns: p.patterns,
+            permissionReason: reason,
           };
         }
       }
@@ -560,6 +578,7 @@ export async function pollSubSession(
         permissionID: stalledPerm?.id,
         permissionType: stalledPerm?.permission,
         permissionPatterns: stalledPerm?.patterns,
+        permissionReason: "tool_call_stall",
       };
     }
 
@@ -815,17 +834,38 @@ export function pollOutcomeToLegacy(
       };
     case "aborted":
       return { text: `(aborted: ${outcome.reason})`, success: false };
-    case "permission_stall":
+    case "permission_stall": {
+      // 사유별로 **처방이 다르다.** 종전에는 셋을 한 문장으로 보고해서, 워크스페이스
+      // 밖 접근(대안 경로를 알려주면 끝날 일)과 부분 설치(재설치가 필요한 일)와
+      // 에이전트 오설정이 전부 같은 메시지로 나왔다.
+      const detail = outcome.permissionType
+        ? `${outcome.permissionType} permission (id=${outcome.permissionID}` +
+          `${outcome.permissionPatterns ? `, patterns=${JSON.stringify(outcome.permissionPatterns)}` : ""})`
+        : "an unidentified permission request";
+      const remedy = (() => {
+        switch (outcome.permissionReason) {
+          case "outside_allowed_roots":
+            return "워크스페이스 밖 경로 접근이라 차단됐다. " +
+              "임시 파일이 필요하면 `/tmp` 이 아니라 worktree 안의 " +
+              "`.makdoong2-team/<이슈키>/tmp/` 에 만들어라 — 그 경로는 cwd 안이라 승인이 필요 없고, " +
+              "git exclude 와 worktree 동기화 대상이다. `/tmp` 에 쓴 것은 동기화도 커밋도 되지 않아 조용히 사라진다.";
+          case "non_external_permission":
+            return "external_directory 가 아닌 권한 요청이 서브에이전트에 도달했다 — 경로 문제가 아니라 " +
+              "에이전트 permission 설정 문제다. 해당 에이전트의 frontmatter `permission:` 블록을 점검하라 " +
+              "(정식 키는 `edit`; `write` 키는 존재하지 않아 조용히 무시된다).";
+          default:
+            return "대기 대상을 특정하지 못했다. 점검: opencode.json 의 permission.external_directory 시드 존재 여부 " +
+              "(`npx makdoong2-team doctor`).";
+        }
+      })();
       return {
-        text: outcome.permissionType
-          ? `(permission_stall: sub-agent blocked on ${outcome.permissionType} permission ` +
-            `(id=${outcome.permissionID}${outcome.permissionPatterns ? `, patterns=${JSON.stringify(outcome.permissionPatterns)}` : ""}) ` +
-            `— cannot be answered in subagent context; aborted after ${outcome.stalledMs}ms)`
-          : `(permission_stall: sub-agent tool call stalled for ${outcome.stalledMs}ms — likely waiting for a permission approval ` +
-            `that cannot be answered in subagent context; pending permission could not be identified (permission.list unavailable or empty). ` +
-            `점검: opencode.json 의 permission.external_directory 시드 존재 여부 (npx makdoong2-team doctor))`,
+        text:
+          `(permission_stall: sub-agent blocked on ${detail} — cannot be answered in subagent context; ` +
+          `aborted after ${outcome.stalledMs}ms. reason=${outcome.permissionReason ?? "unknown"})\n` +
+          `→ ${remedy}`,
         success: false,
       };
+    }
     case "session_gone":
       return {
         text: outcome.reason === "message_stall"
