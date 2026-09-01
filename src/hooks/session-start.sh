@@ -55,7 +55,6 @@ jq -r '
   # Planning substages
   ($p1.substages.jira // {} | "  1_planning.jira: done=" + ((.done // false) | tostring) + (if .approved_by_user then " (approved)" else "" end)),
   ($p1.substages.requirements // {} | "  1_planning.requirements: done=" + ((.done // false) | tostring) + (if .approved_by_user then " (approved)" else "" end)),
-  ($p1.substages.scope // {} | "  1_planning.scope: done=" + ((.done // false) | tostring) + (if .approved_by_user then " (approved)" else "" end)),
   
   # Implementation substages
   ($p2.substages.analysis // {} | "  2_implementation.analysis: done=" + ((.done // false) | tostring) + (if .skipped then " (skipped)" else "" end)),
