@@ -89,16 +89,16 @@ function setupPlanningDone(main, issue) {
   const r = stateSh(main, "init", issue, main);
   assert.equal(r.code, 0, `state.sh init 실패: ${r.stderr}`);
 
-  // scope done = true (gate4 prerequisite)
-  const scope = stateSh(main, "set", issue, '.stages."1_planning".substages."scope".done', "true");
-  assert.equal(scope.code, 0, `scope done 설정 실패: ${scope.stderr}`);
+  // requirements done = true (gate4 prerequisite — scope substage 흡수됨)
+  const req = stateSh(main, "set", issue, '.stages."1_planning".substages."requirements".done', "true");
+  assert.equal(req.code, 0, `requirements done 설정 실패: ${req.stderr}`);
 
   // analysis done = true (skipped도 done=true로 처리)
   const analysis = stateSh(main, "set", issue, '.stages."2_implementation".substages."analysis".done', "true");
   assert.equal(analysis.code, 0, `analysis done 설정 실패: ${analysis.stderr}`);
 
-  // auto_approve scope — approved_by_user 체크 우회
-  const policy = stateSh(main, "set", issue, '.policy.auto_approve."1_planning.scope"', "true");
+  // auto_approve requirements — approved_by_user 체크 우회
+  const policy = stateSh(main, "set", issue, '.policy.auto_approve."1_planning.requirements"', "true");
   assert.equal(policy.code, 0, `policy 설정 실패: ${policy.stderr}`);
 }
 
