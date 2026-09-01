@@ -2,7 +2,7 @@
 
 **목적**: 개발 진입 전에 workspace 구조·의존성·관례·통합 지점을 결정론적으로 분석하고, 그 결과를 고정 JSON schema로 산출한다. 로컬 LLM 계열이 분석을 건너뛰고 코드 생성으로 직행하는 문제를 harness 레벨에서 차단하는 phase gating 이다.
 
-**진입 게이트**: `verify.sh <이슈키> 2_implementation.analysis` (3단계 scope 완료 필요).
+**진입 게이트**: `verify.sh <이슈키> 2_implementation.analysis` (`1_planning.requirements` 완료 + 승인 + 요구사항 품질 게이트 통과 필요).
 
 > 게이트가 build tool 마커 파일 부재를 감지하면 자동 스킵 처리한다 (`skipped=true`, `done=true` 마킹 후 dispatch 없이 dev substage 로 진행). 본 명세는 게이트를 통과하여 dispatch 된 경우에만 실행된다.
 
@@ -84,7 +84,7 @@ Build tool 별 대응:
 3단계 scope substage 에서 확정한 수정 대상 파일 목록을 state.json 에서 조회한다.
 
 ```bash
-bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."scope"' 2>/dev/null
+bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements"' 2>/dev/null
 ```
 
 scope 결과의 각 파일에 대해 실제 파일을 read + grep 하여:
