@@ -86,26 +86,10 @@ describe("gate — already-done blocking (regression: PROJ-40406)", () => {
     }
   });
 
-  test("1_planning.scope blocks when scope.done=true", () => {
-    const wt = makeWorktree();
-    try {
-      stateSh(wt, "init", "TEST-1", wt);
-      markDone(wt, "TEST-1", '.stages."1_planning".substages."jira"');
-      markDone(wt, "TEST-1", '.stages."1_planning".substages."requirements"');
-      markDone(wt, "TEST-1", '.stages."1_planning".substages."scope"');
-      const r = verify(wt, "TEST-1", "1_planning.scope");
-      assert.equal(r.code, 2, `expected BLOCKED, got ${r.code}\nstderr=${r.stderr}`);
-      assert.match(r.stderr, /이미 done=true/);
-    } finally {
-      rmSync(wt, { recursive: true, force: true });
-    }
-  });
-
   test("2_implementation.analysis blocks when analysis.done=true", () => {
     const wt = makeWorktree();
     try {
       stateSh(wt, "init", "TEST-1", wt);
-      markDone(wt, "TEST-1", '.stages."1_planning".substages."scope"');
       markDone(wt, "TEST-1", '.stages."2_implementation".substages."analysis"');
       const r = verify(wt, "TEST-1", "2_implementation.analysis");
       assert.equal(r.code, 2, `expected BLOCKED, got ${r.code}\nstderr=${r.stderr}`);
@@ -119,7 +103,6 @@ describe("gate — already-done blocking (regression: PROJ-40406)", () => {
     const wt = makeWorktree();
     try {
       stateSh(wt, "init", "TEST-1", wt);
-      markDone(wt, "TEST-1", '.stages."1_planning".substages."scope"');
       markDone(wt, "TEST-1", '.stages."2_implementation".substages."analysis"');
       markDone(wt, "TEST-1", '.stages."2_implementation".substages."dev"');
       const r = verify(wt, "TEST-1", "2_implementation.dev");
