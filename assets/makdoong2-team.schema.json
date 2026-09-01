@@ -353,24 +353,6 @@
         }
       }
     },
-    "research": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Parallel multi-source research fan-out (dispatch_research tool).",
-      "properties": {
-        "max_parallel": {
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 6,
-          "description": "Maximum research sub-sessions spawned simultaneously. Default 3, hard ceiling 6. Queries beyond this are reported as deferred, never silently dropped."
-        },
-        "timeout_minutes": {
-          "type": "number",
-          "minimum": 1,
-          "description": "Per-source wall-clock budget. Default 10. Deliberately shorter than timeout.substage_minutes: a source that cannot answer in this window is recorded as failed so the other sources' findings still land."
-        }
-      }
-    },
     "network": {
       "type": "object",
       "description": "사내 엔드포인트(Jira/Confluence/Bitbucket/Bamboo) 접속의 TLS 설정. skills/_lib/load-secret.sh 의 configure_tls_from_makdoong2_config 가 읽는다.",
