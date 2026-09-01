@@ -6,7 +6,6 @@
 export type Stage =
   | "1_planning.jira"
   | "1_planning.requirements"
-  | "1_planning.scope"
   | "2_implementation.analysis"
   | "2_implementation.dev"
   | "2_implementation.test"
@@ -98,16 +97,6 @@ export const AGENTS: Record<string, AgentSpec> = {
     tools: ["bash", "read", "grep", "glob", "write"],
     skills: [],
   },
-  // Research fan-out worker. Not bound to a substage — dispatch_research spawns
-  // one session per source in parallel, each loading exactly one research skill.
-  "makdoong2-researcher": {
-    id: "makdoong2-researcher",
-    stage: "all",
-    primary_only: false,
-    permissions: RO_PERM,
-    tools: ["bash", "read", "grep", "glob", "skill", "skill_mcp"],
-    skills: ["jira-research", "confluence-research", "bitbucket-research", "github-oss-research"],
-  },
   "makdoong2-engineer": {
     id: "makdoong2-engineer",
     stage: "all",
@@ -137,7 +126,6 @@ export const AGENTS: Record<string, AgentSpec> = {
 export const STAGE_SPEC_FILES: Record<Stage, string> = {
   "1_planning.jira":            "01-planning.md",
   "1_planning.requirements":    "02-requirements.md",
-  "1_planning.scope":           "03-scope.md",
   "2_implementation.analysis":  "04-analysis.md",
   "2_implementation.dev":       "05-worktree-dev.md",
   "2_implementation.test":      "06-test.md",
