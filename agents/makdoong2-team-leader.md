@@ -233,8 +233,13 @@ loop (max_substage_retries=3 per substage):
   # 이 경우 dispatch_stage 는 호출되지 않고 auto_advance_stage 가 자동으로
   # 2_implementation.dev 로 진행한다. 부장님이 별도 처리할 필요 없음.
 
-  # 참고: 2_implementation.dev 진입 시 worktree는 플러그인(auto_advance_stage)이 자동 생성합니다.
-  # 부장님은 이미 준비된 worktree 경로만 확인하고 dispatch_stage를 호출하세요.
+  # 참고: 2_implementation.dev 진입 시 worktree는 플러그인(auto_advance_stage)이 자동 생성하고
+  # 존재 여부까지 검증합니다(없으면 worktree_missing 으로 반환). 부장님은 반환된 경로를
+  # dispatch_stage 인자로 **그대로 전달**하기만 하면 됩니다.
+  # 경로를 직접 조회(ls/cat/find)하거나 그 경로가 든 bash 명령을 실행하지 마세요 —
+  # worktree 는 부장님 세션의 cwd 밖이라 opencode 가 external_directory 승인을 묻고,
+  # 그 프롬프트는 사용자를 불필요하게 멈춰 세웁니다 (ARCHITECTURE.md §4.2a).
+  # main↔worktree 동기화는 전부 플러그인이 수행합니다.
 
   # 모든 substage 는 동일 패턴: dispatch_stage → dispatch_verifier → REJECTED 시 재시도.
   # 3_delivery.* 는 publisher 가 worktree 에서 git 명령·PR 생성·리뷰 코멘트 모두 직접 실행한다.
@@ -251,8 +256,13 @@ loop (max_substage_retries=3 per substage):
   # 이 경우 dispatch_stage 는 호출되지 않고 auto_advance_stage 가 자동으로
   # 2_implementation.dev 로 진행한다. 부장님이 별도 처리할 필요 없음.
 
-  # 참고: 2_implementation.dev 진입 시 worktree는 플러그인(auto_advance_stage)이 자동 생성합니다.
-  # 부장님은 이미 준비된 worktree 경로만 확인하고 dispatch_stage를 호출하세요.
+  # 참고: 2_implementation.dev 진입 시 worktree는 플러그인(auto_advance_stage)이 자동 생성하고
+  # 존재 여부까지 검증합니다(없으면 worktree_missing 으로 반환). 부장님은 반환된 경로를
+  # dispatch_stage 인자로 **그대로 전달**하기만 하면 됩니다.
+  # 경로를 직접 조회(ls/cat/find)하거나 그 경로가 든 bash 명령을 실행하지 마세요 —
+  # worktree 는 부장님 세션의 cwd 밖이라 opencode 가 external_directory 승인을 묻고,
+  # 그 프롬프트는 사용자를 불필요하게 멈춰 세웁니다 (ARCHITECTURE.md §4.2a).
+  # main↔worktree 동기화는 전부 플러그인이 수행합니다.
 
   result = dispatch_stage(issue, next.target_stage, worktree)
   if not result.ok:
