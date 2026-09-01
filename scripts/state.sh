@@ -185,8 +185,7 @@ case "$cmd" in
       "done": false,
       "substages": {
         "jira":         {"done": false},
-        "requirements": {"done": false, "approved_by_user": false},
-        "scope":        {"done": false, "approved_by_user": false}
+        "requirements": {"done": false, "approved_by_user": false}
       }
     },
     "2_implementation": {
@@ -333,6 +332,29 @@ JSON
       | move("3_delivery.commit";       "3_delivery"; "commit")
       | move("3_delivery.pr";           "3_delivery"; "pr")
       | move("3_delivery.review";       "3_delivery"; "review")
+
+      # scope substage 흡수 (범위 확정 → requirements).
+      # 진행 중이던 워크플로우가 남긴 scope 마커를 버리지 않고 requirements 로
+      # 접는다. done / approved_by_user 는 **AND** 로 접는다 — scope 가 아직
+      # 끝나지 않았는데 requirements 만 보고 통과시키면, 흡수 전이라면 막혔을
+      # 지점을 마이그레이션이 열어주는 셈이 된다. 접은 뒤 scope 키는 지운다.
+      | (if (.stages."1_planning".substages? // {} | has("scope")) then
+             .stages."1_planning".substages.requirements =
+               ((.stages."1_planning".substages.requirements // {})
+                 + {"done": ((.stages."1_planning".substages.requirements.done // false)
+                             and (.stages."1_planning".substages.scope.done // false)),
+                    "approved_by_user":
+                      ((.stages."1_planning".substages.requirements.approved_by_user // false)
+                       and (.stages."1_planning".substages.scope.approved_by_user // false))})
+           | del(.stages."1_planning".substages.scope)
+         else . end)
+      # auto_approve 는 flat 표기를 유지하는 유일한 예외라 여기서 같이 옮긴다.
+      | (if (.policy.auto_approve? // {} | has("1_planning.scope")) then
+             .policy.auto_approve = (.policy.auto_approve
+               | ."1_planning.requirements" =
+                   ((."1_planning.requirements" // false) and ."1_planning.scope")
+               | del(."1_planning.scope"))
+         else . end)
     '
     echo "migrated[$ISSUE] $P" ;;
   *) echo "usage: state.sh {root|issue|init|status|get|set|append|migrate} ..." >&2; exit 64 ;;
