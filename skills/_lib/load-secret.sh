@@ -42,16 +42,26 @@ EOF
 
   # `jq -e` fails when the file cannot be parsed; capture stderr for diagnostics.
   local token jq_err
-  jq_err=$(mktemp 2>/dev/null || echo "/tmp/load-secret.$$.err")
-  token=$(jq -r --arg k "$var_name" '.secrets[$k] // empty' "$cfg_file" 2>"$jq_err")
+  # 임시 파일은 **설정 파일과 같은 디렉토리**에 만든다. 종전 폴백은 `/tmp` 을
+  # 명령문에 노출시켰는데, opencode 1.18 의 ShellTool 은 bash 명령이 참조하는
+  # 디렉토리마다 external_directory 승인을 묻고, 서브에이전트 세션에서 그 요청은
+  # 자동 거부 + 세션 abort 로 이어진다 (워크스페이스 밖 경로이므로).
+  # mktemp 실패 시에도 워크스페이스 밖으로 새지 않게 한다.
+  jq_err=""
+  jq_err=$(mktemp "$(dirname "$cfg_file")/.load-secret.XXXXXX" 2>/dev/null) || jq_err=""
+  # mktemp 실패 시 /dev/null 로 흘린다. 이때 `jq_err` 는 빈 문자열로 남으므로
+  # 아래 정리 단계가 **실제로 만든 파일만** 지운다 — `rm -f /dev/null` 은
+  # root 로 도는 환경(이슈 #8 로그의 /root/.nvm)에서 진짜로 장치 노드를 지운다.
+  local jq_err_sink="${jq_err:-/dev/null}"
+  token=$(jq -r --arg k "$var_name" '.secrets[$k] // empty' "$cfg_file" 2>"$jq_err_sink")
   local jq_status=$?
   if [ "$jq_status" -ne 0 ]; then
     printf '[%s] makdoong2-team.json is not valid JSON: %s\n' "$tag" "$cfg_file" >&2
-    if [ -s "$jq_err" ]; then sed -e "s/^/[$tag] jq: /" "$jq_err" >&2; fi
-    rm -f "$jq_err"
+    if [ -s "$jq_err_sink" ]; then sed -e "s/^/[$tag] jq: /" "$jq_err_sink" >&2; fi
+    if [ -n "$jq_err" ]; then rm -f -- "$jq_err"; fi
     return 67
   fi
-  rm -f "$jq_err"
+  if [ -n "$jq_err" ]; then rm -f -- "$jq_err"; fi
 
   if [ -z "$token" ] || [ "$token" = "null" ]; then
     cat >&2 <<EOF
