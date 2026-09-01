@@ -92,13 +92,13 @@ bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."2_implementation".substage
 ### 2. 단계 명세 재대조
 
 `<STAGES_DIR>/NN-*.md`을 읽어 단계가 요구한 *명시적 산출물*을 추출한다.
-- 1_planning.jira: **통합 planning spec(01-planning.md)** 사용 — 3개 substage를 한 번에 처리하므로 다음 모두 확인:
+- 1_planning.jira: **통합 planning spec(01-planning.md)** 사용 — 2개 substage를 한 번에 처리하므로 다음 모두 확인:
     - `jira`: `template_validation` 6항목 모두 기록 + `validation_passed=true` + `done=true`
-    - `requirements`: `done=true` + `policy.category`(minor|major) 설정 + `self_check.categorized==true` + **`draft_path` 마커 기록 + 그 경로의 파일 존재** (아래 §2-4 참조)
-    - `scope`: `done=true` + `self_check.paths_explicit=true`
+    - `requirements`: `done=true` + `policy.category`(minor|major) 설정 + `self_check.categorized==true` + **`draft_path` 마커 기록 + 그 경로의 파일 존재** (아래 §2-4 참조) + `ambiguity_score` · `spec_hash` 기록 + **개발 범위 4항목** `self_check.paths_explicit` / `test_scope_defined` / `atomic_units` / `scope_out_listed` 모두 `true`
     - **interview_required=true가 기록되어 있고 requirements.done=false이면**: 인터뷰 대기 상태 → **REJECTED** (부장님이 인터뷰 후 재dispatch 필요)
-- 1_planning.requirements: (단독 dispatch 폴백 시) `done_at` / `verification_pending` + **`draft_path` 마커 기록 + 그 경로의 파일 존재** (아래 §2-4) + `.policy.category` 설정 + `self_check.categorized==true`
-- 1_planning.scope: (단독 dispatch 폴백 시) 4가지 출력 형식 항목 + `done=true`
+- 1_planning.requirements: (단독 dispatch 폴백 시) 위 `requirements` 항목과 동일 기준 + `done_at` / `verification_pending`
+
+> **개발 범위(구 `scope` substage)는 requirements 로 흡수됐다.** 별도 substage 마커는 더 이상 존재하지 않는다 — 범위 확정 여부는 위 4항목 self_check 로 판정한다. 이 4항목을 verifier 가 보지 않으면, 게이트(`stage-analysis-verify.sh`)만 아는 조건이 되어 substage 가 VERIFIED 로 끝난 뒤 다음 게이트가 하드 차단하는 정지가 재현된다 (issue #6-① 와 같은 부류).
 - 2_implementation.analysis:
     - `.skipped == true` 이면 즉시 **VERIFIED** (게이트가 SKIP 처리한 경우이므로 산출물 없음)
     - 그 외:
@@ -281,7 +281,7 @@ BB_BASE=$(jq -r '.hosts.BITBUCKET_API_BASE_PATH' ~/.config/opencode/makdoong2-te
 
 ### 2-4. 1_planning.requirements 전용: draft_path 마커 재검증
 
-게이트(`stage3-scope-verify.sh`)는 `spec_hash` 가 기록돼 있으면 `draft_path` **마커**를 하드 요구한다. 반면 종전 verifier 기준은 `requirements-draft.md` **파일 존재**만 봤다. 두 기준이 어긋나 있어서, `spec_hash` 는 기록하고 `draft_path` 는 빠뜨린 채 `done=true` 로 끝난 substage 를 verifier 가 VERIFIED 로 통과시키고 **바로 다음 게이트가 하드 차단**하는 정지가 발생했다 (issue #6-①). 파일은 멀쩡히 있으므로 "파일 존재" 검사로는 절대 잡히지 않는다.
+게이트(`stage-analysis-verify.sh`)는 `spec_hash` 가 기록돼 있으면 `draft_path` **마커**를 하드 요구한다. 반면 종전 verifier 기준은 `requirements-draft.md` **파일 존재**만 봤다. 두 기준이 어긋나 있어서, `spec_hash` 는 기록하고 `draft_path` 는 빠뜨린 채 `done=true` 로 끝난 substage 를 verifier 가 VERIFIED 로 통과시키고 **바로 다음 게이트가 하드 차단**하는 정지가 발생했다 (issue #6-①). 파일은 멀쩡히 있으므로 "파일 존재" 검사로는 절대 잡히지 않는다.
 
 ```bash
 DRAFT=$(bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".draft_path' | tr -d '"')
