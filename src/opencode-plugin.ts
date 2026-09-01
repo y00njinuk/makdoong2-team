@@ -44,23 +44,12 @@ import {
   STATE_SH_CALL_RE,
   stripQuotedSpans,
 } from "./state-access-guard.ts";
-import {
-  RESEARCH_SOURCES,
-  DEFAULT_RESEARCH_TIMEOUT_MINUTES,
-  buildResearchPrompt,
-  classifyFanoutOutcome,
-  mergeResearchFindings,
-  normalizeQueries,
-  parseResearchOutput,
-  resolveParallelism,
-  summarizeOutcomes,
-  type SourceOutcome,
-} from "./research-fanout.ts";
 import { TmuxMonitor, readTmuxConfig, orphanCleanupGuard } from "./tmux-monitor.ts";
 import {
   resolvePaths,
   loadConfig,
   loadOpencodeExternalDirAllows,
+  pluginOwnAllowPatterns,
   readLoggingConfig,
   DEFAULT_STALL_ESCALATE_THRESHOLD,
 } from "./config.ts";
@@ -75,6 +64,7 @@ import { injectAllSecrets } from "./mcp-secret-injector.ts";
 import { pollSubSession as pollSubSessionCore, pollOutcomeToLegacy, type PollOutcome } from "./poll-sub-session.ts";
 import { logger } from "./logger.ts";
 import { redactAndTruncate } from "./redact-secrets.ts";
+import { extractApplyPatchPaths, isApplyPatchTool } from "./apply-patch-paths.ts";
 import {
   issueReporterSkillLoadViolation,
   issueReporterTaskSpawnViolation,
@@ -182,7 +172,6 @@ export function shouldOverrideSessionGoneOutcome(
 const STAGE_ORDER: Stage[] = [
   "1_planning.jira",
   "1_planning.requirements",
-  "1_planning.scope",
   "2_implementation.analysis",
   "2_implementation.dev",
   "2_implementation.test",
@@ -746,10 +735,21 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     Math.round(config.timeout?.stall_escalate_threshold ?? DEFAULT_STALL_ESCALATE_THRESHOLD),
   );
 
-  // 사용자가 opencode.json 에 명시적으로 allow 한 외부 디렉터리 패턴.
-  // 종전에는 makdoong2-team.json(=`config`)에서 읽어 **항상 빈 배열**이었다 —
-  // 그 스키마에는 permission 키가 없다. 자세한 내용은 config.ts 의 함수 주석 참조.
-  const configuredAllowPatterns: string[] = loadOpencodeExternalDirAllows();
+  // 자동 승인 대상 외부 디렉터리 패턴 = 플러그인 자기 경로(항상) + 사용자 시드.
+  //
+  // 앞쪽이 2차 방어다: 설치가 opencode.json 패치를 남기지 못해도 서브에이전트가
+  // state.sh / 게이트 / stage spec 에 접근할 수 있어야 한다 (GitHub #8 의 부분 설치가
+  // PERMISSION_STALL 로 나타나던 경로). 뒤쪽은 사용자가 opencode.json 에 명시적으로
+  // allow 한 것 — 종전에는 makdoong2-team.json 에서 읽어 **항상 빈 배열**이었다.
+  const pluginOwnPatterns = pluginOwnAllowPatterns();
+  const configuredAllowPatterns: string[] = [
+    ...pluginOwnPatterns,
+    ...loadOpencodeExternalDirAllows(),
+  ];
+  logger.debug(
+    `[permission] plugin-own allows: ${pluginOwnPatterns.length}개 ` +
+    `(${pluginOwnPatterns.join(", ")})`,
+  );
   logger.debug(
     `[permission] configured external_directory allows: ${configuredAllowPatterns.length}개` +
     (configuredAllowPatterns.length ? ` (${configuredAllowPatterns.slice(0, 3).join(", ")}…)` : ""),
@@ -805,6 +805,27 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     if (!args || typeof args !== "object") return undefined;
     const fp = (args as { filePath?: unknown }).filePath;
     return typeof fp === "string" && fp.length > 0 ? fp : undefined;
+  };
+
+  // 쓰기 툴이 건드리는 **모든** 대상 경로. write/edit 는 filePath 하나지만
+  // apply_patch 는 패치 본문 안에 여러 개가 들어 있다 — opencode 가 gpt-5 계열
+  // 세션에서 write/edit 대신 apply_patch 만 노출하므로(src/apply-patch-paths.ts
+  // 주석 참조) filePath 만 보는 코드는 그 세션에서 전부 장님이 된다.
+  //
+  // 반환: paths=대상 목록, resolved=대상을 확정했는가.
+  // resolved=false 는 "쓰기인데 대상을 모른다" 이고 정책상 차단이 기본값이다.
+  const extractWriteTargets = (
+    toolName: string,
+    args: unknown,
+  ): { paths: readonly string[]; resolved: boolean; reason?: string } => {
+    if (isApplyPatchTool(toolName)) {
+      const parsed = extractApplyPatchPaths(args);
+      return parsed.ok
+        ? { paths: parsed.paths, resolved: true }
+        : { paths: [], resolved: false, reason: parsed.reason };
+    }
+    const fp = extractFilePathFromToolArgs(args);
+    return fp ? { paths: [fp], resolved: true } : { paths: [], resolved: false, reason: "no_file_path" };
   };
 
   const trackAndStageEngineerWrite = async (
@@ -1065,8 +1086,6 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     ["makdoong2-publisher", /(^|\/)\.makdoong2-team\/[^/]+\/(change-report\.md|review-comment-plan\.json)$/],
     // planner: 요구사항 초안 · 리서치 산출물
     ["makdoong2-planner", /(^|\/)\.makdoong2-team\/[^/]+\/[^/]+\.(md|json)$/],
-    // researcher: 쓰기 없음
-    ["makdoong2-researcher", null],
   ]);
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -1100,10 +1119,6 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     "makdoong2-engineer",
     "makdoong2-publisher",
     "makdoong2-verifier",
-    // Research fan-out worker. Sealed like every other sub-agent: its frontmatter
-    // already omits Task (L1), but sealed workflow is defence in depth — a worker
-    // missing here would be caught by nothing at runtime (L2).
-    "makdoong2-researcher",
     // User-only issue reporter. 워크플로우에 참여하지 않지만 outer-world 위임은
     // 동일하게 금지 — 수집·마스킹·등록 전 과정을 자기 세션에서 완결해야 하며,
     // 위임하면 마스킹·승인 게이트가 위임처에서 우회될 수 있다.
@@ -1118,7 +1133,6 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   const KNOWN_SAFE_TOOLS = new Set([
     "dispatch_stage",
     "dispatch_verifier",
-    "dispatch_research",
     "verify_stage",
     "auto_advance_stage",
     "get_fallback_model",
@@ -1362,34 +1376,70 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
           }
         }
 
+        // ── Universal state.json hardrule (write 계열 툴) ──
+        // bash 우회는 classifyStateJsonAccess 가 막지만 쓰기 **툴**은 종전에 무방비였다.
+        // 산출물 허용 패턴(.makdoong2-team/<이슈키>/*.json)이 state.json 을 포함하므로
+        // 여기서 명시적으로 도려낸다 — state.json 쓰기는 오직 state.sh 를 통해서만 한다.
+        if (LEADER_FORBIDDEN_TOOLS.has(toolLower) || WRITE_TOOLS.has(toolLower)) {
+          const stateTargets = extractWriteTargets(toolLower, (output as { args?: unknown }).args);
+          const hit = stateTargets.paths
+            .map((p) => p.replace(/\\/g, "/"))
+            .find((p) => /(^|\/)\.makdoong2-team\/[^/]+\/state\.json$/.test(p));
+          if (hit) {
+            logger.error(
+              `[makdoong2-team hook] BLOCKED: state.json 을 '${input.tool}' 툴로 쓰려 했다 ` +
+              `(agent="${agent ?? "unknown"}", path="${hit}")`
+            );
+            throw new Error(
+              `[makdoong2-team state hardrule] state.json 은 '${input.tool}' 툴로 쓸 수 없다 ("${hit}").\n` +
+              `마커 기록은 반드시 'bash ${SCRIPTS_DIR}/state.sh set <이슈키> <키경로> <값>' 으로 하라. ` +
+              `읽기는 'bash ${SCRIPTS_DIR}/state.sh get' / 'status' 를 쓴다.`
+            );
+          }
+        }
+
         // ── 산출물 제한 서브에이전트의 write 계열 툴 차단 ──
         //
-        // filePath 를 추출할 수 없으면(예: apply_patch — 경로가 패치 본문 안에
-        // 있다) 보수적으로 차단한다. 이 방향이 안전하다: 산출물이 제한된
-        // 에이전트가 대상 불명의 패치를 미는 것 자체가 정책 위반이고, 이들은
-        // 산출물을 Write 툴(filePath 인자 보유)로만 만든다. 실제로 네 에이전트
-        // 모두 frontmatter 에서 Patch 툴이 비활성이라 이 경로는 도달 불가에 가깝다.
+        // 판정 대상은 **툴이 건드리는 모든 경로**다. write/edit 는 filePath 하나,
+        // apply_patch 는 패치 본문에서 파싱한 목록이다 — 후자를 "대상 불명" 으로
+        // 뭉뚱그려 차단하면, opencode 가 write/edit 를 노출하지 않는 gpt-5 계열
+        // 세션에서는 산출물을 만들 합법적 수단이 하나도 남지 않아 워크플로가
+        // 구조적으로 정지한다 (GitHub #8 재발).
+        //
+        // 대상을 **확정하지 못한** 경우(패치 파싱 실패 등)에는 종전대로 차단한다.
+        // 미탐에는 복구 수단이 없고 오탐에는 안내가 있다.
         if (agent && ARTIFACT_RESTRICTED_AGENTS.has(agent)
             && (LEADER_FORBIDDEN_TOOLS.has(toolLower) || WRITE_TOOLS.has(toolLower))) {
           const allowed = ARTIFACT_RESTRICTED_AGENTS.get(agent) ?? null;
-          const filePath = extractFilePathFromToolArgs((output as { args?: unknown }).args);
-          const normalized = (filePath ?? "").replace(/\\/g, "/");
-          const permitted = allowed !== null && normalized !== "" && allowed.test(normalized);
+          const targets = extractWriteTargets(toolLower, (output as { args?: unknown }).args);
+          const normalized = targets.paths.map((p) => p.replace(/\\/g, "/"));
+          const permitted = allowed !== null
+            && targets.resolved
+            && normalized.length > 0
+            && normalized.every((p) => allowed.test(p));
           if (!permitted) {
+            const shown = normalized.length > 0
+              ? normalized.join(", ")
+              : `unknown(${targets.reason ?? "no_target"})`;
             logger.error(
               `[makdoong2-team hook] BLOCKED: ${agent} 가 허용되지 않은 대상에 ` +
-              `${input.tool} 을 시도했다 (filePath=${filePath ?? "unknown"})`
+              `${input.tool} 을 시도했다 (targets=${shown})`
             );
             throw new Error(
               `[makdoong2-team artifact hardrule] "${agent}" 는 '${input.tool}' 로 ` +
-              `${filePath ? `"${filePath}" 에 ` : ""}쓸 수 없다.\n` +
+              `${normalized.length > 0 ? `"${shown}" 에 ` : ""}쓸 수 없다.\n` +
               (allowed === null
                 ? `이 에이전트는 파일을 쓰지 않는다 — 조사 결과는 최종 응답 텍스트로 반환하라.\n`
                 : `허용된 산출물은 .makdoong2-team/<이슈키>/ 아래의 지정된 파일뿐이다 ` +
                   `(패턴: ${allowed.source}).\n` +
-                  `그 경로에는 지금 즉시 'write' 툴(filePath 인자)로 쓸 수 있다 — ` +
-                  `bash 리디렉션·apply_patch 우회가 차단된 것이지 산출물 쓰기 자체가 금지된 것이 아니다. ` +
-                  `산출물이 필요하면 포기하지 말고 write 툴로 재시도하라.\n`) +
+                  (targets.resolved
+                    ? `대상 경로를 허용 패턴 안으로 바꿔 **지금 즉시 재시도**하라 — ` +
+                      `산출물 쓰기 자체가 금지된 것이 아니다.\n`
+                    : `이번 호출은 대상 경로를 확정하지 못해 차단됐다(${targets.reason ?? "unknown"}). ` +
+                      `'write' 툴이 있으면 filePath 로 직접 쓰고, 없으면 apply_patch 본문을 ` +
+                      `'*** Begin Patch' / '*** Add File: <허용 경로>' / '*** End Patch' 형식으로 ` +
+                      `정확히 작성해 재시도하라 — 형식이 맞으면 허용 경로에 대해 통과한다.\n`) +
+                  `bash 리디렉션 우회는 어느 경우에도 차단된다. 포기하지 말고 위 경로로 재시도하라.\n`) +
               `소스 코드 변경이 필요하면 그 사실을 산출물/응답에 적고 engineer 단계로 넘겨라.`
             );
           }
@@ -1563,25 +1613,31 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
       if (afterSessionID && WRITE_TOOLS.has(toolLowerAfter)) {
         const agentAfter = sessionAgent.get(afterSessionID)
           ?? pendingDispatch.get(afterSessionID)?.agent;
-        const filePath = extractFilePathFromToolArgs(input.args);
+        // apply_patch 는 filePath 인자가 없다 — 패치 본문에서 대상을 뽑는다.
+        // gpt-5 계열 세션에는 write/edit 가 아예 없어 engineer 의 모든 편집이
+        // 이 경로로 오므로, filePath 만 보면 auto git add 가 통째로 무력화되고
+        // dev exit gate 가 unstaged 파일로 하드 차단된다.
+        const targets = extractWriteTargets(toolLowerAfter, input.args);
         logger.debug(
           `[auto-git-add-hook] tool=${toolLowerAfter} session=${afterSessionID} ` +
-          `agent=${agentAfter ?? "unknown"} filePath=${filePath ?? "N/A"} ` +
+          `agent=${agentAfter ?? "unknown"} targets=${targets.paths.length > 0 ? targets.paths.join(",") : `N/A(${targets.reason ?? "none"})`} ` +
           `wt=${sessionWorktree.get(afterSessionID) ?? pendingDispatch.get(afterSessionID)?.worktree ?? "N/A"} ` +
           `issue=${sessionIssue.get(afterSessionID) ?? "N/A"}`,
         );
-        if (agentAfter === "makdoong2-engineer" && filePath) {
-          const result = await trackAndStageEngineerWrite(afterSessionID, filePath)
-            .catch((err: unknown) => ({
-              ok: false,
-              relPath: filePath,
-              error: `hook exception: ${(err as Error)?.message ?? String(err)}`,
-            } as { ok: boolean; relPath?: string; error?: string }));
-          if (!result.ok && result.relPath) {
-            const warn = `\n\n[makdoong2-team] auto git add FAILED for "${result.relPath}": ${redactAndTruncate(result.error ?? "", 200)}\n` +
-              `→ 조치: bash 로 'git add -- ${result.relPath}' 를 직접 실행해 stage 하시오. dev exit gate 가 unstaged 파일을 차단한다.`;
-            const outAny = output as { output?: string };
-            outAny.output = (outAny.output ?? "") + warn;
+        if (agentAfter === "makdoong2-engineer") {
+          for (const filePath of targets.paths) {
+            const result = await trackAndStageEngineerWrite(afterSessionID, filePath)
+              .catch((err: unknown) => ({
+                ok: false,
+                relPath: filePath,
+                error: `hook exception: ${(err as Error)?.message ?? String(err)}`,
+              } as { ok: boolean; relPath?: string; error?: string }));
+            if (!result.ok && result.relPath) {
+              const warn = `\n\n[makdoong2-team] auto git add FAILED for "${result.relPath}": ${redactAndTruncate(result.error ?? "", 200)}\n` +
+                `→ 조치: bash 로 'git add -- ${result.relPath}' 를 직접 실행해 stage 하시오. dev exit gate 가 unstaged 파일을 차단한다.`;
+              const outAny = output as { output?: string };
+              outAny.output = (outAny.output ?? "") + warn;
+            }
           }
         }
       }
@@ -2909,315 +2965,6 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
        * get_fallback_model — fallback advisor.
        * Returns the next model in the chain, or exhausted=true.
        */
-      /**
-       * dispatch_research — parallel multi-source research fan-out.
-       *
-       * Why the plugin does the fan-out instead of the agent: sealed sub-agents
-       * cannot delegate (ARCHITECTURE.md §4.2), and a prompt asking the model to
-       * "call the sources in parallel" cannot be enforced — the model may call
-       * them one at a time and nothing detects it. Doing it in code makes the
-       * parallelism deterministic, and gives each source its own session so one
-       * source's material never crowds out another's (DESIGN.md §3.7).
-       *
-       * Failure is isolated per source: one source failing yields a partial
-       * artifact plus an explicit failure row, never an aborted fan-out.
-       */
-      dispatch_research: tool({
-        description:
-          "여러 리서치 소스(jira / confluence / bitbucket / github-oss)를 병렬 서브세션으로 동시 조사하고 " +
-          "결과를 research-findings.json 으로 병합한다. 소스별 컨텍스트가 격리되며 한 소스의 실패가 " +
-          "다른 소스를 막지 않는다. 1_planning.requirements 의 다출처 교차 조사에 사용.",
-        args: {
-          issue: tool.schema.string().describe("Jira issue key"),
-          worktree: tool.schema.string().describe("작업 디렉토리 절대경로 (state.sh 실행 컨텍스트)"),
-          queries: tool.schema
-            .array(
-              tool.schema.object({
-                source: tool.schema
-                  .string()
-                  .describe("jira | confluence | bitbucket | github-oss"),
-                focus: tool.schema
-                  .string()
-                  .describe("이 소스에서 확인할 것. 구체적일수록 좋다."),
-              }),
-            )
-            .describe("소스별 조사 지시. 동시 실행되므로 서로 의존하면 안 된다."),
-          context: tool.schema
-            .string()
-            .optional()
-            .describe("모든 조사 세션에 공통 주입할 배경 (예: Jira 요약)"),
-        },
-        async execute(args, context) {
-          const startedAll = Date.now();
-          const parallelLimit = resolveParallelism(config.research?.max_parallel);
-          const { queries, rejected, deferred } = normalizeQueries(args.queries, parallelLimit);
-
-          if (queries.length === 0) {
-            return JSON.stringify({
-              ok: false,
-              reason: "실행 가능한 query 가 없다.",
-              rejected,
-              deferred,
-              allowed_sources: Object.keys(RESEARCH_SOURCES),
-            });
-          }
-
-          const parentSessionID = context?.sessionID ?? dispatchParentSessionID(undefined);
-          if (!parentSessionID) {
-            return JSON.stringify({
-              ok: false,
-              reason: "dispatch_research 호출자의 sessionID를 얻지 못했다.",
-            });
-          }
-
-          const researcherId = "makdoong2-researcher";
-
-          // Recursion guard: a research session must never start its own fan-out.
-          // The researcher's frontmatter omits this tool (L1), but a fan-out that
-          // could nest would multiply sessions without bound, so it is refused at
-          // runtime too — same defence-in-depth reasoning as SEALED_SUBAGENTS.
-          if (sessionAgent.get(parentSessionID) === researcherId) {
-            logger.error(
-              `[dispatch_research] BLOCKED: researcher session ${parentSessionID} attempted a nested fan-out`,
-            );
-            return JSON.stringify({
-              ok: false,
-              reason:
-                "리서치 세션은 dispatch_research 를 다시 호출할 수 없다 (중첩 fan-out 금지). " +
-                "배정받은 소스만 조사하고 JSON 을 반환하라.",
-            });
-          }
-          const policy = POLICIES[researcherId];
-          if (!policy) {
-            return JSON.stringify({
-              ok: false,
-              reason: `POLICIES 에 ${researcherId} 항목이 없다. 모델 정책 설정을 확인하라.`,
-            });
-          }
-          const [providerID, ...modelRest] = policy.primary.id.split("/");
-          const modelID = modelRest.join("/");
-          const timeoutMs = Math.max(
-            60_000,
-            Math.round(
-              (config.research?.timeout_minutes ?? DEFAULT_RESEARCH_TIMEOUT_MINUTES) * 60_000,
-            ),
-          );
-
-          logger.debug(
-            `[dispatch_research] fan-out start issue=${args.issue} sources=` +
-            `${queries.map((q) => q.spec.source).join(",")} parallel_limit=${parallelLimit} ` +
-            `timeout_ms=${timeoutMs} parentID=${parentSessionID}`,
-          );
-
-          const runOne = async (q: typeof queries[number]): Promise<SourceOutcome> => {
-            const startedAt = Date.now();
-            const base: Omit<SourceOutcome, "status" | "findings" | "gaps" | "error"> = {
-              source: q.spec.source,
-              label: q.spec.label,
-              focus: q.focus,
-              session_id: null,
-              elapsed_ms: 0,
-            };
-            const fail = (error: string, sid: string | null): SourceOutcome => ({
-              ...base,
-              session_id: sid,
-              elapsed_ms: Date.now() - startedAt,
-              status: "failed",
-              findings: [],
-              gaps: [],
-              error,
-            });
-
-            const createResult = await (client as any).session
-              .create({
-                body: {
-                  parentID: parentSessionID,
-                  title: `research:${q.spec.source} (${args.issue})`,
-                },
-                query: { directory: args.worktree },
-              })
-              .catch((e: unknown) => ({ error: e, data: null }));
-            if (createResult.error || !createResult.data) {
-              return fail(`session create 실패: ${JSON.stringify(createResult.error)}`, null);
-            }
-            const sid = (createResult.data as { id: string }).id;
-
-            sessionIssue.set(sid, args.issue);
-            subSessionIds.add(sid);
-            sessionWorktree.set(sid, args.worktree);
-            pendingDispatch.set(sid, {
-              stage: `research:${q.spec.source}`,
-              agent: researcherId,
-              worktree: args.worktree,
-              startedAt,
-            });
-            appendSessionIndex({
-              sessionID: sid,
-              agent: researcherId,
-              worktree: args.worktree,
-              issue: args.issue,
-              stage: `research:${q.spec.source}`,
-              createdAt: new Date().toISOString(),
-            });
-
-            let outcomeText = "";
-            try {
-              const promptText = buildResearchPrompt(q, {
-                issue: args.issue,
-                scriptsDir: SCRIPTS_DIR,
-                worktree: args.worktree,
-                context: args.context,
-              });
-              const promptPromise = (client as any).session
-                .prompt({
-                  path: { id: sid },
-                  body: {
-                    agent: researcherId,
-                    tools: { question: false },
-                    parts: [{ type: "text", text: promptText }],
-                    model: { providerID, modelID },
-                  } as Record<string, unknown>,
-                  query: { directory: args.worktree },
-                })
-                .catch((e: unknown) => ({ error: e }));
-
-              const early = await Promise.race([
-                promptPromise,
-                new Promise<"pending">((r) => setTimeout(() => r("pending"), 2_000)),
-              ]);
-              if (early !== "pending" && (early as any)?.error) {
-                return fail(`prompt 실패: ${JSON.stringify((early as any).error)}`, sid);
-              }
-
-              await spawnPaneForSession(sid);
-
-              const outcome = await pollSubSession(sid, timeoutMs, args.worktree);
-              const legacy = pollOutcomeToLegacy(outcome);
-              outcomeText = legacy.text;
-              promptPromise.catch(() => {});
-
-              if (outcome.kind === "session_gone") {
-                await cleanupSubSession(sid, {
-                  success: false,
-                  reason: `research ${q.spec.source} session_gone`,
-                  skipSessionOps: outcome.reason !== "message_stall",
-                });
-                return fail(`세션 종료 (${outcome.reason ?? "status_absent"})`, sid);
-              }
-              if (outcome.kind === "timeout") {
-                await cleanupSubSession(sid, {
-                  success: false,
-                  reason: `research ${q.spec.source} timeout`,
-                });
-                return fail(`시간 초과 (${Math.round(timeoutMs / 60_000)}분)`, sid);
-              }
-
-              const parsed = parseResearchOutput(outcomeText);
-              await cleanupSubSession(sid, { success: parsed.ok });
-              if (!parsed.ok) {
-                return fail(`출력 파싱 실패: ${parsed.reason}`, sid);
-              }
-              return {
-                ...base,
-                session_id: sid,
-                elapsed_ms: Date.now() - startedAt,
-                status: "ok",
-                findings: parsed.data.findings,
-                gaps: parsed.data.gaps,
-                error: null,
-              };
-            } catch (e) {
-              await cleanupSubSession(sid, {
-                success: false,
-                reason: `research ${q.spec.source} threw`,
-              }).catch(() => undefined);
-              return fail(`예외: ${e instanceof Error ? e.message : String(e)}`, sid);
-            }
-          };
-
-          // Promise.all, not a loop: the whole point is that the sources run at
-          // the same time. runOne never rejects (every path returns an outcome),
-          // so one source cannot take the others down with it.
-          const outcomes = await Promise.all(queries.map(runOne));
-
-          const artifact = mergeResearchFindings(
-            args.issue,
-            new Date().toISOString(),
-            outcomes,
-            rejected,
-            deferred,
-          );
-
-          // state.json 산출물 경로는 상대경로만 저장한다 (ARCHITECTURE.md §5.3).
-          const relPath = `.makdoong2-team/${args.issue}/research-findings.json`;
-          let artifactWritten = false;
-          let artifactError: string | null = null;
-          try {
-            const absDir = join(args.worktree, ".makdoong2-team", args.issue);
-            mkdirSync(absDir, { recursive: true });
-            writeFileSync(join(absDir, "research-findings.json"), JSON.stringify(artifact, null, 2));
-            artifactWritten = true;
-          } catch (e) {
-            artifactError = e instanceof Error ? e.message : String(e);
-            logger.error(`[dispatch_research] artifact write 실패: ${artifactError}`);
-          }
-
-          if (artifactWritten) {
-            // cwd 는 반드시 args.worktree — state.sh root() 가 cwd 의 git toplevel 을
-            // 쓰므로 여기서 어긋나면 다른 state.json 에 기록된다 (ARCHITECTURE.md §10.2).
-            const setR = await $`bash ${SCRIPTS_DIR}/state.sh set ${args.issue} ${'.stages."1_planning".substages."requirements".research_path'} ${JSON.stringify(relPath)}`
-              .cwd(args.worktree).quiet().nothrow();
-            if (setR.exitCode !== 0) {
-              logger.debug(
-                `[dispatch_research] research_path 마커 기록 실패 exit=${setR.exitCode} ` +
-                `stderr=${redactAndTruncate(setR.stderr?.toString() ?? "", 160)}`,
-              );
-            }
-          }
-
-          const okCount = artifact.counts.ok;
-          const failedOutcomes = outcomes.filter((o) => o.status === "failed");
-          const fanout = classifyFanoutOutcome(
-            artifact.counts,
-            artifactWritten ? relPath : null,
-            failedOutcomes.map((o) => o.label),
-          );
-          logger.debug(
-            `[dispatch_research] fan-out done issue=${args.issue} ok=${okCount}/${outcomes.length} ` +
-            `findings=${artifact.counts.findings_total} status=${fanout.status} ` +
-            `elapsed_ms=${Date.now() - startedAll}`,
-          );
-          if (fanout.partial) {
-            // debug 가 아니라 warn — 기본 로깅 레벨에서도 보여야 하는 결손이다.
-            logger.warn(
-              `[dispatch_research] PARTIAL issue=${args.issue} ok=${okCount}/${artifact.counts.requested} ` +
-              `failed=${failedOutcomes.map((o) => `${o.source}:${o.error ?? "unknown"}`).join(" | ")}`,
-            );
-          }
-
-          return JSON.stringify({
-            // 부분 성공도 ok=true. 한 소스가 죽었다고 나머지 조사 결과를 버리면
-            // fan-out 의 실패 격리가 의미를 잃는다. 결손은 status/partial 로 알린다.
-            ok: fanout.ok,
-            status: fanout.status,
-            partial: fanout.partial,
-            issue: args.issue,
-            artifact_path: artifactWritten ? relPath : null,
-            artifact_error: artifactError,
-            elapsed_ms: Date.now() - startedAll,
-            counts: artifact.counts,
-            summary: summarizeOutcomes(outcomes),
-            failed: failedOutcomes.map((o) => ({
-              source: o.source,
-              error: o.error,
-            })),
-            rejected,
-            deferred,
-            next_action: fanout.next_action,
-          });
-        },
-      }),
-
       get_fallback_model: tool({
         description: "Return the next model in this agent's fallback chain after a failure (rate_limit/5xx/context_exceeded).",
         args: {
@@ -3323,8 +3070,28 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
           // current=null 로 남아 target_stage="1_planning.jira" 로 되돌아가는
           // silent regression 이 발생한다. `.issue` 필드를 probe 하여 이 상황을
           // 명시적 에러로 분리한다.
-          const probe = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${".issue"}`
+          let probe = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${".issue"}`
             .cwd(effectiveCwd).quiet().nothrow();
+
+          // ── 자가 복구 1회: forward sync 는 플러그인 몫이다 ──
+          // worktree cwd 에서 state.json 이 안 보이는 가장 흔한 원인은 forward sync
+          // 미수행이다. 종전에는 그 복구를 next_action 으로 **team-leader 에게 시켰는데**,
+          // 그 안내 문구에 worktree 절대경로가 박혀 있었다. opencode 는 bash 명령이
+          // 참조하는 디렉토리마다 external_directory 승인을 묻으므로(ARCHITECTURE §4.2a),
+          // 리더가 그 명령을 실행하는 순간 primary 세션이 사용자에게 승인을 물었다 —
+          // 정작 다른 모든 동기화는 플러그인이 조용히 처리하는데 이 경로만 예외였다.
+          // 여기서 직접 한 번 시도하면 승인 요청도, 왕복도 사라진다.
+          if (probe.exitCode !== 0 && args.worktree && args.worktree !== cwd) {
+            const heal = await $`bash ${SCRIPTS_DIR}/wt-sync-ignored.sh ${args.worktree} ${args.issue}`
+              .cwd(effectiveCwd).quiet().nothrow();
+            probe = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${".issue"}`
+              .cwd(effectiveCwd).quiet().nothrow();
+            logger.debug(
+              `[wt-sync] SELF_HEAL issue=${args.issue} worktree=${args.worktree} ` +
+              `sync_exit=${heal.exitCode} probe_after=${probe.exitCode}`,
+            );
+          }
+
           if (probe.exitCode !== 0) {
             const rootR = await $`bash ${SCRIPTS_DIR}/state.sh root`
               .cwd(effectiveCwd).quiet().nothrow();
@@ -3338,11 +3105,15 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
               reason:
                 `state.json 을 판독할 수 없습니다. worktree cwd 기준 예상 경로: ${expectedPath}. ` +
                 `주요 원인: (1) wt-sync-ignored.sh 로 worktree 동기화 미수행, (2) 다른 cwd(main repo)에서 state.json 을 조작하여 worktree 사본과 불일치, (3) state.json 손상.`,
+              // 안내에 **절대경로를 싣지 않는다.** 리더가 그 경로를 명령에 넣어 실행하면
+              // primary 세션이 external_directory 승인을 사용자에게 묻는다. 아래 명령은
+              // 전부 cwd 기준으로 동작하므로 경로 인자가 필요 없다.
               next_action:
+                `동기화는 이미 1회 자동 시도했고 실패했습니다 — 같은 동기화를 직접 실행하지 마세요. ` +
                 `① 먼저 'bash ${SCRIPTS_DIR}/state.sh status ${args.issue}' 로 존재/유효성을 확인하세요 ` +
                 `(승인된 읽기 명령입니다 — 훅이 차단하지 않습니다). ` +
-                `② exists=false 면 'bash ${SCRIPTS_DIR}/wt-sync-ignored.sh ${effectiveCwd} ${args.issue}' 로 재동기화하거나, ` +
-                `'bash ${SCRIPTS_DIR}/state.sh init ${args.issue} ${effectiveCwd}' 로 초기화하세요. ` +
+                `② exists=false 면 'bash ${SCRIPTS_DIR}/state.sh init ${args.issue}' 로 초기화하세요 ` +
+                `(경로 인자 없이 — cwd 의 git toplevel 을 자동으로 씁니다). ` +
                 `③ readable=false (JSON 손상) 면 사용자에게 에스컬레이션하세요. ` +
                 `근본 원인이 해소되기 전에는 dispatch_stage 를 호출하지 마세요.`,
             });
