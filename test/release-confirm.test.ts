@@ -17,8 +17,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -97,6 +98,75 @@ describe("릴리스 스크립트가 /dev/tty 에 의존하지 않는다", () => 
       const src = readFileSync(join(REPO_ROOT, rel), "utf8");
       assert.ok(/lib\/confirm\.sh/.test(src), `${rel} 이 lib/confirm.sh 를 source 하지 않는다`);
       assert.ok(!/^confirm\(\)\s*\{/m.test(src), `${rel} 이 confirm 을 자체 정의하고 있다`);
+    }
+  });
+});
+
+// ── 커밋 목록 출력이 릴리스를 죽이지 않는다 (SIGPIPE 141) ────────────────────
+//
+// `git log --oneline "$LAST_TAG..HEAD" | head -20` 은 `set -o pipefail` 아래서
+// 커밋이 20개를 넘는 순간 릴리스를 통째로 중단시킨다: head 가 먼저 종료하면 git 이
+// SIGPIPE(141)로 죽고 그 코드가 파이프라인 상태가 되어 errexit 가 발화한다.
+// "1 파일 = 1 commit" 규약을 지키면 커밋 수는 쉽게 20을 넘으므로, 이 형태가
+// 되돌아오면 큰 릴리스마다 재현된다. 실제로 48커밋 릴리스에서 발화했다.
+describe("release.sh — 커밋 요약 출력에 SIGPIPE 유발 파이프가 없다", () => {
+  const src = readFileSync(join(REPO_ROOT, "scripts/release.sh"), "utf8");
+
+  test("set -o pipefail 이 켜져 있다 (이 테스트의 전제)", () => {
+    assert.match(src, /^set -euo pipefail$/m);
+  });
+
+  test("git log 를 head 로 자르지 않는다", () => {
+    // 주석 줄(`# …`)은 제외한다 — 이 결함을 설명하는 주석 자체가 패턴에 걸린다.
+    const code = src.split("\n").filter((l) => !/^\s*#/.test(l)).join("\n");
+    assert.ok(
+      !/git log[^\n|]*\|\s*head/.test(code),
+      "git log | head 형태가 남아 있다 — 커밋 20개 초과 릴리스에서 SIGPIPE 로 중단된다",
+    );
+  });
+
+  test("개수 제한을 git 자체 옵션으로 건다", () => {
+    assert.match(src, /git log --oneline -20 "\$\{LAST_TAG\}\.\.HEAD"/);
+  });
+
+  test("잘린 개수 안내를 `[ … ] && …` 가 아니라 if 로 쓴다", () => {
+    // 조건이 거짓이면 AND 리스트 전체가 1을 반환해 errexit 가 그 자리에서 끝낸다.
+    assert.ok(
+      !/\[ "\$COMMIT_TOTAL" -gt 20 \] &&/.test(src),
+      "AND 리스트 형태는 조건 거짓일 때 릴리스를 중단시킨다",
+    );
+    assert.match(src, /if \[ "\$COMMIT_TOTAL" -gt 20 \]; then/);
+  });
+
+  test("실제로 21개 커밋 이력에서 이 블록이 141 로 죽지 않는다", () => {
+    const wt = mkdtempSync(join(tmpdir(), "mkd2-release-log-"));
+    try {
+      const git = (...a: string[]) => execFileSync("git", a, { cwd: wt, encoding: "utf8" });
+      git("init", "-q");
+      git("config", "user.email", "t@example.com");
+      git("config", "user.name", "t");
+      writeFileSync(join(wt, "f"), "0");
+      git("add", "f");
+      git("commit", "-qm", "base");
+      git("tag", "v0.0.1");
+      for (let i = 0; i < 21; i++) {
+        writeFileSync(join(wt, "f"), `content-${i}`);
+        git("add", "f");
+        git("commit", "-qm", `c${i}`);
+      }
+      // 수정된 형태를 그대로 떼어 실행한다.
+      const snippet = [
+        "set -euo pipefail",
+        'LAST_TAG="$(git describe --tags --abbrev=0)"',
+        'COMMIT_TOTAL="$(git rev-list --count "${LAST_TAG}..HEAD")"',
+        'git log --oneline -20 "${LAST_TAG}..HEAD"',
+        'if [ "$COMMIT_TOTAL" -gt 20 ]; then echo "... 외 $((COMMIT_TOTAL - 20))개"; fi',
+      ].join("\n");
+      const out = execFileSync("bash", ["-c", snippet], { cwd: wt, encoding: "utf8" });
+      assert.match(out, /외 1개/, "잘린 개수 안내가 나오지 않았다");
+      assert.equal(out.trim().split("\n").length, 21, "20줄 + 안내 1줄이어야 한다");
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
     }
   });
 });
