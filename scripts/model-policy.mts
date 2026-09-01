@@ -130,10 +130,6 @@ export const DEFAULT_POLICIES: Readonly<Record<string, AgentModelPolicy>> = Obje
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
   },
   // Research fan-out worker — one session per source, spawned in parallel.
-  "makdoong2-researcher": {
-    primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
-    fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
-  },
   "makdoong2-planner": {
     primary:   { id: "github-copilot/gpt-5.6-luna",          variant: "xhigh",  tier: "medium" },
     fallbacks: [{ id: "github-copilot/claude-haiku-4.5",                         tier: "low" }],
