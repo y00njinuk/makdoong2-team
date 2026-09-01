@@ -55,13 +55,6 @@ export interface TimeoutConfig {
 
 export const DEFAULT_STALL_ESCALATE_THRESHOLD = 5;
 
-export interface ResearchConfig {
-  /** Max research sub-sessions spawned simultaneously. Clamped to [1, 6]. */
-  max_parallel?: number;
-  /** Per-source wall-clock budget. Shorter than a substage on purpose — a source
-   *  that cannot answer in this window is reported as failed, not waited on. */
-  timeout_minutes?: number;
-}
 
 export type LogLevel = "silent" | "error" | "warn" | "info" | "debug" | "trace";
 
@@ -89,7 +82,6 @@ export interface Makdoong2Config {
   model_policy?: ModelPolicyConfig;
   coverage?: { threshold?: number };
   timeout?: TimeoutConfig;
-  research?: ResearchConfig;
   tmux?: TmuxConfigJson;
   worktree?: { extra_exclude?: string };
   paths?: PathsConfig;
@@ -270,6 +262,39 @@ export function loadOpencodeExternalDirAllows(): string[] {
  * because scripts/install-lib.mjs deploys skill directories there, not into the
  * package root. All other paths default to package-root subdirs.
  */
+/**
+ * 플러그인이 **자기 자신을 실행하기 위해** 반드시 접근해야 하는 디렉토리들.
+ *
+ * 모든 substage 가 `bash <SCRIPTS_DIR>/state.sh` 를 호출하고, 게이트·stage spec·
+ * 리서치 스킬도 전부 opencode 설정 디렉토리(또는 패키지 루트) 아래에 있다.
+ * 이들은 **워크스페이스 밖**이므로 opencode 가 `external_directory` 승인을 묻는다
+ * (1.18 `ShellTool.ask` 는 bash 명령이 참조하는 디렉토리에도 발화한다).
+ *
+ * 종전에는 그 승인 근거가 설치 시 opencode.json 에 심어둔 시드 하나뿐이었다.
+ * 시드가 남지 않은 부분 설치에서는 서브에이전트가 **자기 상태 파일조차 읽지 못한 채**
+ * PERMISSION_STALL 로 죽었다 (GitHub #8). 파일 배포만 성공한 설치는 겉보기에 정상이라
+ * 원인 규명도 어려웠다.
+ *
+ * 그래서 플러그인이 자기 경로를 **설정과 무관하게** 스스로 허용한다. opencode.json
+ * 시드는 1차 방어로 그대로 두고(사용자가 직접 승인할 때의 UX), 이것이 2차 방어다 —
+ * 다른 하드룰들과 같은 이중 방어 구조다.
+ *
+ * 허용 범위를 넓히는 변경이 아니다: 여기 담기는 경로는 플러그인이 이미 자기 손으로
+ * 실행하고 있는 것들뿐이고, 워크스페이스·`/tmp`·홈 디렉토리는 포함되지 않는다.
+ */
+export function pluginOwnAllowPatterns(paths: Required<PathsConfig> = resolvePaths()): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const dir of [paths.hooks, paths.gates, paths.scripts, paths.stages, paths.skills]) {
+    if (typeof dir !== "string" || dir.trim() === "") continue;
+    const norm = dir.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (norm === "" || norm === "/" || seen.has(norm)) continue;
+    seen.add(norm);
+    out.push(`${norm}/**`);
+  }
+  return out;
+}
+
 export function resolvePaths(): Required<PathsConfig> {
   const p = loadConfig().paths ?? {};
   const root = packageRoot();
