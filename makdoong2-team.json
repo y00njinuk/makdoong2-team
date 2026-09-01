@@ -6,7 +6,6 @@
     "makdoong2-engineer":    { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
     "makdoong2-publisher":   { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
     "makdoong2-analyzer":    { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
-    "makdoong2-researcher":  { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" },
     "makdoong2-verifier":    { "model": "github-copilot/gpt-5.6-luna", "variant": "xhigh" }
   },
   "model_policy": {
