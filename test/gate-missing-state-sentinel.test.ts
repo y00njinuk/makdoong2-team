@@ -17,7 +17,7 @@
 //
 // `stage-analysis-verify.sh` 는 `|| echo ""` 변형이라 결과가 `"null"` 이 되고,
 // `[ -n "$(q '.issue')" ]` 존재 검사가 **항상 참**이었다 — state.json 이 없어도
-// 통과한 뒤 "1_planning.scope 미완료 (done=null)" 로 차단됐다.
+// 통과한 뒤 "1_planning.requirements 미완료 (done=null)" 로 차단됐다.
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
@@ -117,7 +117,7 @@ describe("HITL 승인 게이트의 fail-open/closed 방향", () => {
     // 기본 상태에서 HITL 블록 전체가 건너뛰어진다 — commit 게이트만 그랬고,
     // 하필 가장 중대한 단계(커밋 생성)였다.
     const files = [
-      "stage3-scope-verify.sh",
+      "stage-analysis-verify.sh",
       "stage4-dev-verify.sh",
       "stage6-commit-verify.sh",
       "stage8-review-verify.sh",
