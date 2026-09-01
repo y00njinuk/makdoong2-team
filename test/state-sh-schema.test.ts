@@ -225,8 +225,11 @@ describe("state.sh — migrate merges phantom into hierarchical", () => {
       }
 
       assert.equal(after.stages["1_planning"].substages.jira.done, true);
+      // flat `1_planning.scope` 는 hierarchical 로 승격된 직후 requirements 로
+      // **흡수**된다 (scope substage 폐지). done 은 AND 로 접히므로 둘 다 true 면 true.
       assert.equal(after.stages["1_planning"].substages.requirements.done, true);
-      assert.equal(after.stages["1_planning"].substages.scope.done, true);
+      assert.equal(after.stages["1_planning"].substages.scope, undefined,
+        "scope substage 는 requirements 로 흡수되고 키 자체가 제거되어야 한다");
       assert.equal(after.stages["2_implementation"].substages.dev.done, true);
       assert.equal(after.stages["2_implementation"].substages.test.done, true);
       assert.equal(after.stages["2_implementation"].substages.test.unit, "pass");
