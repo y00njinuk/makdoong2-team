@@ -1,4 +1,4 @@
-# 1–3단계 통합 Planning — `1_planning.{jira,requirements,scope}` 연속 처리
+# 통합 Planning — `1_planning.{jira,requirements}` 연속 처리
 
 **목적**: Jira 조회 → 요구사항 확정 → 개발 범위 파악을 **단일 세션**에서 완료한다.  
 **속도**: 3개 substage dispatch(모델 호출 3회)를 1회로 단축.  
@@ -15,12 +15,10 @@
 ```bash
 bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."jira".done'
 bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".done'
-bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."scope".done'
 ```
 
 - `jira.done=true` → Phase 1 건너뛰고 Phase 2로 직행
-- `jira.done=true` + `requirements.done=true` → Phase 3으로 직행
-- 셋 다 `true` → 모두 완료. 완료 메시지 출력 후 종료
+- 둘 다 `true` → 모두 완료. 완료 메시지 출력 후 종료
 
 ---
 
@@ -89,7 +87,11 @@ mkdir -p .makdoong2-team/<이슈키>
 
 파일 (repo/worktree root 기준 상대경로): `.makdoong2-team/<이슈키>/requirements-draft.md`
 
-**초안 파일은 반드시 `write` 툴(filePath 인자)로 생성·갱신한다.** bash 리디렉션(`cat > …`, `printf > …` 등)과 `apply_patch` 는 같은 경로라도 훅이 차단한다 — planner 의 유일한 파일 쓰기 수단은 `write` 다. 이 경로의 `write` 는 planner READ-ONLY 원칙의 명시적 예외이며 훅이 허용한다 (issue #8).
+**초안 파일은 반드시 쓰기 *툴* 로 생성·갱신한다 — bash 리디렉션(`cat > …`, `printf > …`, `tee`, `sed -i` 등)은 같은 경로라도 훅이 차단한다.**
+- 세션에 `write` 툴이 있으면 `write(filePath=…)` 를 쓴다.
+- **`write` 가 툴 목록에 없으면 `apply_patch` 를 쓴다.** opencode 는 모델에 따라 쓰기 툴을 바꿔 끼운다 — `gpt-5` 계열 세션에는 `write`·`edit` 가 아예 없고 `apply_patch` 만 있다. 이때 패치 본문은 `*** Begin Patch` / `*** Add File: .makdoong2-team/<이슈키>/requirements-draft.md` / `*** End Patch` 형식으로 정확히 작성한다 — 훅이 본문에서 대상 경로를 파싱해 허용 경로면 통과시킨다.
+- **툴이 없다는 이유로 초안 생성을 포기하지 않는다.** 둘 중 실제로 존재하는 툴을 골라 즉시 실행하고, 차단 메시지를 받으면 그 메시지가 지시하는 형식으로 재시도한다.
+- 이 경로의 파일 쓰기는 planner READ-ONLY 원칙의 명시적 예외이며 훅이 허용한다 (issue #8).
 
 초안 구조:
 ```markdown
@@ -104,36 +106,29 @@ mkdir -p .makdoong2-team/<이슈키>
 ```bash
 # state.json 에는 반드시 상대경로만 저장한다 (절대경로 저장 시 다른 cwd 에서 접근 불가 → Read hang 유발).
 # 이 마커는 §2-5b 의 spec_hash 와 **한 쌍**이다 — spec_hash 만 기록되고 이것이 빠지면
-# stage3-scope-verify.sh 가 1_planning.scope 진입을 하드 차단한다 (issue #6-①).
+# stage-analysis-verify.sh 가 2_implementation.analysis 진입을 하드 차단한다 (issue #6-①).
 bash <SCRIPTS_DIR>/state.sh set <이슈키> \
   '.stages."1_planning".substages."requirements".draft_path' '".makdoong2-team/<이슈키>/requirements-draft.md"'
 ```
 
-### 2-3. 다출처 교차 조사 (병렬)
+### 2-3. 다출처 교차 조사
 
-**`dispatch_research` 툴 1회 호출로 소스별 조사를 병렬 실행한다.** `skill_mcp` 를 직접 순차 호출하지 않는다 — 플러그인이 소스마다 별도 세션을 동시에 띄우므로 대기 시간이 가장 느린 소스 하나로 수렴하고, 각 소스의 원자료가 이 세션의 컨텍스트를 잠식하지 않는다. **outer-world 에이전트 위임 금지.**
+**당신의 세션에서 직접 조사한다.** 소스마다 `skill(name=...)` 로 스킬을 먼저 로드한 뒤 그 스킬의 MCP 를 호출한다. 로드 전에 `skill_mcp` 를 부르면 `MCP server "<name>" not found` 로 실패한다. **outer-world 에이전트 위임 금지.**
 
-```
-dispatch_research(
-  issue = "<이슈키>",
-  worktree = "<Working directory 절대경로>",
-  context = "<Phase 1 에서 요약한 Jira 핵심 3~5줄>",
-  queries = [
-    {source: "jira",       focus: "에픽/상위 이슈, 링크 이슈, 관련 코멘트에서 구체화된 요구"},
-    {source: "confluence", focus: "관련 설계 문서, ADR, API 스펙, 운영 가이드"},
-    {source: "bitbucket",  focus: "수정 대상 파일/클래스 현재 구현, 관련 PR 이력, 테스트 패턴"}
-  ]
-)
-```
+| 소스 | skill | mcp_name | 조사 범위 |
+|---|---|---|---|
+| Jira | `jira-research` | `works` | 에픽·상위 이슈·링크 이슈·서브태스크·코멘트에서 구체화된 요구와 결정 사항 |
+| Confluence | `confluence-research` | `docs` | 설계 문서·ADR·API 스펙·운영 가이드의 제약과 합의된 규약 |
+| Bitbucket | `bitbucket-research` | `repos` | 수정 대상 파일·클래스의 현재 구현, 관련 PR 이력, 기존 테스트 패턴 |
+| GitHub OSS | `github-oss-research` | (없음 — WebFetch) | 외부 오픈소스의 사용 예시·알려진 이슈·업스트림 변경 |
 
-조사 세션은 서로를 보지 못한다. **한 focus 가 다른 조사 결과에 의존하면 안 된다** — 의존이 필요하면 라운드를 나눠 두 번 호출한다.
+기본 조사는 **Jira → Bitbucket** 두 소스다. 설계·규약이 쟁점이면 Confluence 를, 외부 라이브러리가 쟁점이면 GitHub OSS 를 더한다. Simple 이슈는 Jira 하나로 끝낼 수 있다.
 
-Simple 이슈는 조사 A + C만으로 축소 가능. 외부 라이브러리가 쟁점이면 `{source: "github-oss", ...}` 를 추가한다.
+**조사 예산은 소스당 최대 5회 호출이다.** 초과하면 그 소스는 거기서 멈추고 미확인 항목을 `미결 사항` 에 적는다.
 
-**결과 읽기**: 반환 JSON 의 `artifact_path` (`.makdoong2-team/<이슈키>/research-findings.json`) 를 Read 로 읽는다. `failed` 가 있어도 **부분 성공이 정상**이므로 나머지 결과로 진행하고, 실패 소스가 요구사항 확정에 필수인 경우에만 사유를 사용자에게 보고한다. 전 소스 실패(`ok: false`)면 추측으로 채우지 말고 보고한다.
-
-- **`status: "partial"` 은 그 자체로 정상 종료다.** 실패한 소스를 당신이 직접 조사해 메우려 하지 말 것 — `skill_mcp` 순차 호출로 결손을 메우려다 세션 예산을 전부 소진하고 **마커를 하나도 남기지 못한 채** 종료한 사고가 이틀 연속 재현됐다 (GitHub issue #9, 각 27분·17분 소모). 결손을 더 좁히고 싶으면 focus 를 좁혀 `dispatch_research` 를 **1회만** 다시 호출한다.
-- **조사 완결성을 이유로 마커 기록을 미루지 않는다 (hardrule).** 조사가 부분적이면 `gaps` 에 미확인 항목을 남기고 그 상태 그대로 산출물과 substage 마커를 기록한 뒤 종료한다. 마커가 없는 종료는 상위에서 `completion: "incomplete"` 로 분류되어 substage 전체가 재실행된다 — 부분 결과까지 함께 버려진다.
+- **부분 조사는 그 자체로 정상 종료다.** 한 소스가 응답하지 않으면 그 소스를 포기하고 나머지로 진행한다. 결손을 메우려 같은 소스를 계속 두드리다 세션 예산을 전부 소진하고 **마커를 하나도 남기지 못한 채** 종료한 사고가 이틀 연속 재현됐다 (GitHub issue #9, 각 27분·17분 소모).
+- **조사 완결성을 이유로 마커 기록을 미루지 않는다 (hardrule).** 조사가 부분적이면 미확인 항목을 초안의 `미결 사항` 에 남기고 **그 상태 그대로** 산출물과 substage 마커를 기록한 뒤 종료한다. 마커가 없는 종료는 상위에서 `completion: "incomplete"` 로 분류되어 substage 전체가 재실행된다 — 부분 결과까지 함께 버려진다.
+- 조사 결과는 별도 파일로 만들지 않는다. `requirements-draft.md` 의 `## 수집된 정보` 에 소스별로 정리한다 (출처 URL 포함).
 
 ### 2-4. 요구사항 체크리스트 확인
 
@@ -176,7 +171,7 @@ category = (criticality == "critical" OR scope_size == "large") ? "major" : base
 
 ```bash
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy' \
-  '{"intent_type":"Standard","change_type":"bugfix","scope_size":"small","criticality":"normal","category":"minor","auto_approve":{"1_planning.requirements":true,"1_planning.scope":true,"3_delivery.commit":true,"3_delivery.pr":true},"rationale":"<한 줄 근거>","categorized_by":"1_planning.requirements"}'
+  '{"intent_type":"Standard","change_type":"bugfix","scope_size":"small","criticality":"normal","category":"minor","auto_approve":{"1_planning.requirements":true,"3_delivery.commit":true,"3_delivery.pr":true},"rationale":"<한 줄 근거>","categorized_by":"1_planning.requirements"}'
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.categorized_at' "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
 ```
 
@@ -184,7 +179,7 @@ major 로 판정된 경우에도 `auto_approve` 맵은 **모두 true** 로 두�
 
 ### 2-5b. 요구사항 품질 마커 (ambiguity_score · spec_hash)
 
-`stage3-scope-verify.sh` 의 요구사항 품질 게이트는 **이 두 마커가 있을 때만** 검사한다
+`stage-analysis-verify.sh` 의 요구사항 품질 게이트는 **이 두 마커가 있을 때만** 검사한다
 (구형 state 호환을 위한 조건부 검사). 즉 여기서 기록하지 않으면 통합 경로에서는
 품질 게이트가 통째로 사문화된다 — `02-requirements.md` 를 거치는 분리 경로에서는
 검사되는데 이 경로에서만 안 되는 비대칭이 생긴다. 반드시 기록한다.
@@ -206,23 +201,9 @@ bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."req
 bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".spec_hash'
 ```
 
-### 2-6. Requirements 완료 기록
+### 2-5c. 개발 범위 확정 (구 `1_planning.scope` — 흡수됨)
 
-```bash
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".self_check' \
-  '{"checklist_complete":true,"conflicts_resolved":true,"user_confirmed":true,"scope_clean":true,"draft_synced":true,"categorized":true,"ambiguity_scored":true,"spec_frozen":true,"draft_recorded":true}'
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".verification_pending' 'false'
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".done' 'true'
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".done_at' "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
-```
-
----
-
-## Phase 3: 개발 범위 파악 (`1_planning.scope`)
-
-2단계 조사 결과로 코드 수정 계획을 수립한다. 2단계 `bitbucket-research` 탐색을 이어서 사용한다.
-
-### 3-1. 범위 출력
+범위 확정은 요구사항 확정과 **같은 판단의 연속**이라 별도 substage 를 두지 않는다. 조사 결과로 코드 수정 계획을 여기서 함께 확정한다. §2-3 의 `bitbucket-research` 탐색을 이어서 사용한다.
 
 ```
 ### 개발 범위
@@ -234,26 +215,26 @@ bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."req
 **스코프 아웃**: <이번 이슈에서 다루지 않는 것>
 ```
 
-### 3-2. 범주 재평가 (escalation — 하향 금지)
+이 블록은 `requirements-draft.md` 에도 그대로 남긴다 — dev 단계가 초안을 읽고 작업 단위를 잡는다.
 
-실제 수정/추가 파일과 작업 단위가 확정된 뒤, `scope_size`·`criticality`를 재평가한다.
+**범주 재평가 (escalation — 하향 금지)**: 실제 수정/추가 파일과 작업 단위가 확정된 뒤 `scope_size`·`criticality` 를 재평가한다. minor → major 상향인 경우에만 갱신하며, `auto_approve` 맵은 건드리지 않고 **모두 true 로 유지**한다 — 상향은 위험도 라벨 정정에 그치고 흐름은 무인 진행을 유지한다:
 
-minor → major로 상향될 경우에만 아래 항목들을 갱신한다. `auto_approve` 맵은 건드리지 않고 **모두 true 로 유지**한다 — 상향은 위험도 라벨 정정에 그치며 흐름 자체는 무인 진행으로 유지된다:
 ```bash
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.category' '"major"'
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.scope_size' '"large"'
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.categorized_by' '"1_planning.scope"'
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.categorized_by' '"1_planning.requirements"'
 ```
 
-### 3-3. Scope 완료 기록
+### 2-6. Requirements 완료 기록
 
 ```bash
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."scope".self_check' \
-  '{"paths_explicit":true,"test_scope_defined":true,"atomic_units":true,"scope_out_listed":true,"user_approved":true}'
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."scope".verification_pending' 'false'
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."scope".done' 'true'
-bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."scope".done_at' "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".self_check' \
+  '{"checklist_complete":true,"conflicts_resolved":true,"user_confirmed":true,"scope_clean":true,"draft_synced":true,"categorized":true,"ambiguity_scored":true,"spec_frozen":true,"draft_recorded":true,"paths_explicit":true,"test_scope_defined":true,"atomic_units":true,"scope_out_listed":true}'
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".verification_pending' 'false'
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".done' 'true'
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".done_at' "\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\""
 ```
+
 
 ---
 
