@@ -34,7 +34,6 @@
     "verify_stage": true,
     "dispatch_stage": true,
     "dispatch_verifier": true,
-    "dispatch_research": true,
     "auto_advance_stage": true,
     "get_fallback_model": true
   }
