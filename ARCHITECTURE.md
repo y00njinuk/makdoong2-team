@@ -64,9 +64,11 @@ Jira 이슈 하나를 **3 phase · 9 substage** 로 나눠 역할별 에이전�
 
 ### 통합 Planning
 
-`1_planning.jira` 를 dispatch 하면 `stages/01-planning.md` 통합 spec 이 적용되어 **한 planner 세션이 jira → requirements → scope 를 순서대로 완료**한다. verifier 가 3개 substage 마커를 한 번에 확인하고, 이후 `auto_advance_stage` 는 곧바로 `2_implementation.analysis` 로 넘어간다.
+`1_planning.jira` 를 dispatch 하면 `stages/01-planning.md` 통합 spec 이 적용되어 **한 planner 세션이 jira → requirements 를 순서대로 완료**한다. verifier 가 2개 substage 마커를 한 번에 확인하고, 이후 `auto_advance_stage` 는 곧바로 `2_implementation.analysis` 로 넘어간다.
 
-planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 를 기록하고 종료한다. 부장님이 사용자 인터뷰를 진행한 뒤 `context` 파라미터에 답변을 실어 `dispatch_stage(jira)` 를 재호출한다. requirements / scope 단독 dispatch 는 planner 중도 실패 시의 폴백 경로다.
+planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 를 기록하고 종료한다. 부장님이 사용자 인터뷰를 진행한 뒤 `context` 파라미터에 답변을 실어 `dispatch_stage(jira)` 를 재호출한다. requirements 단독 dispatch 는 planner 중도 실패 시의 폴백 경로다.
+
+**`1_planning.scope` 는 `requirements` 로 흡수됐다.** 범위 확정은 요구사항 확정과 같은 판단의 연속인데 substage 를 나눈 탓에 게이트·마커·verifier 기준이 한 벌 더 필요했다. 흡수하면서 `stage3-scope-verify.sh` 가 하던 승인·모호성·spec drift 검사는 **다음 관문인 `stage-analysis-verify.sh` 로 그대로 옮겼다** — 게이트만 지우고 검사를 옮기지 않으면 검증이 파이프라인에서 통째로 사라진다. 범위 확정 여부는 `requirements.self_check` 의 `paths_explicit` / `test_scope_defined` / `atomic_units` / `scope_out_listed` 4항목으로 판정한다. 기존 state 는 `state.sh migrate` 가 scope 마커를 requirements 로 **AND 로 접어** 옮긴다 (아직 안 끝난 scope 가 통과로 둔갑하지 않도록).
 
 ---
 
@@ -84,7 +86,6 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 | `src/agent-stage-config.ts` | `Stage` 타입, 에이전트 spec, stage → spec 파일 매핑 |
 | `src/stall-escalation.ts` | `hang_history` 기반 재디스패치 차단 판정 (§10.2) |
 | `src/stage-completion.ts` | substage 마커로 완료 여부 판정 — `done` / `paused` / `incomplete` / `unknown` (§10.3) |
-| `src/research-fanout.ts` | 병렬 리서치 fan-out 의 순수 계약 — 소스 레지스트리, 쿼리 정규화, 출력 파싱, 병합 (§3.6) |
 | `src/skill-mcp-registry.ts` | SKILL.md frontmatter 스캔 → `mcp_name → skill_name` 룩업 |
 | `src/mcp-secret-injector.ts` | MCP 초기화 전 secret in-place 주입 |
 | `src/verdict-hash.ts` | verdict 사유 hash (streak 판정용) |
@@ -133,7 +134,7 @@ planner 가 인터뷰가 필요하다고 판단하면 `interview_required=true` 
 `Stage` 유니온:
 
 ```
-"1_planning.jira" | "1_planning.requirements" | "1_planning.scope"
+"1_planning.jira" | "1_planning.requirements"
 | "2_implementation.analysis" | "2_implementation.dev" | "2_implementation.test"
 | "3_delivery.commit" | "3_delivery.pr" | "3_delivery.review"
 ```
@@ -184,45 +185,32 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 
 `{ agent, current, reason? }` → `{ next: ModelSpec | null, exhausted, chain, reasonAccepted }`.
 
-### 3.6 `dispatch_research` — 다출처 병렬 조사 fan-out
+### 3.6 다출처 교차 조사 — planner 인라인 (구 `dispatch_research` fan-out)
 
-`{ issue, worktree, queries: [{ source, focus }], context? }`
+`1_planning.requirements` 의 교차 조사는 **planner 자신의 세션**이 수행한다. 소스마다 `skill(name=...)` 로 스킬을 로드한 뒤 그 스킬의 MCP 를 호출한다 (lazy-load 순서는 §4.4).
 
-소스마다 **별도 서브세션을 동시에** 띄워 조사하고, 결과를 하나의 artifact 로 병합한다. `1_planning.requirements` 의 다출처 교차 조사가 이 툴을 쓴다.
-
-| source | skill | MCP |
+| 소스 | skill | mcp_name |
 |---|---|---|
-| `jira` | `jira-research` | `works` |
-| `confluence` | `confluence-research` | `docs` |
-| `bitbucket` | `bitbucket-research` | `repos` |
-| `github-oss` | `github-oss-research` | **없음** — WebFetch / site-wide chrome-devtools-mcp |
+| Jira | `jira-research` | `works` |
+| Confluence | `confluence-research` | `docs` |
+| Bitbucket | `bitbucket-research` | `repos` |
+| GitHub OSS | `github-oss-research` | (없음 — WebFetch) |
 
-**왜 플러그인이 fan-out 하는가.** sealed sub-agent 는 스스로 위임할 수 없고(§4.2), "병렬로 호출하라" 는 프롬프트는 **강제할 수단이 없다** — 모델이 순차로 불러도 이를 감지하는 장치가 없다. 코드로 옮기면 병렬성이 결정론이 되고, 소스마다 세션이 갈리므로 한 소스의 원자료가 다른 소스의 컨텍스트를 잠식하지 않는다 (DESIGN.md §3.7).
+기본은 Jira + Bitbucket. 설계·규약이 쟁점이면 Confluence, 외부 라이브러리가 쟁점이면 GitHub OSS 를 더한다.
 
-**동작**:
-1. `normalizeQueries()` — 알 수 없는 source·빈 focus·중복은 `rejected`, 병렬 상한 초과분은 `deferred` 로 분리한다. **조용히 버리지 않는다** — 말없이 빠진 조사는 "그 소스엔 아무것도 없었다" 와 구별되지 않는다
-2. 재귀 가드 — 호출자가 `makdoong2-researcher` 면 거부 (중첩 fan-out 금지)
-3. `Promise.all` 로 세션 동시 생성 → `makdoong2-researcher` 에이전트로 프롬프트 → 소스별 폴링
-4. `parseResearchOutput()` — 마지막 ```json 펜스 우선, 없으면 균형 잡힌 중괄호 스캔. **파싱 실패는 실패로 기록한다** (빈 성공으로 뭉개지 않는다)
-5. `mergeResearchFindings()` → `.makdoong2-team/<이슈>/research-findings.json` 기록 + `…requirements.research_path` 마커 (상대경로, §5.3)
+- **소스당 호출 상한 5회.** 초과하면 그 소스는 거기서 멈추고 미확인 항목으로 남긴다.
+- 결과는 별도 아티팩트가 아니라 `requirements-draft.md` 의 `## 수집된 정보` 에 정리한다.
+- **부분 조사가 정상 종료다.** 응답하지 않는 소스를 계속 두드리다 세션 예산을 소진하고 마커를 하나도 남기지 못한 사고가 이틀 연속 재현됐다 (GitHub #9). 조사 완결성을 이유로 마커 기록을 미루지 않는다.
 
-**실패 격리**: 소스 하나가 죽어도 나머지 결과는 그대로 남는다. 한 소스라도 성공하면 `ok: true` 이고 전 소스 실패 시에만 `ok: false`.
+#### 왜 fan-out 을 되돌렸나
 
-**결손은 필드로 알린다 — 추론시키지 않는다 (issue #9).** 종전에는 3개 중 1개만 성공한 fan-out 과 3개 모두 성공한 fan-out 이 `ok: true` 로 동일하게 보였고, 차이는 호출자가 스스로 알아채야 하는 `failed` 배열뿐이었다. 실제로 이틀 연속 confluence·bitbucket 이 정확히 10분에 타임아웃했는데 planner 는 jira 단독 결과를 완전한 근거로 취급했고, 그 뒤 결손을 직접 메우려다 세션 예산을 소진하고 **마커를 하나도 기록하지 못한 채** 종료했다 (각 27분·17분). 그래서 `classifyFanoutOutcome()` 이 결손을 자체 필드로 승격한다:
+종전에는 `dispatch_research` 툴이 소스마다 `makdoong2-researcher` 세션을 병렬 spawn 하고 결과를 `research-findings.json` 으로 병합했다. 목적은 두 가지였다 — 대기 시간을 최장 소스 하나로 줄이고, 각 소스의 원자료가 planner 컨텍스트를 잠식하지 않게 하는 것. 둘 다 실제로 달성됐다.
 
-| 반환 필드 | 값 |
-|---|---|
-| `status` | `"ok"` / `"partial"` / `"failed"` |
-| `partial` | 일부만 성공했으면 `true` |
-| `next_action` | 상태별 지시문 — 부분 성공이면 (1) gaps 명시 (2) **직접 조사로 메우지 말 것** (3) 마커 기록은 생략 불가 |
+되돌린 이유는 **격리한 만큼 관측도 격리됐기 때문**이다. 소스가 실패하면 그 원인은 사라진 자식 세션 안에 남고, 부모에게는 결과 없음만 도달한다. 실패가 흔한 경로(사내 MCP 인증·권한·모델 지연)에서 이 성질은 치명적이었다 — 조사 단계가 오래 걸리고 한 번도 끝까지 가지 못하는데, 매 시도가 같은 자리에서 같은 이유로 죽는다는 사실조차 확인할 수 없었다. 원인 규명 비용이 병렬화로 아낀 시간을 넘어섰다.
 
-부분 성공은 `logger.warn` 으로도 남긴다 (기본 로깅 레벨이 `error` 라 debug 로는 보이지 않는다).
+컨텍스트 잠식은 **호출 상한 + 초안으로의 요약 강제**로 대신 누른다. 원자료를 `수집된 정보` 로 접어 넣으면 세션에 남는 것은 결론뿐이다.
 
-**실패한 소스를 자동 재시도하지 않는 이유**: 관측된 두 실패는 모두 예산을 다 쓴 타임아웃이었다. 그 자리에서 재시도하면 같은 결과에 `timeout_ms` 를 한 번 더 쓰고 부모 세션의 시한까지 밀어낸다. 결손을 호출자에게 넘겨 focus 를 좁혀 재호출할지, gaps 로 남기고 진행할지 판단하게 한다.
-
-순수 계약은 `src/research-fanout.ts`, 회귀는 `test/research-fanout.test.ts`.
-
-**설정**: `research.max_parallel` (기본 3, 상한 6), `research.timeout_minutes` (기본 10 — substage 상한보다 짧게 둬서, 답하지 못하는 소스를 기다리는 대신 실패로 기록하고 나머지 결과를 살린다).
+함께 제거된 것: `makdoong2-researcher` 에이전트, `dispatch_research` 툴, `src/research-fanout.ts`, `research.*` 설정 키, `research-findings.json` 아티팩트와 `research_path` 마커.
 
 ### 3.7 `inspect_sub_sessions` — 잔존 세션 진단·정리
 
@@ -252,14 +240,96 @@ REJECTED 시 사유 기록·streak 갱신은 §10.1.
 
 ### 4.2 `tool.execute.before` 가 하는 6가지
 
-1. `dispatch_*` 호출 시 호출자 세션을 `parentSessionByCallID` (callID 별 Map, 스택 폴백) 에 기록 — 자식 세션의 `parentID` 로 전달해 orphan 을 막는다. callID 별로 분리해 두므로 **같은 부모에서 동시 dispatch 해도 parentID 가 섞이지 않는다** (`dispatch_research` 의 병렬 fan-out 이 이 성질에 의존한다)
-2. **Sealed workflow** — sealed sub-agent (planner / analyzer / engineer / publisher / verifier / researcher / issue-reporter) 가 outer-world 위임 툴 (`call_omo_agent`, `delegate_task`, `background_task`, `task_create|update|get|list`) 호출 시 throw. 알려지지 않은 위임성 이름(`delegate*` / `spawn*` / `background_*`)은 경고 로그
+1. `dispatch_*` 호출 시 호출자 세션을 `parentSessionByCallID` (callID 별 Map, 스택 폴백) 에 기록 — 자식 세션의 `parentID` 로 전달해 orphan 을 막는다. callID 별로 분리해 두므로 **같은 부모에서 동시 dispatch 해도 parentID 가 섞이지 않는다**
+2. **Sealed workflow** — sealed sub-agent (planner / analyzer / engineer / publisher / verifier / issue-reporter) 가 outer-world 위임 툴 (`call_omo_agent`, `delegate_task`, `background_task`, `task_create|update|get|list`) 호출 시 throw. 알려지지 않은 위임성 이름(`delegate*` / `spawn*` / `background_*`)은 경고 로그
 3. **Leader 하드룰 1** — 부장님의 `write`/`edit`/`patch`/`multiedit` 호출 시 throw
 4. **Leader 하드룰 2** — 부장님 bash 의 파일 쓰기 리다이렉트 (`>`, `>>`, `tee`, `sed -i`, `python -c open()`, `node -e writeFileSync` 등) 차단. **허용 예외는 `state.sh set` 뿐**
 5. **Issue-reporter 트리거 강제** — `skill(name="makdoong2-issue-reporter")` 를 전용 에이전트 외의 식별된 에이전트가 호출하면 throw (§4.6)
 6. `bash` 툴이면 `guard-bash.sh` 실행 — `rm -rf` / `git push --force` 등은 `APPROVED_DESTRUCTIVE` 마커 없으면 exit 2, `git push` 는 `stage7-pr-verify.sh` 게이트 통과 요구
 
+#### 쓰기 툴의 대상 경로 판정 — `write` 는 모든 세션에 있지 않다 (hardrule)
+
+opencode 1.18 의 `ToolRegistry.tools` 는 **모델 id 에 따라 파일 쓰기 툴을 바꿔 끼운다** (1.18.23 바이너리에서 확인):
+
+```
+isGpt = modelID.includes("gpt-") && !includes("oss") && !includes("gpt-4")
+apply_patch  → isGpt 일 때만 노출
+write · edit → isGpt 가 아닐 때만 노출
+```
+
+즉 `github-copilot/gpt-5.6-luna` 같은 세션에는 `write` 가 **툴 스키마에 아예 없다.** "산출물은 반드시 `write` 로 만들어라" 는 지침은 그런 세션에서 수행 불가능한 지시이고, 훅이 `apply_patch` 를 "대상 불명" 으로 일괄 차단하면 서브에이전트에게 산출물을 만들 합법적 수단이 **하나도** 남지 않아 워크플로가 구조적으로 정지한다 — GitHub #8 이 v2.3.2 에서 재발한 경로다.
+
+- 판정 단위는 툴 이름이 아니라 **대상 경로 집합**이다. `src/apply-patch-paths.ts` 가 `patchText` 를 opencode 의 `Patch.parsePatch` 와 동일하게 파싱해(`*** Begin/End Patch`, `*** Add|Delete|Update File:`, `*** Move to:`) 대상 경로를 전부 뽑고, 훅은 `write` 와 **같은 규칙**을 그 목록 전체에 적용한다. 하나라도 허용 밖이면 차단한다.
+- 관대하게 파싱하지 않는다. 훅과 실제 적용기가 서로 다른 파일을 본다고 믿는 순간 방어가 무너진다. 마커·경로가 형식에서 어긋나면 **대상 미확정으로 보고 차단**한다 — 미탐에는 복구 수단이 없고 오탐에는 차단 메시지의 재시도 안내가 있다.
+- **경로를 보는 곳이 두 군데다.** 산출물 제한 가드(`ARTIFACT_RESTRICTED_AGENTS`)와 engineer 의 auto git add 가 같은 `extractWriteTargets()` 를 쓴다. 후자를 빠뜨리면 gpt 계열 세션에서 engineer 의 모든 편집이 stage 되지 않아 dev exit gate 가 하드 차단한다.
+- 산출물 허용 패턴(`.makdoong2-team/<이슈키>/*.json`)은 `state.json` 을 포함하므로 **쓰기 툴의 state.json 접근은 별도 하드룰로 도려낸다** — bash 우회만 막던 종전 가드의 사각지대였다.
+- 문서 쪽도 함께 고정한다: `stages/01-planning.md` · `stages/02-requirements.md` · `agents/makdoong2-planner.md` 는 "`write` 가 있으면 `write`, 없으면 `apply_patch`" 를 명시한다. 회귀는 `test/apply-patch-paths.test.ts`.
+- `doctor` 는 설정된 모델이 이 부류면 `apply_patch` 로 대체된다는 사실을 알린다.
+
 **state.json 조작 하드룰**: state.json **쓰기**는 오직 `state.sh` 로만 한다. `jq > state.json`, `sed -i state.json`, `python -c open()`, `git add state.json` 같은 우회는 이 훅이 즉시 차단한다. **읽기 전용 진단(`ls` / `file` / `head` / `cat` / `jq` / `git check-ignore`)은 차단하지 않는다** — 막으면 `state_unreadable` 복구 절차 자체가 불가능해진다 (§5.5).
+
+### 4.2a 워크스페이스 밖 경로 — 허용은 셋뿐이다 (hardrule)
+
+opencode 1.18 은 **두 지점**에서 `external_directory` 승인을 묻는다 (바이너리 실측):
+
+```js
+Tool.assertExternalDirectory  // 파일 툴: cwd 밖이면 ask(patterns:[dirname(file)+"/*"])
+ShellTool.ask                 // bash: 명령이 참조하는 디렉토리마다 ask(patterns:[dir+"/*"])
+```
+
+**"수정" 이 아니라 "cwd 밖" 이 기준이다.** 읽기도, bash 명령이 경로를 언급하기만 해도 발화한다. 그래서 team-leader 는 파일을 안 고쳐도 `bash <SCRIPTS_DIR>/state.sh` 하나 때문에 외부 접근을 갖는다. 서브에이전트는 부모 세션의 `external_directory` 규칙을 상속한다(`lt()`).
+
+정당한 외부 경로는 셋뿐이다:
+
+| 경로 | 근거 |
+|---|---|
+| 플러그인 자기 디렉토리 (scripts·gates·stages·hooks·skills) | 모든 substage 가 `state.sh` 를 호출한다 |
+| worktree ↔ main repo | `buildDraftPathReadSnippet` 의 legacy 절대경로 분기 |
+| opencode 설정 디렉토리 | 위 첫 항목과 대개 같다 |
+
+**main↔worktree 상태 동기화는 에이전트가 하지 않는다** — `wt-sync-ignored.sh` forward/reverse 를 전부 플러그인 프로세스가 돌린다(`auto_advance_stage` / `dispatch_stage` finally / `dispatch_verifier`). 각 substage 는 자기 cwd 의 state.json 만 본다.
+
+#### 자가 허용 (2차 방어)
+
+허용 근거가 설치 시 심은 opencode.json 시드 하나뿐이면, 그 패치가 남지 않은 부분 설치에서 서브에이전트가 **자기 상태 파일조차 못 읽고** `PERMISSION_STALL` 로 죽는다 (GitHub #8). 그래서 `pluginOwnAllowPatterns()` 가 `resolvePaths()` 결과를 **설정과 무관하게** 항상 허용 목록에 얹는다. 시드는 1차 방어로 그대로 둔다.
+
+허용을 넓히는 변경이 아니다 — 담기는 것은 플러그인이 이미 자기 손으로 실행하는 경로뿐이고, 워크스페이스·`/tmp`·홈 디렉토리는 포함되지 않는다.
+
+#### `/tmp` 은 금지다 (hardrule)
+
+서브에이전트에서 워크스페이스 밖 접근은 **프롬프트가 아니라 즉시 거부 + `session.abort`** 다 (`poll-sub-session.ts`). 하던 substage 가 통째로 날아간다. 게다가 거기 쓴 것은 worktree 동기화·커밋 대상이 아니라 **산출물이 조용히 사라진다** — 권한 거부보다 나쁜 실패다.
+
+임시 파일 경로는 `<worktree>/.makdoong2-team/<이슈키>/tmp/` 하나다. cwd 안이라 승인이 필요 없고 `.git/info/exclude` 에 이미 등록돼 있다. engineer 프롬프트와 `05-worktree-dev.md` 가 함께 못 박는다. 산출물이 제한된 에이전트(planner·analyzer·publisher)는 임시 파일이 필요한 상황 자체가 없으므로, 그들이 시도한다면 허용할 게 아니라 막아야 할 신호다.
+
+**예외 하나**: `makdoong2-issue-reporter` 는 `/tmp/makdoong2-issue/` 에 payload 를 쓴다. 워크플로우 밖의 사용자-전용 스킬이고, 사용자가 세션에 붙어 승인하는 것이 승인 게이트 설계 자체다(§4.6). 여기서 뜨는 `/tmp` 프롬프트는 정상이다.
+
+#### primary 세션 안내에 절대경로를 싣지 않는다
+
+team-leader 는 파일을 고치지 않지만 **bash 명령이 참조하는 디렉토리**만으로 승인이 발화한다. 그래서 플러그인이 리더에게 돌려주는 `next_action` 에 worktree 절대경로가 박혀 있으면, 리더가 그대로 따르는 순간 primary 세션이 사용자에게 승인을 묻는다.
+
+실제로 `auto_advance_stage` 의 `state_unreadable` 안내가 그랬다:
+
+```
+② exists=false 면 'wt-sync-ignored.sh <worktree> <issue>' 로 재동기화하거나,
+   'state.sh init <issue> <worktree>' 로 초기화하세요
+```
+
+다른 모든 동기화는 플러그인이 조용히 처리하는데 **이 경로만 리더에게 시켰다.** 두 가지로 고쳤다:
+
+- probe 실패 시 플러그인이 forward sync 를 **스스로 1회 시도하고 재probe** 한다 (`SELF_HEAL` 로그). 대부분은 여기서 끝나 안내 자체가 도달하지 않는다.
+- 그래도 실패하면 **경로 인자가 없는 명령만** 제시한다 — `state.sh status <issue>` / `state.sh init <issue>` 는 cwd 의 git toplevel 을 자동으로 쓴다.
+
+리더 프롬프트도 "이미 준비된 worktree 경로만 확인하고" → "반환된 경로를 인자로 그대로 전달하고, 직접 조회(`ls`/`cat`/`find`)하지 마라" 로 바꿨다.
+
+#### 거부 사유는 셋을 구분한다
+
+| `permissionReason` | 뜻 | 처방 |
+|---|---|---|
+| `outside_allowed_roots` | 허용 경로 밖 접근 | 대체 스크래치 경로로 회복 |
+| `non_external_permission` | `external_directory` 가 아닌 권한이 도달 | 경로가 아니라 에이전트 frontmatter `permission:` 문제 (정식 키는 `edit`) |
+| `tool_call_stall` | 권한 요청 없이 툴 호출만 정지 | `npx makdoong2-team doctor` (시드 점검) |
+
+셋을 한 문장으로 뭉개면 호출자가 매번 같은 재시도를 고른다. 회귀는 `test/permission-scope-hardening.test.ts`.
 
 ### 4.3 2중 방어
 
@@ -420,7 +490,7 @@ payload 작성(리터럴 절대경로 JSON)
   "issue": "PROJ-12345",
   "worktree": "/abs/path",
   "stages": {
-    "1_planning":       { "done": false, "substages": { "jira": {}, "requirements": {}, "scope": {} } },
+    "1_planning":       { "done": false, "substages": { "jira": {}, "requirements": {} } },
     "2_implementation": { "done": false, "substages": { "analysis": {}, "dev": {}, "test": { "unit": "none", "integration": "none" } } },
     "3_delivery":       { "done": false, "substages": { "commit": {}, "pr": { "draft_url": null }, "review": { "comments": 0 } } }
   },
@@ -546,8 +616,7 @@ exit 0 = 존재 && 판독 가능, exit 1 = 그 외. `state.sh get` 은 값 조�
 |---|---|
 | `1_planning.jira` | 초기 진입 (state init) |
 | `1_planning.requirements` | jira `done` + `validation_passed` (6항목 검증 통과) |
-| `1_planning.scope` | requirements `done` + (`approved_by_user` + `!verification_pending` **또는** `auto_approve`). 마커가 있으면 추가 검사: `ambiguity_score ≤ 0.2`, `spec_hash` 재계산 일치 (spec drift 차단) |
-| `2_implementation.analysis` | scope 동일 규칙 |
+| `2_implementation.analysis` | requirements `done` + (`approved_by_user` + `!verification_pending` **또는** `auto_approve`) + 마커가 있으면 `ambiguity_score ≤ 0.2` · `spec_hash` 재계산 일치 (spec drift 차단). scope 동일 규칙 |
 | `2_implementation.dev` | analysis 완료 + worktree 준비됨 |
 | `2_implementation.test` | dev `done` + worktree 격리 검증 |
 | `3_delivery.commit` | test `unit`/`integration` ∈ {pass, skip} + coverage ∈ {pass, exempt}. **HITL opt-in (`auto_approve."3_delivery.commit" == false`) 인 경우에만** `change-report.md` + `approved_by_user` 추가 요구 |
