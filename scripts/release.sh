@@ -160,7 +160,19 @@ info "다음 버전: $NEXT_VERSION"
 log "이번 릴리스에 포함될 커밋:"
 LAST_TAG="$(git describe --tags --abbrev=0 2>/dev/null || echo '')"
 if [ -n "$LAST_TAG" ]; then
-  git log --oneline "${LAST_TAG}..HEAD" | head -20
+  # `git log … | head -N` 을 쓰지 않는다. set -o pipefail 아래서 head 가 N 줄을
+  # 읽고 먼저 종료하면 git 이 SIGPIPE(141)로 죽고, 그 코드가 파이프라인 전체의
+  # 상태가 되어 errexit 가 **릴리스를 통째로 중단**시킨다. 커밋이 20개를 넘은
+  # 적이 없어 지금까지 잠복해 있었고, 48개 릴리스에서 실제로 발화했다.
+  # "1 파일 = 1 commit" 규약을 지키면 커밋 수는 앞으로도 쉽게 20을 넘는다.
+  # 개수 제한은 git 에게 맡긴다 — 파이프가 없어지면 발화 조건 자체가 사라진다.
+  COMMIT_TOTAL="$(git rev-list --count "${LAST_TAG}..HEAD")"
+  git log --oneline -20 "${LAST_TAG}..HEAD"
+  # `[ … ] && info …` 형태로 쓰지 않는다. 조건이 거짓이면 AND 리스트 전체가 1을
+  # 반환하고 errexit 가 그 자리에서 스크립트를 끝낸다 (CLAUDE.md 게이트 사례와 동형).
+  if [ "$COMMIT_TOTAL" -gt 20 ]; then
+    info "... 외 $((COMMIT_TOTAL - 20))개 (총 ${COMMIT_TOTAL}개)"
+  fi
 else
   git log --oneline -10
 fi
