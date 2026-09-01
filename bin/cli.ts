@@ -40,7 +40,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const PKG_ROOT = resolve(HERE, "..");
 const PKG = JSON.parse(readFileSync(join(PKG_ROOT, "package.json"), "utf8"));
 
-const TOOLS = ["verify_stage", "dispatch_stage", "dispatch_verifier", "dispatch_research", "auto_advance_stage", "get_fallback_model"];
+const TOOLS = ["verify_stage", "dispatch_stage", "dispatch_verifier", "auto_advance_stage", "get_fallback_model"];
 
 // Skill directories that used to ship a per-skill secrets.env under
 // ${configDir}/skills/<skill>/. Credentials are now sourced only from
@@ -211,6 +211,32 @@ function doDoctor(flags: Flags): never {
      warn(`  the runtime allow-list stays at the built-in defaults; remove the key or list the extra model ids`);
      problems++;
    }
+
+  // opencode 는 모델 id 에 따라 **파일 쓰기 툴을 바꿔 끼운다** (1.18 ToolRegistry.tools):
+  //   isGpt = modelID.includes("gpt-") && !includes("oss") && !includes("gpt-4")
+  //   isGpt 이면 apply_patch 만 노출하고 write·edit 는 제거한다.
+  // 서브에이전트가 산출물을 만들지 못해 정지하는 사고(#8)의 근본 원인이므로
+  // 설정된 모델이 그 부류면 미리 알린다. 플러그인은 두 툴을 모두 지원한다.
+  const swapsWriteForApplyPatch = (modelID: string): boolean =>
+    modelID.includes("gpt-") && !modelID.includes("oss") && !modelID.includes("gpt-4");
+  const configuredModels: string[] = [];
+  if (cfgOk && cfgParsed?.agents && typeof cfgParsed.agents === "object") {
+    for (const name of Object.keys(cfgParsed.agents)) {
+      const m = cfgParsed.agents[name]?.model;
+      if (typeof m === "string" && m) configuredModels.push(m);
+    }
+  }
+  if (cfgOk && Array.isArray(cfgParsed?.model_policy?.allowed_primaries)) {
+    for (const m of cfgParsed.model_policy.allowed_primaries) {
+      if (typeof m === "string" && m) configuredModels.push(m);
+    }
+  }
+  const applyPatchModels = [...new Set(configuredModels.filter(swapsWriteForApplyPatch))];
+  if (applyPatchModels.length > 0) {
+    info(`note: opencode exposes 'apply_patch' instead of 'write'/'edit' for: ${applyPatchModels.join(", ")}`);
+    info(`  sub-agents must create artifacts with apply_patch on those models — the plugin hook parses`);
+    info(`  '*** Add File: <path>' out of the patch body and applies the same path rules as write.`);
+  }
 
   // Detect legacy secrets.env residue. These files predate the makdoong2-team.json
   // .secrets.* migration and can silently override the new source of truth
