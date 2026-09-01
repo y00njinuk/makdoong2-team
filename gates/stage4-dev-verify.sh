@@ -23,7 +23,7 @@ assert_worktree_sibling(){
   [ "$pwt" = "$pmain" ] || fail "worktree가 메인 repo의 형제 디렉토리가 아님: $wt (메인: $main)"
 }
 [ "$(q '.stages."2_implementation".substages."dev".done')" != "true" ] || fail "이미 done=true 완료됨 — auto_advance_stage 로 다음 단계 진행"
-[ "$(q '.stages."1_planning".substages."scope".done')" = "true" ] || fail "scope substage 미완료"
+[ "$(q '.stages."1_planning".substages."requirements".done')" = "true" ] || fail "requirements substage 미완료"
 # analysis substage 는 게이트가 SKIP 시 done=true 로 마킹하므로 skipped 여부와 무관하게 done=true 검사만 하면 된다.
 [ "$(q '.stages."2_implementation".substages."analysis".done')" = "true" ] || fail "analysis substage 미완료 (skipped 도 done=true 로 처리됨)"
 
@@ -31,11 +31,11 @@ WT="$(q '.worktree')"
 [ -n "$WT" ] && [ "$WT" != "__MISSING__" ] || fail "worktree 경로 미설정 — state.json의 .worktree 필드 확인"
 assert_worktree_sibling "$WT"
 
-if [ "$(q '.policy.auto_approve."1_planning.scope"')" != "true" ]; then
-  [ "$(q '.stages."1_planning".substages."scope".approved_by_user')" = "true" ] \
-    || fail "scope substage 사용자 승인 없음 (또는 .policy.auto_approve.\"1_planning.scope\" 미설정)"
-  if [ "$(q '.stages."1_planning".substages."scope".verification_pending')" = "true" ]; then
-    fail "scope substage 검증 대기 중 (verification_pending) — 사용자 승인 후 approved_by_user를 기록하라"
+if [ "$(q '.policy.auto_approve."1_planning.requirements"')" != "true" ]; then
+  [ "$(q '.stages."1_planning".substages."requirements".approved_by_user')" = "true" ] \
+    || fail "requirements substage 사용자 승인 없음 (또는 .policy.auto_approve.\"1_planning.requirements\" 미설정)"
+  if [ "$(q '.stages."1_planning".substages."requirements".verification_pending')" = "true" ]; then
+    fail "requirements substage 검증 대기 중 (verification_pending) — 사용자 승인 후 approved_by_user를 기록하라"
   fi
 fi
 echo "MAKDOONG2-GATE OK: 2_implementation.dev"
