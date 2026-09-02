@@ -133,6 +133,15 @@
 - tool-call stall(`permission_stall`) 은 `isToolExecuting()` 이 참이면 면제한다. tool part 의 state 변화는 content 시그니처를 바꾸지 않으므로 5분짜리 sbt 빌드도 "진전 없음" 으로 보여 기본 임계 60초에서 abort 대상이 된다. **`hasPendingToolCall` 이 항상 false 이던 동안에는 이 경로가 발화하지 않아 드러나지 않았고, 그 값을 고치는 순간 무장됐다.**
 - 상세: ARCHITECTURE.md §8.2. 회귀: `test/poll-sub-session.test.ts` ("issue #7" 블록).
 
+### 플러그인은 디렉토리마다 사본이 하나씩이다 — 사본을 가로지르는 신호는 레지스트리에 (hardrule)
+- opencode 1.18 은 **디렉토리(Instance)마다 플러그인 factory 를 따로 부른다.** worktree 서브세션의 `tool.execute.*` · `event` 훅은 worktree 사본에서 발화하고, 그 세션의 `pollSubSession` 은 main 사본에서 돈다. 같은 pid 지만 클로저 변수는 서로 다르다.
+- **"훅이 쓰고 폴러가 읽는" 세션 단위 신호를 factory 클로저의 `Map` 에 두지 말 것.** 폴러는 영영 빈 Map 을 본다 — `isToolExecuting()` 이 항상 false 라 60초 넘는 모든 툴(sbt test)이 `permission_stall`(tool_call_stall) 로 죽었다 (issue #10). 이런 신호는 전부 `src/sub-session-registry.ts` 의 프로세스 전역 레지스트리(`sharedSubSessionRegistry()`)에 둔다: `activeToolCalls` · `lastToolExecuteAt` · `pendingPermissions` · `sessionIssue` · `sessionWorktree` · `sessionDeletedWaiters`.
+- **디스패치가 소유하는 상태는 공유하지 않는다** (`pendingDispatch` · `sessionAgent` · `subSessionIds`). `pendingDispatch` 를 공유하면 worktree 사본의 `session.created` 가 pane 을 한 번 더 띄운다.
+- 툴 실행 항목은 **callID 로 짝을 맞추고 세 경로로 뺀다**: `tool.execute.after` · `message.part.updated`(completed/error) / `session.idle` · 폴러의 스냅샷 대조(`settleToolCalls`). after 훅만 믿으면 툴이 throw 한 경우(권한 거부 · 파일 없음) 항목이 영영 남아 완료 판정이 타임아웃까지 유보된다. 스냅샷에 **아직 없는** callID 는 건드리지 않는다 (issue #7 의 110ms 창).
+- 플러그인이 받는 v1 SDK 클라이언트에는 `permission` 네임스페이스가 **없다.** `GET /permission` 도 디렉토리 스코프라 worktree 서브세션의 요청이 보이지 않는다. 권한 소스는 레지스트리(`permission.asked` 이벤트로 채움) + 세션-라우팅 응답(`POST /session/{id}/permissions/{permissionID}`)이다 — `pollSubSessionCore` 에 클라이언트를 그대로 넘기지 말 것 (`client.permission` 이 undefined 라 자동 승인·거부 루프가 한 번도 안 돈다).
+- 같은 pid 에 `[permission] configured external_directory allows: N개` 가 개수 다르게 두 번 찍히면 설정이 바뀐 것이 아니라 **사본이 둘**이다. `[init] plugin instance directory=…` 로 구분한다. 빈 배열로 끝난 이유(부재/파싱 실패/키 부재)는 `loadOpencodeExternalDirAllows(diag)` 가 warn 으로 남긴다.
+- 상세: ARCHITECTURE.md §8.2. 회귀: `test/sub-session-registry.test.ts` · `test/poll-sub-session.test.ts` ("issue #10" 블록).
+
 ### REJECTED verdict 재작업 flow (dispatch_verifier + dispatch_stage 자동 연계)
 - `dispatch_verifier` 가 REJECTED 반환 시 verdict raw 텍스트를 state.json 에 자동 기록: `.stages."<PHASE>".substages."<SUBSTAGE>".last_verdict_reason` / `last_verdict_reason_hash` / `last_verdict_at` / `same_reason_streak` / `rejected_count`.
 - `dispatch_stage` 재호출 시 `last_verdict_reason` 이 존재하면 자동으로 `=== 이전 검증 실패 사유 (재작업 시 참고) ===` 블록을 프롬프트에 주입. 서브에이전트 (publisher / engineer / planner) 는 이 블록을 읽고 재작업 방향을 설정한다.
