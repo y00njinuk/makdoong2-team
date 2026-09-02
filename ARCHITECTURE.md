@@ -504,7 +504,9 @@ payload 작성(리터럴 절대경로 JSON)
 |---|---|
 | `<S>.done` | substage 완료 |
 | `<S>.approved_by_user` / `<S>.verification_pending` | 사용자 승인 / 승인 대기 (다음 게이트 차단) |
-| `<S>.self_check` | 자가 검증 5-boolean |
+| `<S>.self_check` | 자가 검증 boolean 묶음 (substage 마다 항목이 다르다) |
+| `<S>.test_scope` (`1_planning.requirements`) | 승인·동결된 테스트 범위 선언. `{"new_tests_required": bool, …}` — dev 의 테스트 동반 원칙 판정 입력 (§6.3). 부재 = `true` |
+| `<S>.new_tests_waived` (`2_implementation.dev`) | `new_tests_added=false` 가 선언에 따른 면제임을 표시 (§6.3) |
 | `<S>.hang_history` | stall/gone 이력 배열 (재디스패치 상한 근거, §10.2) |
 | `<S>.last_verdict_reason` / `.same_reason_streak` / `.rejected_count` | REJECTED 재작업 컨텍스트 (§10.1) |
 | `<S>.test.unit` / `.integration` (2_implementation) | `"pass"` \| `"skip"` \| `"fail"` \| `"none"` |
@@ -549,6 +551,24 @@ if [[ "$REL" == /* ]]; then ABS="$REL"; else ABS="$(bash <SCRIPTS_DIR>/state.sh 
 - **형제 디렉토리 하드룰**: `stage4-dev-verify.sh` ~ `stage7-pr-verify.sh` 의 `assert_worktree_sibling()` 이 `dirname(worktree) == dirname(main repo)` 를 검증한다. 서브디렉토리 배치는 메인 repo `.gitignore` 누출을 유발하므로 금지
 - **동기화**: `wt-sync-ignored.sh <worktree> <issue>` (forward) / `--reverse`. 해당 이슈 디렉토리만 복사하고 다른 이슈, `target/`, `node_modules/` 는 제외한다 — cross-issue state 오염 방지
 - **복구**: 잘못된 위치의 worktree 는 `git worktree remove <경로>` + `state.sh set <issue> '.worktree' 'null'` 후 `auto_advance_stage` 재호출
+
+#### 사본은 cwd 마다 하나다 — 쓴 사본과 읽는 사본을 맞춘다
+
+`state.sh root()` 는 호출 cwd 의 git toplevel 을 쓴다. worktree 승격 이후 **main repo 사본과 worktree 사본은 서로 다른 파일**이고, 동기화는 서브에이전트 세션 앞뒤에서만 자동으로 돈다. 불변식은 **main = durable 사본 / worktree = forward-seed · reverse-merge 되는 작업 사본**이다.
+
+이 비대칭이 REJECTED 재작업 규약을 구조적으로 깨뜨렸다 (issue #11): 규약은 team-leader 에게 `.done=false` 재설정을 시키는데 리더의 cwd 는 main repo 이고, `dispatch_stage` 의 done 검사는 worktree 사본을 본다. 규약대로 했는데 `already_done: true` 로 차단됐고, 오류 문구는 원인을 알려주지 않아 같은 실수가 한 세션에서 두 번 반복됐다. `state_unreadable` 은 정확히 같은 메커니즘을 이미 원인으로 안내하고 있었다.
+
+방어 3층:
+
+| 층 | 무엇 | 어디 |
+|---|---|---|
+| ① 예방 | `dispatch_stage` 가 서브세션 생성 **전에** 정방향 동기화(main→worktree) — `dispatch_verifier` 가 이미 하던 것으로, 없던 쪽이 비대칭이었다 | `src/opencode-plugin.ts` (done 검사 직전) |
+| ② 진단 | `already_done` 응답이 두 사본의 `done` 을 실제로 읽어 `state_copy_mismatch` / `main_repo_done` / `worktree_done` 으로 보고 — 추측이 아니라 관측 | 같은 파일, `already_done` 분기 |
+| ③ 발화 지점 경고 | `state.sh set` 이 `root()` 와 `.worktree` 가 갈리면 stderr 로 경고. 쓰기는 막지 않고 stdout 계약·종료 코드도 불변 | `scripts/state.sh` `warn_if_copy_split()` |
+
+①이 들어온 뒤 **worktree cwd 에서 직접 고친 뒤 재-dispatch 하는 것은 틀린 절차다** — 정방향 동기화가 그 편집을 덮는다. 상태 조작은 리더의 cwd(main repo)에서 한다.
+
+회귀: `test/dev-test-scope-declaration.test.ts` "state.json 사본 분리 진단" 블록.
 
 ### 5.5 읽기는 막지 않는다 — `state.sh status` 와 state_unreadable 복구
 
@@ -635,6 +655,30 @@ exit 0 = 존재 && 판독 가능, exit 1 = 그 외. `state.sh get` 은 값 조�
 - `gates/stage6-post-commit-verify.sh`: 각 커밋 SHA 를 순회하며 `git show --name-only --pretty=""` 로 파일 수를 세고 1 초과면 REJECT. 메시지 형식 `<Type>: <이슈키> - <요약>`, Type 허용값, 이슈키 일치, 제목 길이, 마침표, 결합어, 이슈 종료 키워드(Resolves/Closes/Fixes/See also) 도 함께 강제
 - verifier 가 같은 스크립트를 재실행해 이중 확인
 - 회귀: `test/commit-atomicity-verify.test.ts` (8 케이스)
+
+### 6.3 테스트 동반 원칙 — 요구사항 선언이 판정 입력이다
+
+`2_implementation.dev` 의 "새 기능·버그 수정에 테스트를 동반한다" 는 체크는 **무조건 요구가 아니다.** 판정 입력은 `1_planning.requirements` 가 승인·동결한 선언 하나다:
+
+```
+.stages."1_planning".substages."requirements".test_scope
+  = {"new_tests_required": bool, "unit": …, "integration": …, "rationale": "…"}
+```
+
+| `new_tests_required` | dev 가 기록할 것 | 게이트 판정 |
+|---|---|---|
+| `true` (기본 — 마커 부재·`null` 포함) | `self_check.new_tests_added = true` | `new_tests_added != true` 면 BLOCK |
+| `false` (승인된 스코프 아웃) | `new_tests_added = false` **＋** `dev.new_tests_waived = true` | 면제 마커가 없으면 BLOCK |
+
+**부재는 `true` 로 접는다 (fail-closed).** 선언 누락이 테스트 면제로 둔갑하는 쪽이 그 반대보다 훨씬 비싸다.
+
+세 곳이 같은 선언을 본다 — 게이트 `gates/stage4-dev-post-verify.sh` 4번, stage spec self_check (`stages/05-worktree-dev.md` §4-4-pre·§4-4), verifier (`agents/makdoong2-verifier.md` §2). `dispatch_stage` 는 dev 분기 프롬프트에도 조회 지시를 주입해, engineer 가 선언을 찾지 못해 스스로 판단하는 경로를 없앤다.
+
+**왜 이렇게 바뀌었나** (issue #11): 체크리스트 항목 3 과 verifier 기준("sub-agent output 에 '테스트 추가' 명시")은 requirements 의 scope-out 결정을 조회하는 분기를 갖고 있지 않았다. 배포 설정 전환처럼 애플리케이션 코드가 아닌 작업에서 테스트 제외가 **이미 승인**됐는데도 verifier 가 두 차례 REJECTED 를 냈고, engineer 는 반려를 풀기 위해 승인된 스코프 밖의 단위 테스트를 추가했다. 그 이탈은 `2_implementation.test` 의 coverage·timeout 대응으로 번져 무관한 빌드 설정과 기존 테스트 파일까지 고쳤다. 설계 결함이 아니라 **판정 입력이 빠진 것**이 원인이다.
+
+**verifier 는 output 문구로 판정하지 않는다.** 판정 근거는 state.json 마커 + 게이트 재실행이고 output 은 보조다. 종전 기준은 텍스트 없이 끝난 세션(`preamble_only` — `.done=true` 만으로 성공 처리되는 정상 경로, §10.3)까지 "테스트 추가 언급 없음" 으로 반려했다.
+
+회귀: `test/dev-test-scope-declaration.test.ts`.
 
 ---
 
