@@ -99,6 +99,25 @@ bash <SCRIPTS_DIR>/wt-sync-ignored.sh "$WT" "<이슈키>"
 - **outer-world 에이전트 위임 금지** — engineer 프론트매터에 `Task` 툴이 없으므로 물리적으로 스폰 불가. 구현·조사·리팩토링 모두 본 에이전트가 직접 수행한다. 조사가 필요하면 `skill_mcp` 로 makdoong2 스킬(`bitbucket-research` 등)만 사용.
 - 3단계 작업 단위 순서대로 구현한다. 한 단위가 끝나면 커밋 가능 상태로 만들어 둔다(실제 커밋은 6단계).
 
+## 4-4-pre. 테스트 범위 선언 조회 (필수 — 자가 검증 전)
+
+**테스트 동반 원칙은 무조건 적용되지 않는다.** `1_planning.requirements` 가 승인·동결한 테스트 범위 선언(`test_scope`)을 먼저 읽고, 그 선언이 정한 대로만 적용한다. 이 조회를 건너뛰면 "단위 테스트는 이번 변경 대상에 적용하지 않는다" 고 **이미 승인된** 이슈에서도 테스트 추가가 강제되어, 승인된 스코프 밖의 코드가 유입된다 (issue #11).
+
+```bash
+NEW_TESTS_REQUIRED="$(bash <SCRIPTS_DIR>/state.sh get <이슈키> \
+  '.stages."1_planning".substages."requirements".test_scope.new_tests_required' 2>/dev/null || echo 'true')"
+# 마커 부재("null")·조회 실패는 true 로 간주한다 (fail-closed).
+[ "$NEW_TESTS_REQUIRED" = "false" ] || NEW_TESTS_REQUIRED=true
+echo "new_tests_required=$NEW_TESTS_REQUIRED"
+
+# 근거(왜 제외됐는지)도 함께 읽어 최종 출력에 인용한다.
+bash <SCRIPTS_DIR>/state.sh get <이슈키> \
+  '.stages."1_planning".substages."requirements".test_scope.rationale' 2>/dev/null || true
+```
+
+- **이 마커를 engineer 가 쓰는 것은 금지다 (hardrule).** 읽기 전용이다. 테스트가 불필요해 보인다는 자체 판단으로 `test_scope` 를 기록·수정하면 요구사항 동결(§2-4a)을 우회하는 것이다. 선언이 실제 작업과 맞지 않으면 `done` 을 기록하지 말고 부장님에게 보고한다.
+- `new_tests_required=true` 인데 대상이 테스트를 붙일 수 없는 성질(순수 설정 파일 등)이라고 판단되면 — **임의로 면제하지 말고** 그 사실을 최종 출력에 적어 부장님이 requirements 재작업 여부를 결정하게 한다.
+
 ## 4-4. 최종 자가 검증 (Pre-Completion Checklist)
 
 `done=true` 직전, 아래 6체크를 자가 검증한다.
@@ -108,17 +127,34 @@ bash <SCRIPTS_DIR>/wt-sync-ignored.sh "$WT" "<이슈키>"
 |---|---|
 | 1 | 3단계에서 합의한 모든 수정/추가 파일이 구현되었다 (스코프 100% 충족) |
 | 2 | 기존 테스트(`sbt test` / `./gradlew test` / `mvn test` 등)가 모두 통과한다 |
-| 3 | 새 기능·버그 수정에 대한 테스트가 함께 추가되었다 (테스트 동반 원칙) |
+| 3 | **`new_tests_required=true` 인 경우에만** — 새 기능·버그 수정에 대한 테스트가 함께 추가되었다 (테스트 동반 원칙). `false` 면 이 항목은 면제되며 테스트를 추가하지 않는 것이 정답이다 |
 | 4 | 타입/린트/컴파일 에러가 0이다 |
 | 5 | `.env` / secrets / API 키 / 하드코딩된 비밀이 코드·테스트·로그에 노출되지 않았다 |
 | 6 | `write`/`edit`/`patch`/`multiedit` 로 편집한 모든 파일이 staging area 에 반영되었다 (`git ls-files --others --exclude-standard` 결과 0) |
 
 > 항목 6은 `tool.execute.after` 훅이 매 write 완료 시 자동으로 `git add`를 수행하므로 기본적으로 자동 충족된다. 훅 실패로 untracked 가 남으면 §4-5 exit gate 가 BLOCK 하여 재작업을 요구한다.
 
+**`new_tests_required=true` (기본)** — 테스트를 추가하고 `new_tests_added: true` 로 기록한다:
+
 ```bash
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."2_implementation".substages."dev".self_check' \
   '{"scope_met": true, "existing_tests_pass": true, "new_tests_added": true, "type_lint_clean": true, "no_secrets": true, "all_writes_staged": true}'
 ```
+
+**`new_tests_required=false` (승인된 스코프 아웃)** — `new_tests_added` 를 `false` 로 기록하고, 그것이 슬립이 아니라 선언에 따른 면제임을 나타내는 `new_tests_waived` 마커를 함께 남긴다. **두 기록은 한 쌍이다** — `new_tests_waived` 없이 `new_tests_added: false` 만 있으면 §4-5 exit gate 가 BLOCK 한다:
+
+```bash
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."2_implementation".substages."dev".self_check' \
+  '{"scope_met": true, "existing_tests_pass": true, "new_tests_added": false, "type_lint_clean": true, "no_secrets": true, "all_writes_staged": true}'
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."2_implementation".substages."dev".new_tests_waived' 'true'
+```
+
+### 최종 출력에 반드시 포함할 것
+
+verifier 는 state.json 마커로 판정하지만, 사람이 스코프 이탈을 조기에 발견할 수 있도록 출력에 한 줄을 남긴다:
+
+- `new_tests_required=true` → 추가한 테스트 파일 목록과 실행 결과
+- `new_tests_required=false` → `테스트 추가 없음 — requirements 의 test_scope.new_tests_required=false (사유: <rationale>)`
 
 ## 4-5. Exit Gate 실행 (staging 강제)
 
