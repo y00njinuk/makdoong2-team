@@ -779,8 +779,12 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     `[permission] plugin-own allows: ${pluginOwnPatterns.length}개 ` +
     `(${pluginOwnPatterns.join(", ")}) directory=${directory}`,
   );
+  // 두 줄의 개수가 다른 것은 정상이다 — 아래가 위를 **포함**한다. 내역을
+  // (plugin-own N + opencode.json M) 로 분해해 두지 않으면 "5개 / 7개" 두 줄이
+  // 같은 목록의 불일치처럼 읽힌다 (GitHub #12 부수 관찰).
   logger.debug(
     `[permission] configured external_directory allows: ${configuredAllowPatterns.length}개` +
+    ` (= plugin-own ${pluginOwnPatterns.length} + opencode.json ${configuredAllowPatterns.length - pluginOwnPatterns.length})` +
     (configuredAllowPatterns.length ? ` (${configuredAllowPatterns.slice(0, 3).join(", ")}…)` : "") +
     ` directory=${directory}`,
   );
@@ -2184,6 +2188,12 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
             ? (parseInt(lastVerdictStreakR.stdout?.toString().trim() || "0", 10) || 0)
             : 0;
 
+          // 직전 attempt 가 워크스페이스 밖 경로 요청으로 자동 거부·abort 된 경우,
+          // 새 세션 프롬프트에 "무엇이 막혔고 어디까지가 허용인지" 를 주입한다.
+          // 이것이 없으면 재디스패치는 같은 경로를 다시 요청해 같은 지점에서 죽는다
+          // — 서브세션은 이전 세션의 대화 이력을 이어받지 못하기 때문이다 (GitHub #12).
+          let permissionBlockNote: string | null = null;
+
           const buildPromptText = (attemptNum: number, priorSessionIds: string[]): string => {
             const base = [
               `Working directory (ABSOLUTE): ${effectiveWorktree}`,
@@ -2236,6 +2246,12 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 `--- verifier 판정 원문 (앞 4000자) ---`,
                 lastVerdictReason,
                 `--- 원문 끝 ---`,
+              );
+            }
+            if (permissionBlockNote) {
+              base.push(
+                `\n=== 경로 접근 차단 — 직전 세션이 이 사유로 즉시 중단됐다 (반복 금지) ===`,
+                permissionBlockNote,
               );
             }
             if (args.context) base.push(args.context);
@@ -2590,6 +2606,101 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                     : `sub-session repeatedly disappeared across ${MAX_ATTEMPTS} attempts. ` +
                       `Likely opencode server-side issue (session storage corruption, OOM, crash). ` +
                       `Check opencode server logs. Do NOT retry immediately; report to user.`,
+              });
+              continue;
+            }
+
+            // ── permission_stall: 하드 실패가 아니라 회복 가능한 차단이다 ──────────
+            //
+            // 종전에는 여기서 곧장 최종 결과로 떨어졌다. `attempts` 가 1에서 늘지
+            // 않았고, `next_action` 도 비어 있었다 — 그 공백을 team-leader 가
+            // "사용자 승인 대기" 로 채워 넣어, 헤드리스 서브세션에는 존재하지도 않는
+            // 승인 행위를 사용자에게 요구하며 워크플로가 멈췄다 (GitHub #12).
+            //
+            // `outside_allowed_roots` 만 재디스패치한다. 이 사유는 "경로를 좁히면
+            // 끝날 일" 이라 새 세션에 허용 범위를 알려주면 진행할 수 있다. 나머지
+            // 둘은 경로 문제가 아니다 — `non_external_permission` 은 에이전트
+            // frontmatter 설정, `tool_call_stall` 은 설치 상태의 문제라 같은 조건의
+            // 재시도가 결과를 바꾸지 못한다.
+            if (outcome.kind === "permission_stall") {
+              const blockedPatterns = outcome.permissionPatterns ?? [];
+              const recoverable = outcome.permissionReason === "outside_allowed_roots";
+              const currentMaxAttempts = maxAttemptsForCurrentModel();
+              promptPromise.catch(() => {});
+
+              if (recoverable && attempt < currentMaxAttempts) {
+                const scopeLine = outcome.permissionScope
+                  ? `자동 승인 범위: ${outcome.permissionScope}/ 이하 — worktree(${effectiveWorktree}) 와 그 형제 디렉토리까지다. 그 위(조부모 이상)는 열리지 않는다.`
+                  : `자동 승인 범위: worktree(${effectiveWorktree}) 와 그 형제 디렉토리까지다. 그 위는 열리지 않는다.`;
+                permissionBlockNote = [
+                  `직전 attempt(${attempt}) 는 워크스페이스 밖 경로에 대한 external_directory 권한 요청 때문에 자동 거부되고 세션이 abort 됐다.`,
+                  `차단된 요청 패턴: ${JSON.stringify(blockedPatterns)}`,
+                  scopeLine,
+                  `서브세션에는 이 승인을 받을 채널이 없다 — 같은 경로를 다시 요청하면 또 즉시 중단되고, 그때까지 한 작업은 전부 버려진다.`,
+                  `조치:`,
+                  `  - glob / grep / read / list 의 경로 인자를 위 허용 범위 안으로 좁혀라. 경로 인자를 아예 주지 않고 cwd 기준 상대 패턴을 쓰는 것이 가장 안전하다.`,
+                  `  - 저장소 밖을 훑어야만 하는 작업이라면 수행하지 말고, 그 사실과 이유를 최종 출력에 적어 보고하라.`,
+                  `  - 임시 파일은 /tmp 가 아니라 ${effectiveWorktree}/.makdoong2-team/${args.issue}/tmp/ 에 만든다.`,
+                ].join("\n");
+                logger.warn(
+                  `[dispatch_stage] PERMISSION_BLOCK session=${subSessionID} stage=${args.target_stage} ` +
+                  `attempt=${attempt}/${currentMaxAttempts} reason=${outcome.permissionReason} ` +
+                  `patterns=${JSON.stringify(blockedPatterns)} scope=${outcome.permissionScope ?? "unknown"} ` +
+                  `— redispatching with allowed-scope guidance injected`,
+                );
+                continue;
+              }
+
+              // 예산 소진(또는 회복 불가 사유). hang_history 는 dispatch_stage 호출
+              // 사이를 넘어 살아남는 유일한 카운터다 — 여기에 남기지 않으면 리더가
+              // 같은 조건으로 무한히 재호출해도 cross-call 상한에 영영 닿지 않는다.
+              const stallEntry = JSON.stringify({
+                attempt,
+                at: new Date().toISOString(),
+                reason: `permission_stall:${outcome.permissionReason ?? "unknown"}`,
+                patterns: blockedPatterns,
+                scope: outcome.permissionScope ?? null,
+                elapsed_ms: outcome.elapsedMs,
+                polls: outcome.polls,
+                session_id: subSessionID,
+                model: activeModelFull,
+                fallback_depth: activeFallbackDepth,
+                final: true,
+              });
+              const stallJqPath = stageJqPath(args.target_stage as Stage) + ".hang_history";
+              const stallAppend = await $`bash ${SCRIPTS_DIR}/state.sh append ${args.issue} ${stallJqPath} ${stallEntry}`
+                .cwd(effectiveWorktree).quiet().nothrow();
+              logger.error(
+                `[dispatch_stage] PERMISSION_STALL_FINAL session=${subSessionID} stage=${args.target_stage} ` +
+                `attempts=${attempt} reason=${outcome.permissionReason} recoverable=${recoverable} ` +
+                `patterns=${JSON.stringify(blockedPatterns)} scope=${outcome.permissionScope ?? "unknown"} ` +
+                `hang_history append exit=${stallAppend.exitCode}`,
+              );
+              finalResultJson = JSON.stringify({
+                ok: false,
+                stage: args.target_stage,
+                agent: spec.id,
+                model: activeModelFull,
+                session_id: subSessionID,
+                previous_session_ids: attemptSessionIds.slice(0, -1),
+                attempts: attempt,
+                fallback_depth: activeFallbackDepth,
+                output: finalLegacy.text.slice(0, 8000),
+                outcome_kind: "permission_stall",
+                permission_reason: outcome.permissionReason ?? "unknown",
+                permission_patterns: blockedPatterns,
+                permission_scope: outcome.permissionScope ?? null,
+                permission_id: outcome.permissionID,
+                permission_type: outcome.permissionType,
+                // 승인 대기가 아니라 "이미 종료됨" 이다. 이 두 필드를 읽고 보고한다.
+                awaiting_user_approval: false,
+                session_aborted: true,
+                stage_done: null,
+                completion: "incomplete",
+                polls: outcome.polls,
+                elapsed_ms: outcome.elapsedMs,
+                next_action: finalLegacy.nextAction,
+                reason: finalLegacy.text,
               });
               continue;
             }
