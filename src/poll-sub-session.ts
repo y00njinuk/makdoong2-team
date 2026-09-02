@@ -27,6 +27,20 @@ export type MessagePartLike = {
   text?: string;
   /** opencode SDK 의 ToolPart 는 state.status 로 진행 상태를 알린다. */
   state?: { status?: string };
+  /** ToolPart 의 호출 ID — `tool.execute.before/after` 훅의 callID 와 같은 값. */
+  callID?: string;
+};
+
+/**
+ * 폴 시점 스냅샷에서 읽은 툴 호출 상태. `isToolExecuting` 에 넘겨 훅 레지스트리와
+ * 대조하게 한다 — throw 로 끝난 툴은 after 훅이 돌지 않아 레지스트리에 남는데,
+ * 스냅샷의 completed/error part 가 그 호출이 끝났음을 확정해 준다.
+ */
+export type ToolSnapshot = {
+  /** completed / error 로 끝난 호출 ID (스냅샷 전체 메시지 기준). */
+  settledCallIDs: ReadonlySet<string>;
+  /** pending / running 인 호출 ID (마지막 assistant 메시지 기준). */
+  inFlightCallIDs: ReadonlySet<string>;
 };
 export type MessageInfoLike = { id?: string; role: string; finish?: unknown };
 export type MessageLike = { info: MessageInfoLike; parts: MessagePartLike[] };
@@ -142,7 +156,12 @@ export interface PollOptions {
   // 라는 넓은 창(gone 오탐 방지용)이고, 이쪽은 "지금 실행 중인가" 라는 정확한
   // 순간값이다. 넓은 창을 완료 판정에 쓰면 정상 종료가 매번 5분씩 지연된다.
   // 미주입(undefined)이면 종전 동작과 동일하다.
-  isToolExecuting?: () => boolean;
+  //
+  // 인자로 이번 폴의 툴 스냅샷을 받는다 (무시해도 된다). 훅 사본의 레지스트리는
+  // 툴이 throw 하면 after 훅이 돌지 않아 항목이 남는데, 스냅샷의 completed/error
+  // part 로 그 항목을 정리할 수 있다 — 정리하지 않으면 실행 중으로 굳어 완료
+  // 판정이 절대 타임아웃까지 유보된다.
+  isToolExecuting?: (snapshot: ToolSnapshot) => boolean;
   // Content-stable completion inference. When set, a sub-session that (a) has
   // produced at least one assistant message, (b) has no pending tool_call, and
   // (c) has not advanced content (no length or signature change) for this many
@@ -185,6 +204,32 @@ const TOOL_CALL_PART_TYPES = new Set(["tool", "tool_call", "tool-call", "tool_us
 
 /** 아직 끝나지 않은 툴 상태 (ToolStatePending / ToolStateRunning). */
 const IN_FLIGHT_TOOL_STATUSES = new Set(["pending", "running"]);
+/** 확실히 끝난 툴 상태 (ToolStateCompleted / ToolStateError). */
+const SETTLED_TOOL_STATUSES = new Set(["completed", "error"]);
+
+/**
+ * 스냅샷에서 툴 호출 ID 를 상태별로 모은다. settled 는 전체 메시지를 훑는다 —
+ * 레지스트리에 남은 항목은 이전 turn 의 호출일 수도 있다. inFlight 는 마지막
+ * assistant 메시지만 본다 (`hasPendingToolCall` 과 같은 기준).
+ */
+function collectToolSnapshot(messages: MessageLike[], lastAssistant: MessageLike | undefined): ToolSnapshot {
+  const settledCallIDs = new Set<string>();
+  const inFlightCallIDs = new Set<string>();
+  for (const m of messages) {
+    if (m.info?.role !== "assistant") continue;
+    for (const part of m.parts ?? []) {
+      if (!TOOL_CALL_PART_TYPES.has(part.type)) continue;
+      if (typeof part.callID !== "string" || part.callID.length === 0) continue;
+      const status = part.state?.status;
+      if (typeof status === "string" && SETTLED_TOOL_STATUSES.has(status)) settledCallIDs.add(part.callID);
+    }
+  }
+  for (const part of lastAssistant?.parts ?? []) {
+    if (!isInFlightToolPart(part)) continue;
+    if (typeof part.callID === "string" && part.callID.length > 0) inFlightCallIDs.add(part.callID);
+  }
+  return { settledCallIDs, inFlightCallIDs };
+}
 
 /**
  * "지금 실행 중인 툴 호출이 있는가".
@@ -406,7 +451,9 @@ export async function pollSubSession(
     // 둘 중 하나라도 "툴이 떠 있다" 고 하면 완료로 판정하지 않는다 — 스냅샷은
     // 서버 반영이 늦고(issue #7), 훅 신호는 훅이 안 붙은 환경에서 아예 없다.
     // OR 로 묶어야 각자의 사각지대를 서로 덮는다.
-    const toolExecuting = isToolExecuting?.() === true;
+    const toolExecuting = isToolExecuting
+      ? isToolExecuting(collectToolSnapshot(messages, lastAssistant)) === true
+      : false;
     const toolInFlight = hasPendingToolCall || toolExecuting;
 
     const stalledMs = now() - lastProgressAt;
@@ -567,7 +614,9 @@ export async function pollSubSession(
         `[pollSubSession] PERMISSION_STALL session=${sessionId} polls=${pollCount} stalledMs=${stalledMs}` +
         (stalledPerm
           ? ` pending permissionID=${stalledPerm.id} type=${stalledPerm.permission} patterns=${JSON.stringify(stalledPerm.patterns)}`
-          : ` pending permission unknown (permission.list unavailable or empty)`),
+          : client.permission
+            ? ` no pending permission observed for this session (tool part in flight, no tool.execute signal)`
+            : ` pending permission unknown (permission source unavailable)`),
       );
       await client.session.abort({ path: { id: sessionId } }).catch(() => undefined);
       return {
@@ -854,8 +903,10 @@ export function pollOutcomeToLegacy(
               "에이전트 permission 설정 문제다. 해당 에이전트의 frontmatter `permission:` 블록을 점검하라 " +
               "(정식 키는 `edit`; `write` 키는 존재하지 않아 조용히 무시된다).";
           default:
-            return "대기 대상을 특정하지 못했다. 점검: opencode.json 의 permission.external_directory 시드 존재 여부 " +
-              "(`npx makdoong2-team doctor`).";
+            return "툴 호출 part 가 떠 있는데 실행 신호(tool.execute.before)도 권한 요청도 관측되지 않았다. 점검: " +
+              "(1) 세션의 디렉토리에서도 플러그인이 로드되는가 — 로그의 `[init] plugin instance directory=…` 가 " +
+              "worktree 경로로도 찍혀야 한다 (opencode 는 디렉토리마다 플러그인을 따로 초기화한다) " +
+              "(2) opencode.json 의 permission.external_directory 시드 (`npx makdoong2-team doctor`).";
         }
       })();
       return {
