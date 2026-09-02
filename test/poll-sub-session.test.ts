@@ -1710,3 +1710,179 @@ describe("pollSubSession — issue #7: 툴 실행 중 완료 오판 방지", () 
     assert.equal(outcome.kind, "permission_stall");
   });
 });
+
+describe("pollSubSession — issue #10: 플러그인 사본을 가로지르는 툴·권한 신호", () => {
+  // opencode 는 디렉토리마다 플러그인을 따로 초기화한다. worktree 서브세션의 훅은
+  // worktree 사본에서 발화하고 폴러는 main 사본에서 돈다. 신호를 프로세스 전역
+  // 레지스트리에 두면 폴러가 본다 — 그 배선이 여기서 검증하는 계약이다.
+  const mkTool = (callID, status) => ({ type: "tool", callID, state: { status } });
+  const asstWithTools = (parts, finish = undefined) => ({
+    info: { id: "a1", role: "assistant", ...(finish ? { finish: { reason: finish } } : {}) },
+    parts,
+  });
+  const quiet = { logger: { error: () => {} } };
+
+  test("isToolExecuting 은 스냅샷을 받는다 — settled(completed/error) 와 inFlight(pending/running) 가 갈린다", async () => {
+    const clock = fakeClock();
+    const seen = [];
+    const client = makeClient({
+      statusScript: [{ s1: { type: "busy" } }, { s1: { type: "idle" } }],
+      messagesScript: [
+        [userMsg(), asstWithTools([
+          mkTool("c-done", "completed"), mkTool("c-err", "error"),
+          mkTool("c-run", "running"), mkTool("c-pend", "pending"),
+        ])],
+        [userMsg(), asstFinished("a1", "끝")],
+      ],
+    });
+    await pollSubSession(client, "s1", {
+      ...clock, timeoutMs: 30_000, pollIntervalMs: 1_000,
+      isToolExecuting: (snap) => {
+        seen.push({ settled: [...snap.settledCallIDs].sort(), inFlight: [...snap.inFlightCallIDs].sort() });
+        return snap.inFlightCallIDs.size > 0;
+      },
+      ...quiet,
+    });
+    assert.ok(seen.length >= 1);
+    assert.deepEqual(seen[0], { settled: ["c-done", "c-err"], inFlight: ["c-pend", "c-run"] });
+  });
+
+  test("툴이 throw 해 after 훅이 오지 않아도 스냅샷의 error part 로 정리되어 완료된다", async () => {
+    // 종전 카운터 방식이면 항목이 영영 남아 isToolExecuting=true → 완료 판정 유보 →
+    // 타임아웃까지 대기. 레지스트리 + settleToolCalls 가 이를 막는다.
+    const { createSubSessionRegistry, toolStarted, settleToolCalls, isToolExecuting } =
+      await import("../dist/sub-session-registry.js");
+    const reg = createSubSessionRegistry();
+    toolStarted(reg, "s1", "c-threw"); // 훅 사본: before 는 발화했다
+    // after 는 오지 않았다 (툴 throw). 서버는 part 를 error 로 남긴다.
+    let aborted = false;
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: Array.from({ length: 10 }, () => ({ s1: { type: "busy" } })),
+      messagesScript: Array.from({ length: 10 }, () => [
+        userMsg(),
+        asstWithTools([{ type: "text", text: "파일을 읽으려 했으나 없었습니다. 작업을 마칩니다." }, mkTool("c-threw", "error")], "stop"),
+      ]),
+      onAbort: () => { aborted = true; },
+    });
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock, timeoutMs: 30_000, pollIntervalMs: 1_000,
+      isToolExecuting: (snap) => {
+        settleToolCalls(reg, "s1", snap.settledCallIDs);
+        return isToolExecuting(reg, "s1");
+      },
+      ...quiet,
+    });
+    assert.equal(outcome.kind, "text", `throw 한 툴이 완료를 영영 막았다: ${outcome.kind}`);
+    assert.equal(aborted, false);
+    assert.equal(isToolExecuting(reg, "s1"), false, "스냅샷과 대조해 정리됐어야 한다");
+  });
+
+  test("레지스트리 권한 소스: worktree 범위 안의 external_directory 는 자동 승인되고 pending 에서 빠진다", async () => {
+    // 플러그인의 permissionSourceFor(sessionId) 와 같은 어댑터를 구성한다.
+    const { createSubSessionRegistry, permissionAsked, permissionReplied, pendingPermissionsFor } =
+      await import("../dist/sub-session-registry.js");
+    const reg = createSubSessionRegistry();
+    const replies = [];
+    const permission = {
+      list: async () => ({ data: pendingPermissionsFor(reg, "s1") }),
+      reply: async (req) => {
+        replies.push(req);
+        permissionReplied(reg, "s1", req.path.requestID);
+        return {};
+      },
+    };
+    // worktree 사본의 event 훅이 permission.asked 를 받아 넣었다
+    permissionAsked(reg, {
+      id: "per_wt", sessionID: "s1", permission: "external_directory",
+      patterns: ["/home/u/proj-PROJ-1/*"], askedAt: 1,
+    });
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: [{ s1: { type: "busy" } }, { s1: { type: "busy" } }, { s1: { type: "idle" } }],
+      messagesScript: [
+        [userMsg(), asstWithTools([mkTool("c1", "pending")])],
+        [userMsg(), asstWithTools([mkTool("c1", "running")])],
+        [userMsg(), asstFinished("a1", "완료")],
+      ],
+    });
+    client.permission = permission;
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock, timeoutMs: 30_000, pollIntervalMs: 1_000,
+      permissionCheckIntervalPolls: 1,
+      allowedWorktree: "/home/u/proj-PROJ-1",
+      ...quiet,
+    });
+    assert.equal(outcome.kind, "text");
+    assert.equal(replies.length, 1, "요청 하나에 응답 하나 — 다음 폴에서 재처리되면 안 된다");
+    assert.deepEqual(replies[0], { path: { requestID: "per_wt" }, body: { reply: "once" } });
+    assert.deepEqual(pendingPermissionsFor(reg, "s1"), []);
+  });
+
+  test("레지스트리 권한 소스: 범위 밖 요청은 거부 + abort 되고 사유가 outside_allowed_roots 다", async () => {
+    const { createSubSessionRegistry, permissionAsked, permissionReplied, pendingPermissionsFor } =
+      await import("../dist/sub-session-registry.js");
+    const reg = createSubSessionRegistry();
+    const replies = [];
+    permissionAsked(reg, {
+      id: "per_tmp", sessionID: "s1", permission: "external_directory", patterns: ["/tmp/*"], askedAt: 1,
+    });
+    let aborted = false;
+    const clock = fakeClock();
+    const client = makeClient({
+      statusScript: [{ s1: { type: "busy" } }],
+      messagesScript: [[userMsg(), asstWithTools([mkTool("c1", "pending")])]],
+      onAbort: () => { aborted = true; },
+    });
+    client.permission = {
+      list: async () => ({ data: pendingPermissionsFor(reg, "s1") }),
+      reply: async (req) => { replies.push(req); permissionReplied(reg, "s1", req.path.requestID); return {}; },
+    };
+    const outcome = await pollSubSession(client, "s1", {
+      ...clock, timeoutMs: 30_000, pollIntervalMs: 1_000,
+      permissionCheckIntervalPolls: 1,
+      allowedWorktree: "/home/u/proj-PROJ-1",
+      ...quiet,
+    });
+    assert.equal(outcome.kind, "permission_stall");
+    assert.equal(outcome.permissionReason, "outside_allowed_roots");
+    assert.equal(outcome.permissionID, "per_tmp");
+    assert.equal(aborted, true);
+    assert.deepEqual(replies[0], { path: { requestID: "per_tmp" }, body: { reply: "reject" } });
+  });
+
+  test("tool_call_stall 메시지: 권한 소스 유무에 따라 '관측된 요청 없음' 과 '소스 없음' 을 구분한다", async () => {
+    const stalled = async (withSource) => {
+      const errors = [];
+      const clock = fakeClock();
+      const client = makeClient({
+        statusScript: [{}],
+        messagesScript: Array.from({ length: 10 }, () => [userMsg(), asstWithTools([mkTool("c1", "pending")])]),
+      });
+      if (withSource) client.permission = { list: async () => ({ data: [] }), reply: async () => ({}) };
+      const outcome = await pollSubSession(client, "s1", {
+        ...clock, timeoutMs: 60_000, pollIntervalMs: 2_000, toolCallStallThresholdMs: 6_000,
+        permissionCheckIntervalPolls: 1,
+        logger: { error: (m) => errors.push(m) },
+      });
+      return { outcome, log: errors.join("\n") };
+    };
+    const withSrc = await stalled(true);
+    assert.equal(withSrc.outcome.kind, "permission_stall");
+    assert.equal(withSrc.outcome.permissionReason, "tool_call_stall");
+    assert.match(withSrc.log, /no pending permission observed for this session/);
+    assert.doesNotMatch(withSrc.log, /permission source unavailable/);
+
+    const noSrc = await stalled(false);
+    assert.equal(noSrc.outcome.kind, "permission_stall");
+    assert.match(noSrc.log, /permission source unavailable/);
+    assert.doesNotMatch(noSrc.log, /permission\.list unavailable or empty/,
+      "종전 문구는 두 상황을 뭉갰다 — 소스가 없는 것과 요청이 없는 것은 처방이 다르다");
+
+    // 처방: 사본 로드 여부([init] 로그) 를 먼저 보게 한다.
+    const legacy = pollOutcomeToLegacy(withSrc.outcome);
+    assert.match(legacy.text, /\[init\] plugin instance directory=/);
+    assert.match(legacy.text, /디렉토리마다 플러그인을 따로 초기화/);
+    assert.match(legacy.text, /doctor/);
+  });
+});
