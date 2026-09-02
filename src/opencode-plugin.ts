@@ -1998,23 +1998,77 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
             }
           }
 
+          // ── main repo → worktree 정방향 동기화 ──
+          // dispatch_verifier 는 서브세션 생성 전에 이 동기화를 하는데 dispatch_stage
+          // 에는 없었다. 그 비대칭이 REJECTED 재작업 규약을 구조적으로 깨뜨린다:
+          // 규약은 team-leader 에게 `.done=false` 재설정을 시키는데, 리더의 cwd 는
+          // main repo 이고 아래 done 검사는 worktree 사본을 본다. 리더가 규약대로
+          // 했는데도 `already_done: true` 로 차단되고, 리더는 오류 문구만으로는
+          // 원인을 알 수 없어 같은 실수를 반복했다 (issue #11).
+          // 동기화 방향은 파이프라인 불변식과 같다 — main 이 durable 사본, worktree
+          // 는 forward-seed / reverse-merge 되는 작업 사본이다 (finally 의 REVERSE).
+          if (effectiveWorktree !== cwd) {
+            logger.debug(
+              `[wt-sync] FORWARD issue=${args.issue} worktree=${effectiveWorktree} ` +
+              `caller=dispatch_stage stage=${args.target_stage}`,
+            );
+            const fwdSync = await $`bash ${SCRIPTS_DIR}/wt-sync-ignored.sh ${effectiveWorktree} ${args.issue}`
+              .cwd(cwd).quiet().nothrow();
+            if (fwdSync.exitCode !== 0) {
+              logger.warn(
+                `[wt-sync] FORWARD FAIL issue=${args.issue} caller=dispatch_stage exit=${fwdSync.exitCode} ` +
+                `stderr=${redactAndTruncate(fwdSync.stderr?.toString() ?? "", 200)}`,
+              );
+            }
+          }
+
           // done=true stage 재-dispatch 방지 (sub-agent tool-call loop → timeout/empty output).
           // 3_delivery.* 는 hybrid stage (publisher = spec provider) 로 재-진입이 정상 흐름이라 제외.
           const isHybridDelivery = args.target_stage.startsWith("3_delivery.");
           if (!isHybridDelivery) {
-            const doneR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${stageJqPath(args.target_stage as Stage) + ".done"}`
+            const donePath = stageJqPath(args.target_stage as Stage) + ".done";
+            const doneR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${donePath}`
               .cwd(effectiveWorktree).quiet().nothrow();
             if (doneR.exitCode === 0 && doneR.stdout?.toString().trim() === "true") {
+              // 위 정방향 동기화가 성공했다면 두 사본은 같아야 한다. 그래도 다르면
+              // 동기화가 실패한 것이고, 그 사실을 추측이 아니라 관측으로 알린다 —
+              // 종전 문구는 "이미 done=true" 만 말해서, 사본 불일치라는 실제 원인을
+              // 리더가 스스로 추론해야 했다 (state_unreadable 은 이미 안내한다).
+              let mainRepoDone: string | null = null;
+              if (effectiveWorktree !== cwd) {
+                const mainDoneR = await $`bash ${SCRIPTS_DIR}/state.sh get ${args.issue} ${donePath}`
+                  .cwd(cwd).quiet().nothrow();
+                if (mainDoneR.exitCode === 0) mainRepoDone = mainDoneR.stdout?.toString().trim() ?? null;
+              }
+              const copyMismatch = mainRepoDone !== null && mainRepoDone !== "true";
               return JSON.stringify({
                 ok: false,
                 gate: args.target_stage,
                 stage: args.target_stage,
                 agent: spec.id,
                 already_done: true,
-                reason:
-                  `Stage '${args.target_stage}' is already done=true. ` +
-                  `Re-dispatching a completed stage causes sub-agent tool-call loops (timeout/empty output). ` +
-                  `Call auto_advance_stage to obtain the correct next stage instead.`,
+                state_copy_mismatch: copyMismatch,
+                worktree_done: "true",
+                main_repo_done: mainRepoDone,
+                reason: copyMismatch
+                  ? `Stage '${args.target_stage}' is done=true in the worktree state.json copy but ` +
+                    `done=${mainRepoDone} in the main repo copy. state.sh 는 호출 cwd 의 git toplevel 을 ` +
+                    `쓰므로 두 사본은 분리돼 있고, 이 검사는 worktree 사본을 본다. ` +
+                    `main repo cwd 에서 '.done' 을 되돌렸다면 그 변경은 worktree 사본에 반영되지 않은 것이다 ` +
+                    `(정방향 동기화를 이미 1회 자동 시도했고 실패했다).`
+                  : `Stage '${args.target_stage}' is already done=true. ` +
+                    `Re-dispatching a completed stage causes sub-agent tool-call loops (timeout/empty output). ` +
+                    `Call auto_advance_stage to obtain the correct next stage instead. ` +
+                    `참고: 방금 '.done=false' 로 되돌렸는데도 이 응답이 왔다면, 다른 cwd(main repo)에서 ` +
+                    `state.json 을 조작해 worktree 사본과 불일치한 경우다 — state_unreadable 과 같은 메커니즘이다.`,
+                next_action: copyMismatch
+                  ? `동기화는 이미 자동 시도했고 실패했습니다 — 직접 재실행하지 마세요. ` +
+                    `'bash ${SCRIPTS_DIR}/state.sh status ${args.issue}' 로 사본 상태를 확인하고, ` +
+                    `해소되지 않으면 사용자에게 에스컬레이션하세요.`
+                  : `auto_advance_stage(issue: "${args.issue}") 로 올바른 다음 단계를 받으세요. ` +
+                    `REJECTED 재작업 중이라면 '.done' 재설정이 실제로 반영됐는지 ` +
+                    `bash ${SCRIPTS_DIR}/state.sh get ${args.issue} <done jq-path> 로 먼저 확인하세요 ` +
+                    `(jq-path: ${donePath}).`,
               });
             }
           }
@@ -2152,6 +2206,12 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 `       skill_mcp(mcp_name="works", tool_name="getIssue", arguments={"issueKey":"${args.issue}"})`,
                 `  c) 두 소스 모두 접근 불가하면 사용자에게 상황을 보고하고 즉시 종료.`,
                 `주의: requirements-draft.md 없이 Jira 이슈만으로 구현 범위를 재결정하지 말 것 — draft 가 없다는 것은 planning 이 부적절하게 진행된 신호이므로 사용자에게 보고하고 종료하시오.`,
+                `\n=== 테스트 동반 원칙은 requirements 의 선언을 따른다 (issue #11) ===`,
+                `테스트 추가 여부는 스스로 정하지 않는다. 아래를 실행해 1_planning.requirements 가 승인·동결한 선언을 먼저 읽는다:`,
+                `  bash ${SCRIPTS_DIR}/state.sh get ${args.issue} '.stages."1_planning".substages."requirements".test_scope'`,
+                `  - new_tests_required=true (마커 부재·null 도 true 로 간주 — fail-closed) → 변경에 대한 테스트를 함께 추가하고 self_check.new_tests_added=true 로 기록한다.`,
+                `  - new_tests_required=false → 테스트 추가는 이번 이슈의 범위 밖이다. 추가하지 않는 것이 정답이며, self_check.new_tests_added=false 와 함께 dev.new_tests_waived=true 마커를 남긴다.`,
+                `이 마커는 읽기 전용이다 — engineer 가 test_scope 를 쓰거나 고치지 않는다. 선언과 실제 작업이 맞지 않으면 임의로 면제·추가하지 말고 최종 출력에 적어 보고한다.`,
               );
             }
             if (attemptNum > 1) {
