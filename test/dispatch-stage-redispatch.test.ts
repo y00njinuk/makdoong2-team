@@ -411,3 +411,78 @@ describe("dispatch_stage — hang_history 리셋은 substage done=true 일 때�
       "스킵 경로에 debug 로그가 없으면 임계 미도달 원인을 추적할 수 없다");
   });
 });
+
+// ── GitHub #12 — permission_stall 은 하드 실패가 아니라 회복 가능한 차단이다 ──
+//
+// 종전 동작: 스코프 밖 권한 요청 → 자동 거부 + abort → dispatch_stage 가 곧장
+// 최종 결과로 떨어짐(`attempts` 가 1에서 늘지 않음, `next_action` 부재).
+// 그 공백을 team-leader 가 "사용자 승인 대기" 로 채워, 헤드리스 서브세션에는
+// 존재하지도 않는 승인 행위를 사용자에게 요구하며 워크플로가 멈췄다.
+//
+// 재디스패치 루프는 라이브 opencode 서버 없이 실행할 수 없으므로, 여기서는
+// 소스가 그 경로를 실제로 갖추고 있는지를 정적으로 고정한다.
+describe("issue #12 — dispatch_stage 의 permission_stall 처리", () => {
+  const PLUGIN_SRC = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "opencode-plugin.ts"),
+    "utf8",
+  );
+  const block = (() => {
+    const start = PLUGIN_SRC.indexOf('if (outcome.kind === "permission_stall") {');
+    assert.ok(start > 0, "permission_stall 분기가 dispatch_stage 에 없다");
+    const end = PLUGIN_SRC.indexOf('if (outcome.kind === "empty") {', start);
+    assert.ok(end > start, "permission_stall 분기 끝을 못 찾았다");
+    return PLUGIN_SRC.slice(start, end);
+  })();
+
+  test("outside_allowed_roots 만 재디스패치 대상이다", () => {
+    assert.match(
+      block,
+      /const recoverable = outcome\.permissionReason === "outside_allowed_roots"/,
+      "회복 가능 사유 판정이 없다 — 셋을 뭉개면 설정 문제까지 재시도한다",
+    );
+  });
+
+  test("예산이 남으면 안내를 주입하고 재디스패치한다", () => {
+    assert.match(block, /permissionBlockNote = \[/, "허용 범위 안내를 만들지 않는다");
+    assert.match(block, /if \(recoverable && attempt < currentMaxAttempts\)[\s\S]{0,2000}continue;/,
+      "재디스패치 경로가 없다 — attempts 가 1에서 늘지 않는다");
+  });
+
+  test("주입 노트는 차단 경로·허용 범위·대체 조치를 모두 담는다", () => {
+    assert.match(block, /차단된 요청 패턴/, "무엇이 막혔는지 안 알려준다");
+    assert.match(block, /permissionScope/, "허용 범위를 안 알려준다");
+    assert.match(block, /glob \/ grep \/ read \/ list/, "조회 툴 경로 축소 지시가 없다");
+    assert.match(block, /\.makdoong2-team\/\$\{args\.issue\}\/tmp\//, "임시 파일 대체 경로가 없다");
+  });
+
+  test("주입 노트가 실제로 프롬프트에 실린다", () => {
+    assert.match(PLUGIN_SRC, /let permissionBlockNote: string \| null = null;/,
+      "노트 변수가 buildPromptText 클로저 밖에 없다");
+    assert.match(PLUGIN_SRC, /if \(permissionBlockNote\) \{[\s\S]{0,400}base\.push\(/,
+      "buildPromptText 가 노트를 프롬프트에 넣지 않는다 — 새 세션은 같은 경로를 또 요청한다");
+  });
+
+  test("최종 실패는 hang_history 에 남는다 — 유일한 cross-call 카운터다", () => {
+    assert.match(block, /reason: `permission_stall:\$\{outcome\.permissionReason/,
+      "hang_history 항목이 없다 — 리더가 같은 조건으로 무한 재호출해도 상한에 닿지 않는다");
+    assert.match(block, /state\.sh append/, "append 호출이 없다");
+  });
+
+  test("최종 응답이 '승인 대기 아님' 을 필드로 못 박는다", () => {
+    for (const field of [
+      "awaiting_user_approval: false",
+      "session_aborted: true",
+      "permission_reason:",
+      "permission_patterns:",
+      "permission_scope:",
+      "next_action: finalLegacy.nextAction",
+    ]) {
+      assert.ok(block.includes(field), `최종 응답에 ${field} 가 없다`);
+    }
+  });
+
+  test("permission_stall 재디스패치는 session_gone 과 같은 attempt 예산을 쓴다", () => {
+    assert.match(block, /maxAttemptsForCurrentModel\(\)/,
+      "별도 상한을 쓰면 예산이 두 배가 된다");
+  });
+});
