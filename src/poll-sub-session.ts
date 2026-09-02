@@ -75,7 +75,7 @@ export type PollOutcome =
   //   non_external_permission — external_directory 가 아닌 권한(edit/bash 등)이 도달.
   //                             경로 문제가 아니라 에이전트 설정 문제다
   //   tool_call_stall        — 권한 요청 없이 툴 호출만 멈춰 있는 경우
-  | { kind: "permission_stall"; polls: number; elapsedMs: number; stalledMs: number; permissionID?: string; permissionType?: string; permissionPatterns?: string[]; permissionReason?: PermissionStallReason }
+  | { kind: "permission_stall"; polls: number; elapsedMs: number; stalledMs: number; permissionID?: string; permissionType?: string; permissionPatterns?: string[]; permissionReason?: PermissionStallReason; permissionScope?: string }
   // 세션이 등장 후 사라진 케이스 (sessionEverAppeared=true → 3회 연속 status absent + no new messages)
   // 또는 message stall 케이스 (sessionEverAppeared=true → busy 지속 + assistant message 0건 + messageStallThresholdMs 초과).
   // 호출자는 session.abort() 를 "실제 gone" 인 경우에만 skip 해야 한다 (skipSessionOps 플래그로 전달).
@@ -258,13 +258,28 @@ function posixDirname(p: string): string {
   return idx <= 0 ? "/" : trimmed.slice(0, idx);
 }
 
+/**
+ * 자동 승인 범위의 루트 = worktree 의 **직계 부모 한 단계**.
+ *
+ * 형제(메인 저장소·다른 worktree)까지는 열고 그 위는 닫는다. 조부모를 열면
+ * `/root/IdeaProjects/*` 하나가 모든 프로젝트 그룹을, 극단적으로 `/` 가 파일시스템
+ * 전체를 자동 승인 대상으로 만든다 — 이 함수의 반환값은 사람의 확인 없이 `allow`
+ * 로 응답되므로 그 확장은 승인 게이트 자체를 무력화한다 (GitHub #12 의 제안 1을
+ * 채택하지 않은 이유). 조부모 요청은 **차단이 정답**이고, 회복은 범위를 넓히는 것이
+ * 아니라 서브에이전트에게 허용 범위를 알려주고 재시도시키는 쪽(dispatch_stage 의
+ * permission-block 재디스패치)이 맡는다.
+ */
+export function worktreeAllowedScope(worktree: string): string {
+  return posixDirname(worktree);
+}
+
 // Returns true when every permission pattern resides within the allowed scope,
 // defined as the parent directory of the worktree (siblings are the main repo
 // and other worktrees — all legitimate access targets for engineers).
 // Trailing glob suffixes (/* , /*/ , /**/ , /**) are stripped before prefix check.
 export function isWithinWorktreeScope(patterns: string[], worktree: string): boolean {
   if (!worktree || patterns.length === 0) return false;
-  const scope = posixDirname(worktree);
+  const scope = worktreeAllowedScope(worktree);
   return patterns.every(pat => {
     const base = pat.replace(/\/?(\*+\/?)+$/, "");
     return base === scope || base.startsWith(scope + "/");
@@ -570,6 +585,11 @@ export async function pollSubSession(
             permissionType: p.permission,
             permissionPatterns: p.patterns,
             permissionReason: reason,
+            // 무엇이 막혔는지(patterns)만으로는 처방이 안 나온다 — **어디까지가
+            // 허용인지**를 같이 실어야 서브에이전트가 경로를 좁혀 재시도할 수 있다.
+            permissionScope: options.allowedWorktree
+              ? worktreeAllowedScope(options.allowedWorktree)
+              : undefined,
           };
         }
       }
@@ -858,6 +878,23 @@ export async function pollSubSession(
 }
 
 /**
+ * `permission_stall` 보고 시 team-leader 가 그대로 따라야 하는 지시.
+ *
+ * dispatch_stage 응답의 `next_action` 으로 실린다. 하드룰 4("next_action 을 그대로
+ * 따른다")가 적용되는 자리이며, 문구를 바꿀 때는 agents/makdoong2-team-leader.md 의
+ * permission_stall 하드룰과 함께 고친다 (test/poll-permission-scope.test.ts 가 강제).
+ */
+export const PERMISSION_STALL_NEXT_ACTION =
+  "이 실패는 사용자 승인으로 해소되지 않는다 — 권한 요청은 이미 자동 거부됐고 서브세션도 abort 된 뒤다. " +
+  "헤드리스 서브세션에는 승인을 받을 채널 자체가 없으므로, 사용자에게 '권한을 승인한 뒤 재개해 달라' 고 " +
+  "요청하는 것은 실행 불가능한 지시다. 절대 그렇게 보고하지 말 것. " +
+  "output 원문과 permission_patterns / permission_scope 를 그대로 인용해 '차단되어 종료됨' 으로 보고하고, " +
+  "permission_reason 별 처방을 따르라: outside_allowed_roots → 자동 재디스패치(허용 범위 안내 주입)가 이미 " +
+  "소진된 상태다. 같은 인자로 재호출하지 말고 차단된 경로와 허용 범위를 보고한 뒤 사용자 지시를 기다린다. " +
+  "non_external_permission → 해당 에이전트 frontmatter 의 permission 블록 문제다 (정식 키는 `edit`). " +
+  "tool_call_stall → `npx makdoong2-team doctor` 로 설치 상태를 점검한다.";
+
+/**
  * Convert a {@link PollOutcome} into a display string plus a boolean success
  * flag. Used by callers that need a single string for downstream serialization
  * (e.g., embedding in a JSON response) but must also know whether the
@@ -865,7 +902,7 @@ export async function pollSubSession(
  */
 export function pollOutcomeToLegacy(
   outcome: PollOutcome,
-): { text: string; success: boolean } {
+): { text: string; success: boolean; nextAction?: string } {
   switch (outcome.kind) {
     case "text":
       return { text: outcome.text, success: true };
@@ -893,11 +930,26 @@ export function pollOutcomeToLegacy(
         : "an unidentified permission request";
       const remedy = (() => {
         switch (outcome.permissionReason) {
-          case "outside_allowed_roots":
-            return "워크스페이스 밖 경로 접근이라 차단됐다. " +
-              "임시 파일이 필요하면 `/tmp` 이 아니라 worktree 안의 " +
+          case "outside_allowed_roots": {
+            // 종전에는 처방이 "임시 파일은 worktree 안에 써라" 하나뿐이었다. 정작
+            // 실제로 막힌 것은 read-only `glob` 이었고(GitHub #12), 그 안내는 상황과
+            // 무관해 아무 조치도 유도하지 못했다. 무엇이 막혔는지(patterns)와
+            // **어디까지가 허용인지**(scope)를 먼저 못 박고, 조회/쓰기 두 갈래로 나눈다.
+            const blocked = outcome.permissionPatterns?.length
+              ? JSON.stringify(outcome.permissionPatterns)
+              : "(패턴 미상)";
+            const scope = outcome.permissionScope
+              ? `\`${outcome.permissionScope}/\` 이하 (worktree 와 그 형제 디렉토리)`
+              : "worktree 와 그 형제 디렉토리";
+            return `워크스페이스 밖 경로 접근이라 차단됐다 — 요청 ${blocked}, 자동 승인 범위 ${scope}. ` +
+              "그 위(조부모 이상)는 설계상 열지 않는다: 한 번 열면 형제 프로젝트 전체가 사람의 확인 없이 승인 대상이 된다. " +
+              "조치는 둘 중 하나다. " +
+              "(1) 조회(glob/grep/read/list)라면 경로 인자를 허용 범위 안으로 좁혀라 — 경로 인자 없이 cwd 기준 상대 패턴을 쓰는 것이 가장 안전하다. " +
+              "저장소 밖을 훑어야만 하는 작업이면 수행하지 말고 그 사실을 최종 출력에 적어 보고하라. " +
+              "(2) 임시 파일이 필요하면 `/tmp` 이 아니라 worktree 안의 " +
               "`.makdoong2-team/<이슈키>/tmp/` 에 만들어라 — 그 경로는 cwd 안이라 승인이 필요 없고, " +
               "git exclude 와 worktree 동기화 대상이다. `/tmp` 에 쓴 것은 동기화도 커밋도 되지 않아 조용히 사라진다.";
+          }
           case "non_external_permission":
             return "external_directory 가 아닌 권한 요청이 서브에이전트에 도달했다 — 경로 문제가 아니라 " +
               "에이전트 permission 설정 문제다. 해당 에이전트의 frontmatter `permission:` 블록을 점검하라 " +
@@ -915,6 +967,11 @@ export function pollOutcomeToLegacy(
           `aborted after ${outcome.stalledMs}ms. reason=${outcome.permissionReason ?? "unknown"})\n` +
           `→ ${remedy}`,
         success: false,
+        // 이 한 줄이 없어서 team-leader 가 "이미 abort 됨" 을 "승인 대기 중" 으로
+        // 재해석해, 존재하지 않는 승인 행위를 사용자에게 요구하며 워크플로를
+        // 세웠다 (GitHub #12). 헤드리스 서브세션에는 승인 채널이 없다 — 그래서
+        // 훅이 대신 거부한 것이고, 사용자가 할 수 있는 일은 애초에 없다.
+        nextAction: PERMISSION_STALL_NEXT_ACTION,
       };
     }
     case "session_gone":
