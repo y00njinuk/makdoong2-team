@@ -240,20 +240,34 @@ export function parseJsoncLoose(text: string): unknown {
  * 서브세션의 permission 요청이 auto-reject 됐다.
  * (install-lib 의 computeExternalDirPaths 가 그 값을 쓰는 쪽이다.)
  */
-export function loadOpencodeExternalDirAllows(): string[] {
+export function loadOpencodeExternalDirAllows(diag?: (reason: string) => void): string[] {
+  // 빈 배열로 끝나는 이유를 호출자가 알 수 있게 한다. 이 모듈은 logger 를 import
+  // 하지 못하므로(logger→config) 콜백으로 돌려준다. 같은 pid 의 두 플러그인 사본이
+  // 서로 다른 개수를 읽은 사례(issue #10: 7개→5개)에서 파일 부재였는지 파싱
+  // 실패였는지 키 부재였는지가 로그에 남지 않았다.
+  const file = join(configDir(), "opencode.json");
+  let raw: string;
   try {
-    const raw = readFileSync(join(configDir(), "opencode.json"), "utf8");
-    const oc = parseJsoncLoose(raw) as {
-      permission?: { external_directory?: unknown };
-    } | null;
-    const ext = oc?.permission?.external_directory;
-    if (!ext || typeof ext !== "object") return [];
-    return Object.entries(ext as Record<string, unknown>)
-      .filter(([, action]) => action === "allow")
-      .map(([pattern]) => pattern);
-  } catch {
-    return []; // 부재 / 파싱 실패 → 설정된 allow 없음
+    raw = readFileSync(file, "utf8");
+  } catch (err) {
+    diag?.(`read failed: ${file}: ${(err as Error).message}`);
+    return []; // 부재 → 설정된 allow 없음
   }
+  let oc: { permission?: { external_directory?: unknown } } | null;
+  try {
+    oc = parseJsoncLoose(raw) as typeof oc;
+  } catch (err) {
+    diag?.(`parse failed: ${file} (${raw.length} bytes): ${(err as Error).message}`);
+    return []; // 파싱 실패 → 설정된 allow 없음
+  }
+  const ext = oc?.permission?.external_directory;
+  if (!ext || typeof ext !== "object") {
+    diag?.(`permission.external_directory absent: ${file}`);
+    return [];
+  }
+  return Object.entries(ext as Record<string, unknown>)
+    .filter(([, action]) => action === "allow")
+    .map(([pattern]) => pattern);
 }
 
 /** Resolve the five runtime path roots (JSON paths.* override → default).
