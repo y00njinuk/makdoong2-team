@@ -121,6 +121,28 @@ permission:
 
 `ok: true` 만 보고 넘어가지 말 것 — `paused` 와 `unknown` 도 `ok: true` 이며, 둘 다 substage 는 끝나지 않았다.
 
+## `permission_stall` 은 "승인 대기" 가 아니다 — 이미 종료된 것이다 (hardrule)
+
+`dispatch_stage` 가 `outcome_kind: "permission_stall"` 을 반환하면, 그 시점에 이미 **권한 요청은 자동 거부됐고 서브세션은 abort 됐다.** 헤드리스 서브세션에는 승인을 받을 채널 자체가 없어서 훅이 대신 거부한 것이다 — 사용자가 승인할 대상이 애초에 존재하지 않는다.
+
+**금지**: "worktree 접근 권한 승인 대기 — 승인한 뒤 재개해 주세요" 류의 보고. 실제로 이 오판이 워크플로를 세웠다. 도구가 반환한 `output` 에는 `aborted after {N}ms` 로 **종료됐다는 사실**이 적혀 있었고 "승인을 기다리라" 는 지시는 한 글자도 없었다 (GitHub issue #12). 응답의 `awaiting_user_approval: false` / `session_aborted: true` 가 그 점을 못 박는다.
+
+읽어야 할 필드는 셋이다:
+
+| 필드 | 뜻 |
+|---|---|
+| `permission_reason` | `outside_allowed_roots` / `non_external_permission` / `tool_call_stall` — **처방이 서로 다르다** |
+| `permission_patterns` | 실제로 차단된 경로 패턴 |
+| `permission_scope` | 자동 승인되는 범위 (worktree 의 부모 디렉토리 이하) |
+
+`permission_reason` 별 조치:
+
+- **`outside_allowed_roots`** — 서브에이전트가 워크스페이스 밖 경로를 요청했다. `dispatch_stage` 가 이미 허용 범위를 프롬프트에 주입해 자동 재디스패치를 시도했고(`attempts` 확인), 그 예산까지 소진한 상태다. **같은 인자로 재호출하지 않는다.** `permission_patterns` 와 `permission_scope` 를 그대로 인용해 보고하고 사용자 지시를 기다린다. 스코프를 넓혀 달라는 요청은 하지 않는다 — 조부모 이상을 여는 것은 형제 프로젝트 전체를 사람 확인 없이 승인 대상으로 만드는 일이라 설계상 거부된다.
+- **`non_external_permission`** — 경로 문제가 아니라 해당 에이전트 frontmatter 의 `permission:` 블록 문제다 (정식 키는 `edit`; `write` 는 존재하지 않아 조용히 무시된다). 사용자에게 보고한다.
+- **`tool_call_stall`** — 부분 설치 의심. `npx makdoong2-team doctor` 실행을 안내한다.
+
+세 경우 모두 `next_action` 을 그대로 따른다 (하드룰 4). 이 실패는 `hang_history` 에 `reason: "permission_stall:<사유>"` 로 기록되므로, 반복 호출하면 `stall_escalate_threshold` 에서 차단된다.
+
 ## verdict 는 셋이다 — REJECTED 와 ERROR 를 절대 섞지 말 것 (hardrule)
 
 `dispatch_verifier` 의 `verdict` 는 `VERIFIED` / `REJECTED` / `ERROR` 세 값이다.
@@ -320,6 +342,7 @@ loop (max_substage_retries=3 per substage):
 - 모델 폴백 시: `[fallback] <agent>: <primary> → <fallback> (reason: ...)`
 - `retry_disallowed` 감지 시: `[substage X RETRY DISALLOWED] outcome=timeout, transient_failures=0 — sub-agent hang. <retry_disallowed_reason>`
 - `session_gone` 최종 실패 시: `[substage X SESSION_GONE gone_reason=<message_stall|status_absent>] dispatch_stage 3회 자동 redispatch 후 실패. attempts=<N>, previous_session_ids=[...]`
+- `permission_stall` 시: `[substage X PERMISSION BLOCKED reason=<permission_reason>] 서브세션이 차단되어 **이미 종료됨** (승인 대기 아님). 차단 경로=<permission_patterns>, 허용 범위=<permission_scope>, attempts=<N>`
 - verifier ERROR 시: `[substage X VERIFIER ERROR source=<verdict_source>] 검증 미수행 — verifier 만 재호출 (streak=<N>/3). stage 는 건드리지 않음`
 - verifier ERROR streak 초과 시: `[substage X VERIFIER ERROR STREAK EXCEEDED] 판정 3회 연속 실패. source=<verdict_source>. 사용자 개입 필요.`
 - REJECTED 재시도 시: `[substage X REJECTED retry] streak=<N>, reason_prefix="<40자>" → dispatch_stage 재호출`
