@@ -674,25 +674,45 @@ sub-session hang 은 결이 세 가지이고 각각 별도 감지가 필요하�
 
 `busyIndicated = status?.type === "busy" || (!status && messages.length > 0)`. worktree cwd 세션은 status map 에 나타나지 않으므로 loose alive 만으로도 성립한다.
 
-tool-call stall 은 abort 직전에 `client.permission.list()` 를 **1회 best-effort 조회**해 이 세션의 대기 중인 permission 요청(id / 카테고리 / 경로 패턴)을 outcome 과 로그에 싣는다 (issue #8 — 종전에는 `stalledMs` 만 남아 대기 대상을 특정할 수 없었다). 조회 불가·빈 결과면 종전과 동일한 무정보 stall 로 진행하되, 메시지에 `opencode.json` 의 `permission.external_directory` 시드 점검(`npx makdoong2-team doctor`)을 안내한다.
+tool-call stall 은 abort 직전에 권한 소스(`client.permission.list()`)를 **1회 best-effort 조회**해 이 세션의 대기 중인 permission 요청(id / 카테고리 / 경로 패턴)을 outcome 과 로그에 싣는다 (issue #8 — 종전에는 `stalledMs` 만 남아 대기 대상을 특정할 수 없었다). 빈 결과면 "이 세션에 관측된 권한 요청 없음", 소스 자체가 없으면 "권한 소스 없음" 으로 **구분해** 남긴다 — 처방이 다르다. 무정보 stall 의 메시지는 (1) 세션의 디렉토리에서도 플러그인이 로드됐는지(로그의 `[init] plugin instance directory=…`) (2) `opencode.json` 의 `permission.external_directory` 시드(`npx makdoong2-team doctor`) 순으로 점검을 안내한다.
+
+**권한 소스는 SDK 클라이언트의 것이 아니다.** 플러그인이 받는 v1 클라이언트에는 `permission` 네임스페이스가 없고, `GET /permission` 은 클라이언트가 묶인 디렉토리 스코프라 worktree 서브세션의 요청이 보이지 않는다 — 종전에는 이 소스가 항상 `undefined` 라 자동 승인·거부 루프가 **한 번도 돌지 않았고** stall 메시지는 언제나 "unknown" 이었다 (issue #10). 지금은 `permissionSourceFor(sessionId)` 가 §8.2 의 레지스트리(`pendingPermissions`, 세션의 사본이 `permission.asked` 이벤트로 채운다)를 `list` 로 내고, `reply` 는 세션-라우팅 엔드포인트 `POST /session/{id}/permissions/{permissionID}` 로 보낸다 (세션 ID 로 라우팅되므로 어느 사본에서 불러도 맞는 Instance 에 닿는다).
 
 ### 8.1 왜 grace 가 5분인가
 
 이전 로직은 3폴 연속 absent(≈8초)면 gone 으로 판정했다. slow-first-token 모델의 세션 초기화나 tool-heavy substage 중 서버가 잠시 status push 를 멈추는 구간에서 **대량 false positive** 가 났다 — 실측에서 8초 window 하 SESSION_GONE 15건 중 실제로 죽은 세션은 **0건**. 5분으로 올려 tool-heavy 작업의 최대 정적 구간을 흡수한다.
 
-### 8.2 alive 신호 이중화
+### 8.2 alive 신호 이중화 — 그리고 신호는 플러그인 사본 사이에서 공유된다
 
-플러그인이 두 map 을 유지하고 **두 개의 서로 다른 콜백**으로 넘긴다.
+#### 플러그인은 디렉토리마다 사본이 하나씩이다 (hardrule)
 
-- `sessionActiveToolCount` — `tool.execute.before` 에서 ++, `.after` 에서 --. **0 초과면 지금 툴이 실행 중**이다
-- `sessionLastToolExecuteAt` — 양쪽에서 갱신. counter 가 0 이어도 최근 5분 내 활동이면 alive
+opencode 1.18 은 **디렉토리(Instance)마다 플러그인을 따로 초기화한다.** `dispatch_stage` 가 서브세션을 `directory=<worktree>` 로 만들면 그 세션의 `tool.execute.before/after` · `event`(`permission.asked` · `message.part.updated` · `session.deleted` …) 훅은 **worktree Instance 의 사본**에서 발화하고, 그 세션을 감시하는 `pollSubSession` 은 **main Instance 의 사본**에서 돈다. 같은 pid 안이지만 factory 가 따로 불려 각자의 클로저 변수를 가진다.
+
+사본마다 자기 Map 을 들고 있으면 폴러는 언제나 빈 Map 을 본다 — `isToolExecuting()` 이 영영 false 라 60초를 넘는 모든 툴(sbt test)이 `permission_stall`(reason=`tool_call_stall`) 로 abort 됐고, `[permission] configured external_directory allows: 7개` 와 `5개` 가 같은 pid 에 찍힌 것도 설정이 바뀐 것이 아니라 **사본이 둘**이라는 뜻이었다 (GitHub issue #10). 로그의 `[init] plugin instance directory=… pid=…` 로 사본을 구분한다.
+
+그래서 **"훅 사본이 쓰고 폴러 사본이 읽는" 세션 단위 신호는 전부 `src/sub-session-registry.ts` 의 프로세스 전역 레지스트리**(`globalThis[Symbol.for("makdoong2-team.sub-session-registry.v1")]`)에 둔다: `activeToolCalls` · `lastToolExecuteAt` · `pendingPermissions` · `sessionIssue` · `sessionWorktree` · `sessionDeletedWaiters`. 공유하지 **않는** 것은 디스패치가 소유하는 상태다 — `pendingDispatch` 를 공유하면 worktree 사본의 `session.created` 핸들러가 pane 을 한 번 더 띄운다. `sessionAgent` · `subSessionIds` · `pendingDelete` 도 사본-로컬로 남는다. 레지스트리 모듈은 플러그인에서 import 만 한다 (re-export 하면 로더가 factory 로 호출한다). `test/sub-session-registry.test.ts` 가 배선을 강제한다.
+
+#### 두 콜백
+
+레지스트리의 두 구조를 **두 개의 서로 다른 콜백**으로 넘긴다.
+
+- `activeToolCalls: sessionID → (callID → startedAt)` — `tool.execute.before` 에서 `toolStarted`, `.after` 에서 `toolFinished`. **비어 있지 않으면 지금 툴이 실행 중**이다. callID 로 짝을 맞추므로 두 툴이 겹쳐도 하나가 끝났을 때 다른 하나가 지워지지 않는다
+- `lastToolExecuteAt` — 양쪽에서 갱신. 집합이 비어도 최근 5분 내 활동이면 alive
 
 | 콜백 | 값 | 쓰이는 곳 | 왜 분리했나 |
 |---|---|---|---|
-| `isRecentlyActive()` | `counter > 0 \|\| (now - last < 5분)` | gone 판정 스킵 | 넓은 창이라야 tool gap 이 긴 세션의 gone 오탐을 막는다 |
-| `isToolExecuting()` | `counter > 0` | **완료 판정 유보** | 순간값이라야 정상 종료가 지연되지 않는다. 넓은 창을 완료 판정에 쓰면 모든 substage 가 5분씩 늦어진다 |
+| `isRecentlyActive()` | `active > 0 \|\| (now - last < 5분)` | gone 판정 스킵 | 넓은 창이라야 tool gap 이 긴 세션의 gone 오탐을 막는다 |
+| `isToolExecuting(snapshot)` | `settleToolCalls(snapshot.settledCallIDs)` 뒤 `active > 0` | **완료 판정 유보** | 순간값이라야 정상 종료가 지연되지 않는다. 넓은 창을 완료 판정에 쓰면 모든 substage 가 5분씩 늦어진다 |
 
-map entry 는 `cleanupSubSession` 과 orphan-scan pane-kill 경로에서 삭제되므로 누수가 없다. `tool.execute.before` 의 가드가 throw 하면 `.after` 가 돌지 않아 counter 가 영구 누수되므로, 증분은 try/catch 로 되돌린다 (§4.2).
+#### 항목은 세 경로로 빠진다 — after 훅만 믿지 않는다
+
+`tool.execute.after` 는 툴이 **실제로 실행된 뒤에만** 돈다. 툴 자체가 throw 하면(권한 거부 · 파일 없음 · MCP 오류) after 가 오지 않아 항목이 남고, 그러면 `isToolExecuting()` 이 참으로 굳어 완료 판정이 절대 타임아웃까지 유보된다. 사본-로컬 카운터 시절에는 폴러가 카운터를 아예 못 봐서 드러나지 않았고, 공유하는 순간 무장된다. 그래서 종결 신호를 셋으로 둔다.
+
+1. `tool.execute.after` → `toolFinished(sessionID, callID)`. before 의 가드가 throw 한 경우는 before 안의 try/catch 가 되돌린다 (§4.2).
+2. `event: message.part.updated` 의 tool part 가 `completed` / `error` → `toolFinished`. 툴이 throw 한 경우 서버가 part 를 `error` 로 남기므로 이것이 유일한 실시간 종결 신호다. `session.idle` 이면 `clearToolCalls` (idle 세션에 실행 중인 툴은 정의상 없다).
+3. 폴러의 `isToolExecuting(snapshot)` 이 읽기 전에 **스냅샷과 대조**한다 — `ToolSnapshot.settledCallIDs`(모든 assistant 메시지에서 `completed`/`error` 인 callID)에 있는 항목은 확실히 끝난 것이므로 뺀다. 스냅샷에 **아직 없는** callID 는 그대로 둔다 (issue #7 의 110ms 창 — 훅은 발화했는데 서버가 part 를 아직 반영하지 않은 상태). 이벤트를 놓친 사본이 있어도 폴 한 번이면 정리된다.
+
+`cleanupSubSession` 과 orphan-scan pane-kill 경로가 `forgetSession` 으로 세션의 흔적을 지우고, `session.deleted` 를 받은 사본이 툴 집합·권한 요청을 비운다. `sessionIssue` / `sessionWorktree` 는 dispatch 사본의 `cleanupSubSession` 만 지운다.
 
 #### 완료 판정은 툴이 떠 있는 동안 내리지 않는다 (hardrule)
 
@@ -704,9 +724,9 @@ map entry 는 `cleanupSubSession` 과 orphan-scan pane-kill 경로에서 삭제�
 2. **finish 단독 완료의 한 폴 재확인** — `statusIdle`(서버의 단언)이나 `contentStable`(5분 무변화)이 함께 서 있지 않고 `finish` 뿐이면 한 폴(기본 2s) 뒤 **같은 content 시그니처**를 다시 본 뒤에만 확정한다. 시그니처가 바뀌었다는 것은 내용이 아직 움직인다는 뜻이므로 결론을 미룬다 (관측된 오판 2건 모두 `contentStable=false`). worktree-CWD 세션은 `statusIdle` 이 영영 안 뜨므로 이 경로를 상시로 타지만, 비용은 폴 1회다.
 3. **공백 전용 text part 는 `preamble_only` 가 아니다** — `text.length > 0` 만 보면 `"\n\n"` 같은 스트리밍 초기 상태가 trim 길이 0 으로 임계 미만이 되어 무조건 preamble 로 확정된다 (로그의 `textLen=0` 이 이 경로다). `whitespace_only_text` 로 따로 떨어뜨려야 `dispatch_stage` 가 "작업을 다시 하라" 대신 요약 재프롬프트를 보내고 `.done=true` override 도 그대로 걸린다.
 
-**tool-call stall 의 면제도 같은 신호를 쓴다.** tool part 의 state 변화는 content 시그니처(`id:partsLen:textLen`)를 바꾸지 않으므로 5분짜리 sbt 빌드도 "진전 없음" 으로 보이고 기본 임계 60초에서 abort 대상이 된다. `hasPendingToolCall` 이 프로덕션에서 항상 false 이던 동안에는 이 경로가 발화하지 않아 드러나지 않았고, 그 값을 고치는 순간 무장됐다. `isToolExecuting()` 이 참이면 면제한다 — 진짜 권한 대기는 매 폴 도는 `permission.list()` 경로가 요청 ID·패턴까지 짚어 잡고, 그마저 실패해도 절대 타임아웃이 받쳐준다.
+**tool-call stall 의 면제도 같은 신호를 쓴다.** tool part 의 state 변화는 content 시그니처(`id:partsLen:textLen`)를 바꾸지 않으므로 5분짜리 sbt 빌드도 "진전 없음" 으로 보이고 기본 임계 60초에서 abort 대상이 된다. `hasPendingToolCall` 이 프로덕션에서 항상 false 이던 동안에는 이 경로가 발화하지 않아 드러나지 않았고, 그 값을 고치는 순간 무장됐다. `isToolExecuting()` 이 참이면 면제한다 — 진짜 권한 대기는 매 폴 도는 `permission.list()` 경로가 요청 ID·패턴까지 짚어 잡고, 그마저 실패해도 절대 타임아웃이 받쳐준다. 이 면제가 worktree 서브세션에서 실제로 서려면 신호가 사본을 가로질러야 한다 — 위 §8.2 의 레지스트리가 그것이다 (issue #10: 면제 로직은 있었지만 폴러가 보는 값이 항상 false 였다).
 
-회귀: `test/poll-sub-session.test.ts` ("issue #7: 툴 실행 중 완료 오판 방지" 8 케이스).
+회귀: `test/poll-sub-session.test.ts` ("issue #7: 툴 실행 중 완료 오판 방지" 8 케이스 · "issue #10: 플러그인 사본을 가로지르는 툴·권한 신호" 5 케이스).
 
 ### 8.3 content-signature 로 진행을 감지
 
@@ -727,8 +747,8 @@ map entry 는 `cleanupSubSession` 과 orphan-scan pane-kill 경로에서 삭제�
 message_stall 감지 시 즉시 `client.session.abort()` 를 쏘지만, 서버는 **최대 112초 뒤에야** `session.deleted` 이벤트를 낸다. 그 사이 서브에이전트가 tool call 을 계속 발사하는 좀비 실행이 실측됐다 (abort 26초/131초 뒤 파일 write).
 
 해소:
-- `sessionDeletedWaiters: Map<string, Array<() => void>>` 에 세션별 waiter 등록
-- `event` 핸들러가 `session.deleted` 를 감지하면 해당 세션 waiter 를 전부 resolve
+- `registry.sessionDeletedWaiters: Map<string, Array<() => void>>` 에 세션별 waiter 등록 — 레지스트리인 이유는 `session.deleted` 가 **세션의 디렉토리 사본**에만 도착하기 때문이다 (§8.2). worktree 서브세션이면 worktree 사본이 이벤트를 받고 main 사본이 기다린다
+- `event` 핸들러가 `session.deleted` 를 감지하면 `notifySessionDeleted` 로 해당 세션 waiter 를 전부 resolve
 - dispatch 경로는 message_stall 직후 `waitForSessionDeleted(sid, SESSION_DELETED_WAIT_MS=30_000)` 로 최대 30초 대기한 뒤에만 재디스패치
 - 30초 초과 시 `deleted_event_received=false` 를 로그로 남기고 진행 (safety net)
 
@@ -741,7 +761,7 @@ message_stall 감지 시 즉시 `client.session.abort()` 를 쏘지만, 서버�
 
 ### 8.7 관련 파일
 
-`src/poll-sub-session.ts` (감지 본체) · `src/opencode-plugin.ts` (재시도 루프, alive 신호, `sessionDeletedWaiters`) · `test/poll-sub-session.test.ts` · `test/dispatch-stage-redispatch.test.ts`.
+`src/poll-sub-session.ts` (감지 본체) · `src/sub-session-registry.ts` (사본을 가로지르는 신호) · `src/opencode-plugin.ts` (재시도 루프, 훅 배선, 권한 소스 어댑터) · `test/poll-sub-session.test.ts` · `test/sub-session-registry.test.ts` · `test/dispatch-stage-redispatch.test.ts`.
 
 ---
 
@@ -1118,6 +1138,7 @@ pre-push 훅 경로는 STEP 1 의 while 루프가 stdin 을 EOF 까지 소진하
 | `session_gone` (message_stall) | 자동 3회 재시도 후에도 실패하면 `get_fallback_model` |
 | `session_gone` (status_absent) | 사용자 개입 대기 |
 | `stall_streak_exceeded` | `hang_history` 상한 도달. 모델 교체로 안 풀린다 — 사용자 에스컬레이션 (§10.2) |
+| `permission_stall` (reason `tool_call_stall`, doctor 정상) | 툴은 뜨는데 실행 신호도 권한 요청도 관측되지 않음. 로그에 worktree 경로의 `[init] plugin instance directory=…` 가 있는지 확인 — 없으면 서브세션의 Instance 에 플러그인이 로드되지 않은 것 (§8.2). 60초 넘는 툴이 매번 죽으면 issue #10 부류 |
 | `dispatch_verifier` REJECTED | `.done` 되돌리고 재dispatch (사유 자동 주입). commit 이면 publisher 가 먼저 `rollback-commits.sh` |
 | `dispatch_verifier` ERROR | **verifier 만 재호출.** state.json 을 건드리지 않는다 — 검증이 수행되지 않았을 뿐 stage 산출물은 그대로다. `verifier_error_streak_exceeded` 면 사용자 에스컬레이션 |
 | verdict 태그 누락 | 자동 REJECTED (안티-환각 floor) |
