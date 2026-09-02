@@ -87,6 +87,8 @@ bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."2_implementation".substage
 
 기대: 모든 항목(boolean)이 `true`인 JSON 객체. 누락·`false`·문법 오류 = **REJECTED**.
 
+> **유일한 예외**: `2_implementation.dev` 의 `new_tests_added` 는 `1_planning.requirements` 가 테스트 범위 제외를 선언한 경우(`test_scope.new_tests_required == false`) `false` 가 정상이다. 판정 규칙은 §2 의 `2_implementation.dev` 항목에 있다. 이 예외를 모르는 채 "모든 항목 true" 만 적용하면, 승인된 스코프 아웃이 무한 반려로 되돌아온다 (issue #11).
+
 > **⚠️ 스키마 규약:** state.sh 의 모든 jq path 는 `.stages."<PHASE>".substages."<SUBSTAGE>".<field>` 형태를 따른다. 참조: CLAUDE.md "워크플로우 상태 & 위임 규약".
 
 ### 2. 단계 명세 재대조
@@ -119,7 +121,15 @@ bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."2_implementation".substage
           git status --porcelain | grep -v '\.makdoong2-team/' | grep -v 'workspace-analysis\.json'
           ```
           출력이 비어 있어야 한다. `.makdoong2-team/` 은 플러그인이 작업 트리 안에 만드는 **자기 상태**이지 analyzer 의 부산물이 아니다. 이것을 위반으로 세면 해당 패턴이 git exclude 에 없는 저장소에서 **항상 REJECTED** 가 나고, 그 시점에 exclude 를 고칠 권한을 가진 역할이 파이프라인에 없어(analyzer 는 산출물 1개만 쓰기 가능 · team-leader 는 하드룰 2 로 차단 · engineer 는 analysis 통과 후 단계) 동일 사유 무한 루프가 된다 (issue #6-②).
-- 2_implementation.dev: `done=true` + sub-agent output에 "테스트 추가" 명시 / 5체크
+- 2_implementation.dev: `done=true` + `self_check` 6항목 + **테스트 동반 원칙은 requirements 의 선언을 따른다** (issue #11)
+    - 판정 근거는 **state.json 마커와 게이트 재실행**이다. sub-agent output 은 보조 근거이며, **output 이 비어 있거나 특정 문구가 없다는 사실만으로 REJECTED 하지 않는다** — 마커가 충족되면 VERIFIED 다. (`dispatch_stage` 는 텍스트 없이 종료한 세션도 `.done=true` 만으로 성공 처리한다. 그 경로를 verifier 가 문구 검색으로 뒤집으면 재작업 루프만 남는다.)
+    - `REQ` = `.stages."1_planning".substages."requirements".test_scope.new_tests_required` 를 읽는다. **마커 부재·`null` 은 `true` 로 간주한다 (fail-closed).**
+      ```bash
+      bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".test_scope'
+      ```
+    - `REQ == true` → `self_check.new_tests_added == true` 여야 한다. 추가로 staged 변경(`git diff --cached --name-only`)에 실제 테스트 파일이 있는지 확인한다 — 판단 기준은 `workspace-analysis.json` 의 `test_conventions` 다. 마커는 true 인데 테스트 파일이 하나도 없으면 **REJECTED**.
+    - `REQ == false` → 테스트 범위 제외가 **요구사항 단계에서 이미 승인·동결된 것**이다. `self_check.new_tests_added` 가 `false` 여도 정상이며, 이때 `.stages."2_implementation".substages."dev".new_tests_waived == true` 만 확인한다. **테스트가 없다는 이유로 REJECTED 하지 않는다** — 그 반려가 승인된 스코프 밖의 테스트 코드를 유입시킨 사고의 직접 원인이었다.
+    - 어느 경우든 `gates/stage4-dev-post-verify.sh <이슈키>` 를 재실행해 exit 0 을 확인한다.
 - 2_implementation.test: `.stages."2_implementation".substages."test"` 의 각 필드가 아래 조건을 모두 충족해야 함
         - `.unit` ∈ `{"pass", "fail", "skip"}` — `none`/`null` 은 미기록 → REJECTED
         - `.integration` ∈ `{"pass", "fail", "skip"}` — `none`/`null` 은 미기록 → REJECTED
