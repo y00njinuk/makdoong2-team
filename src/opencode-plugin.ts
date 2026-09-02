@@ -23,6 +23,21 @@ import { basename as pathBasename, dirname as pathDirname, join, resolve as path
 import type { Plugin } from "@opencode-ai/plugin";
 import { tool } from "@opencode-ai/plugin";
 import { appendSessionIndex, findWorktreeRoot, lookupSessionFromIndex } from "./session-index.js";
+import {
+  activeToolCount,
+  clearToolCalls,
+  forgetSession,
+  isToolExecuting as registryIsToolExecuting,
+  normalizePermissionEvent,
+  notifySessionDeleted,
+  pendingPermissionsFor,
+  permissionAsked,
+  permissionReplied,
+  settleToolCalls,
+  sharedSubSessionRegistry,
+  toolFinished,
+  toolStarted,
+} from "./sub-session-registry.js";
 import { computeVerdictHash } from "./verdict-hash.js";
 import {
   classifyVerifierOutcome,
@@ -433,6 +448,17 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   const config = loadConfig();
   applyConfigOverrides(config.agents, config.model_policy);
 
+  // opencode 는 디렉토리(Instance)마다 이 factory 를 따로 부른다 — 같은 pid 안에
+  // 사본이 여럿이다. 어느 사본이 어떤 로그를 찍는지 구분하려고 진입 시점에 남긴다.
+  // 로그에 worktree 경로의 `[init]` 이 없으면 서브세션 훅이 어디서도 발화하지
+  // 않는 것이고, 그것이 issue #10 의 `tool_call_stall` 처방 1번이다.
+  logger.debug(`[init] plugin instance directory=${directory} worktree=${worktree} pid=${process.pid}`);
+
+  // 사본을 가로지르는 세션 신호(툴 실행 · 권한 요청 · 이슈키 · worktree · deleted
+  // 대기자)는 프로세스 전역 레지스트리에 둔다. 사본마다 Map 을 들면 worktree 사본의
+  // 훅이 올린 신호를 main 사본의 폴러가 영영 보지 못한다 (issue #10).
+  const registry = sharedSubSessionRegistry();
+
   // Sub-session monitor — splits a tmux pane next to 부장님 for each spawned
   // 막둥이 when invoked inside tmux with tmux.enabled=true in makdoong2-team.json.
   // No-op otherwise, so non-tmux runs are unaffected.
@@ -533,8 +559,8 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         const guard = orphanCleanupGuard(p, {
           nowMs,
           ownerPid: tmuxMonitor.ownerProcessId,
-          lastToolExecuteAtMs: sessionLastToolExecuteAt.get(sid),
-          activeToolCount: sessionActiveToolCount.get(sid),
+          lastToolExecuteAtMs: registry.lastToolExecuteAt.get(sid),
+          activeToolCount: activeToolCount(registry, sid),
           toolAliveWindowMs: TOOL_EXECUTE_ALIVE_WINDOW_MS,
         });
         if (guard) {
@@ -560,11 +586,9 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         if (sessionGone) {
           logger.debug(`[orphan-scan] pane-kill-only (session gone) sid=${sid} reason=${reason}`);
           await tmuxMonitor.forceKillBySessionId(sid).catch(() => undefined);
-          sessionIssue.delete(sid);
+          forgetSession(registry, sid);
           pendingDispatch.delete(sid);
           subSessionIds.delete(sid);
-          sessionLastToolExecuteAt.delete(sid);
-          sessionActiveToolCount.delete(sid);
         } else {
           logger.debug(`[orphan-scan] cleaning sid=${sid} reason=${reason}`);
           await cleanupSubSession(sid, { success: false, reason });
@@ -744,26 +768,26 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   const pluginOwnPatterns = pluginOwnAllowPatterns();
   const configuredAllowPatterns: string[] = [
     ...pluginOwnPatterns,
-    ...loadOpencodeExternalDirAllows(),
+    ...loadOpencodeExternalDirAllows((reason) =>
+      logger.warn(`[permission] opencode.json external_directory allows unavailable — ${reason} directory=${directory}`),
+    ),
   ];
+  // 사본마다 한 번씩 찍힌다 — 같은 pid 에 개수가 다른 두 줄이 있으면 사본이
+  // 둘이라는 뜻이지 설정이 바뀐 것이 아니다 (issue #10 의 7개→5개). directory 를
+  // 같이 남겨 어느 사본이 몇 개를 읽었는지 바로 대응시킨다.
   logger.debug(
     `[permission] plugin-own allows: ${pluginOwnPatterns.length}개 ` +
-    `(${pluginOwnPatterns.join(", ")})`,
+    `(${pluginOwnPatterns.join(", ")}) directory=${directory}`,
   );
   logger.debug(
     `[permission] configured external_directory allows: ${configuredAllowPatterns.length}개` +
-    (configuredAllowPatterns.length ? ` (${configuredAllowPatterns.slice(0, 3).join(", ")}…)` : ""),
+    (configuredAllowPatterns.length ? ` (${configuredAllowPatterns.slice(0, 3).join(", ")}…)` : "") +
+    ` directory=${directory}`,
   );
 
-  const sessionLastToolExecuteAt = new Map<string, number>();
-  const sessionActiveToolCount = new Map<string, number>();
-
-  /** 활성 툴 카운터를 1 감소시킨다 (0 이면 항목 삭제). */
-  function releaseActiveTool(sid: string): void {
-    const cur = sessionActiveToolCount.get(sid) ?? 0;
-    if (cur <= 1) sessionActiveToolCount.delete(sid);
-    else sessionActiveToolCount.set(sid, cur - 1);
-  }
+  // 툴 실행 신호는 레지스트리(`registry.activeToolCalls` / `lastToolExecuteAt`)에
+  // 있다 — before 훅에서 toolStarted, after 훅·툴 part 종결·idle 에서 toolFinished /
+  // clearToolCalls. 종전의 사본-로컬 카운터는 issue #10 으로 제거됐다.
   const TOOL_EXECUTE_ALIVE_WINDOW_MS = 300_000;
 
   // MESSAGE_STALL 후 client.session.abort() 는 즉시 반환하지만 opencode 서버는 잠시 후
@@ -771,7 +795,10 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   // 계속 발사할 수 있어 좀비 실행이 발생한다. abort 직후 session.deleted 를 대기하는
   // 헬퍼로 이 race window 를 닫는다. event 핸들러가 session.deleted 를 수신하면 이 map 의
   // pending waiter 를 resolve 한다.
-  const sessionDeletedWaiters = new Map<string, Array<() => void>>();
+  // 대기자 목록은 레지스트리에 있다 — session.deleted 이벤트는 세션의 디렉토리
+  // 사본에만 도착하므로(worktree 서브세션이면 worktree 사본), 여기서 기다리는
+  // main 사본과 이벤트를 받는 사본이 같은 목록을 봐야 한다.
+  const sessionDeletedWaiters = registry.sessionDeletedWaiters;
   const waitForSessionDeleted = (sessionId: string, maxWaitMs: number): Promise<boolean> => {
     return new Promise<boolean>((resolve) => {
       let done = false;
@@ -799,7 +826,9 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   const eventMaxChars = readLoggingConfig(config.logging).eventMaxChars;
 
   const WRITE_TOOLS = new Set(["write", "edit", "apply_patch"]);
-  const sessionWorktree = new Map<string, string>();
+  // dispatch 사본이 채우고 worktree 사본의 tool.execute.after 가 읽는다 — 레지스트리.
+  // 디스크의 session-index.ndjson 은 사본이 다른 프로세스에 있을 때의 2차 경로로 남는다.
+  const sessionWorktree = registry.sessionWorktree;
 
   const extractFilePathFromToolArgs = (args: unknown): string | undefined => {
     if (!args || typeof args !== "object") return undefined;
@@ -906,6 +935,44 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     return { ok: true, relPath };
   };
 
+  // 폴러에 건네는 권한 요청 소스. v1 SDK 클라이언트에는 `permission` 네임스페이스가
+  // 없고, `GET /permission` 은 클라이언트가 묶인 디렉토리 스코프라 worktree
+  // 서브세션의 요청이 보이지 않는다 — 종전에는 이 소스가 항상 undefined 라
+  // 자동 승인·거부 루프가 한 번도 돌지 않았고 stall 메시지는 언제나 "unknown" 이었다
+  // (issue #10). 대신 그 세션의 사본이 `permission.asked` 이벤트로 레지스트리에
+  // 넣은 것을 읽고, 응답은 세션-라우팅 엔드포인트
+  // (`POST /session/{id}/permissions/{permissionID}`) 로 보낸다 — 세션 ID 로
+  // 라우팅되므로 어느 사본에서 불러도 맞는 Instance 에 닿는다.
+  const permissionSourceFor = (sessionId: string) => ({
+    list: async () => ({
+      data: pendingPermissionsFor(registry, sessionId).map((p) => ({
+        id: p.id,
+        sessionID: p.sessionID,
+        permission: p.permission,
+        patterns: p.patterns,
+      })),
+    }),
+    reply: async (req: { path: { requestID: string }; body: { reply: string } }) => {
+      const c = client as unknown as {
+        postSessionIdPermissionsPermissionId?: (o: {
+          path: { id: string; permissionID: string };
+          body: { response: string };
+        }) => Promise<unknown>;
+      };
+      if (typeof c.postSessionIdPermissionsPermissionId !== "function") {
+        throw new Error("permission reply endpoint unavailable on this client");
+      }
+      const res = await c.postSessionIdPermissionsPermissionId({
+        path: { id: sessionId, permissionID: req.path.requestID },
+        body: { response: req.body.reply },
+      });
+      // permission.replied 이벤트는 세션의 사본에 도착하지만, 그 사본이 이벤트를
+      // 놓치더라도 다음 폴이 같은 요청을 다시 처리하지 않도록 즉시 뺀다.
+      permissionReplied(registry, sessionId, req.path.requestID);
+      return res;
+    },
+  });
+
   const pollSubSession = (
     sessionId: string,
     timeoutMs = substageTimeoutMs,
@@ -913,7 +980,8 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     onNudge?: (sessionId: string, elapsedMs: number) => Promise<void>,
     messageStallThresholdMs?: number,
   ): Promise<PollOutcome> =>
-    pollSubSessionCore(client as any, sessionId, {
+    // 클래스 인스턴스를 spread 하면 프로토타입 메서드가 빠지므로 필요한 것만 집는다.
+    pollSubSessionCore({ session: (client as any).session, permission: permissionSourceFor(sessionId) }, sessionId, {
       timeoutMs,
       allowedWorktree,
       configuredAllowPatterns,
@@ -928,15 +996,25 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
       contentStableCompletionMs: 300_000,
       preambleOnlyTextThreshold: 200,
       isRecentlyActive: () => {
-        if ((sessionActiveToolCount.get(sessionId) ?? 0) > 0) return true;
-        const last = sessionLastToolExecuteAt.get(sessionId);
+        if (registryIsToolExecuting(registry, sessionId)) return true;
+        const last = registry.lastToolExecuteAt.get(sessionId);
         return typeof last === "number" && Date.now() - last < TOOL_EXECUTE_ALIVE_WINDOW_MS;
       },
-      // "지금 이 순간 툴이 실행 중인가" — before 훅에서 올리고 after 훅에서 내리는
-      // 활성 카운터 그대로다. isRecentlyActive 의 5분 창과 달리 순간값이라 완료
+      // "지금 이 순간 툴이 실행 중인가" — before 훅에서 넣고 after 훅에서 빼는
+      // callID 집합 그대로다. isRecentlyActive 의 5분 창과 달리 순간값이라 완료
       // 판정에 쓸 수 있다. 폴러가 읽는 메시지 스냅샷보다 항상 앞선다 (issue #7:
       // tool.execute.before 발화 110ms 뒤의 폴이 tool part 를 아직 못 봤다).
-      isToolExecuting: () => (sessionActiveToolCount.get(sessionId) ?? 0) > 0,
+      //
+      // 읽기 전에 스냅샷과 대조한다: 툴이 throw 하면 after 훅이 오지 않아 항목이
+      // 남는데, 스냅샷에서 이미 completed/error 인 callID 는 확실히 끝난 것이다.
+      // 스냅샷에 아직 없는 callID 는 그대로 둔다 (110ms 창).
+      isToolExecuting: (snapshot) => {
+        const settled = settleToolCalls(registry, sessionId, snapshot.settledCallIDs);
+        if (settled > 0) {
+          logger.debug(`[pollSubSession] settled ${settled} stale tool call(s) from snapshot sid=${sessionId}`);
+        }
+        return registryIsToolExecuting(registry, sessionId);
+      },
     });
 
   // ── sessionID → agent 매핑. chat.params hook에서 채우고, tool.execute.before
@@ -962,7 +1040,9 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   // git branch 이름이나 worktree 경로를 추론하지 않고 신뢰할 수 있는 ISSUE를
   // 직접 전달받을 수 있다. 이 설계로 multi-worktree / 비-makdoong2-team 워크트리
   // 오탐 문제가 근본적으로 해결된다.
-  const sessionIssue = new Map<string, string>();
+  // 레지스트리에 둔다 — dispatch 사본이 넣고, 서브세션의 훅 사본(guard-bash.sh /
+  // sync-state.sh 인자)이 읽는다.
+  const sessionIssue = registry.sessionIssue;
 
   // ── skill_mcp lazy-load 방어 (mcp_name → skill_name 매핑).
   //    SKILL.md frontmatter 를 스캔해 각 MCP 서버가 어떤 skill 에 embedded 인지
@@ -1052,11 +1132,9 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
         pendingDelete.set(sid, Date.now());
       }
     } finally {
-      sessionIssue.delete(sid);
+      forgetSession(registry, sid);
       pendingDispatch.delete(sid);
       subSessionIds.delete(sid);
-      sessionLastToolExecuteAt.delete(sid);
-      sessionActiveToolCount.delete(sid);
     }
   };
 
@@ -1176,22 +1254,72 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
   })();
 
   return {
+    // 이벤트는 **세션의 디렉토리 사본**에만 도착한다 (opencode 의 이벤트 브리지가
+    // `location.directory` 로 필터링한다). worktree 서브세션의 permission.asked ·
+    // message.part.updated · session.deleted 는 worktree 사본이 받고, 그 세션을
+    // 폴링하는 것은 main 사본이다. 그래서 여기서 관측한 것은 전부 레지스트리에
+    // 쓴다 — 사본-로컬 변수에 쓰면 폴러는 영영 보지 못한다 (issue #10).
     event: async ({ event }: { event: { type: string; properties?: Record<string, unknown> } }) => {
-      if (logger.isDebug() && event?.type?.startsWith("session.")) {
+      if (logger.isDebug() && (event?.type?.startsWith("session.") || event?.type?.startsWith("permission."))) {
         try {
-          logger.debug(`[event] type=${event.type} properties=${JSON.stringify(event.properties).slice(0, eventMaxChars)}`);
+          logger.debug(`[event] type=${event.type} directory=${directory} properties=${JSON.stringify(event.properties).slice(0, eventMaxChars)}`);
         } catch { /* ignore */ }
+      }
+      if (event?.type === "permission.asked" || event?.type === "permission.updated") {
+        const req = normalizePermissionEvent(event.type, event.properties);
+        if (req) {
+          permissionAsked(registry, req);
+          logger.debug(
+            `[event] permission pending sid=${req.sessionID} requestID=${req.id} ` +
+            `permission=${req.permission} patterns=${JSON.stringify(req.patterns)}`,
+          );
+        }
+        return;
+      }
+      if (event?.type === "permission.replied") {
+        const props = event.properties as { sessionID?: unknown; requestID?: unknown; permissionID?: unknown } | undefined;
+        const sid = typeof props?.sessionID === "string" ? props.sessionID : undefined;
+        const requestID =
+          typeof props?.requestID === "string" ? props.requestID
+          : typeof props?.permissionID === "string" ? props.permissionID
+          : undefined;
+        if (sid && requestID) permissionReplied(registry, sid, requestID);
+        return;
+      }
+      if (event?.type === "message.part.updated") {
+        // 툴 part 가 completed/error 로 바뀌면 그 호출은 끝났다. 툴이 throw 한
+        // 경우 tool.execute.after 가 오지 않으므로 이것이 유일한 종결 신호다.
+        const props = event.properties as { sessionID?: unknown; part?: Record<string, unknown> } | undefined;
+        const part = props?.part;
+        if (part && part.type === "tool") {
+          const state = part.state as { status?: unknown } | undefined;
+          const status = typeof state?.status === "string" ? state.status : undefined;
+          if (status === "completed" || status === "error") {
+            const sid =
+              typeof part.sessionID === "string" ? part.sessionID
+              : typeof props?.sessionID === "string" ? props.sessionID
+              : undefined;
+            const callID = typeof part.callID === "string" ? part.callID : undefined;
+            if (sid) toolFinished(registry, sid, callID);
+          }
+        }
+        return;
+      }
+      if (event?.type === "session.idle") {
+        // idle 로 전이한 세션에 실행 중인 툴은 정의상 없다 — 남은 항목은 전부 누수다.
+        const props = event.properties as { sessionID?: unknown } | undefined;
+        if (typeof props?.sessionID === "string") clearToolCalls(registry, props.sessionID);
+        return;
       }
       if (event?.type === "session.deleted") {
         const props = event.properties as { info?: { id?: string } } | { sessionID?: string } | undefined;
         const sid = (props as any)?.info?.id ?? (props as any)?.sessionID;
         if (sid) {
-          const waiters = sessionDeletedWaiters.get(sid);
-          if (waiters && waiters.length > 0) {
-            for (const w of [...waiters]) {
-              try { w(); } catch { /* ignore */ }
-            }
-          }
+          notifySessionDeleted(registry, sid);
+          // 세션이 사라졌으니 실행 신호·권한 요청도 의미가 없다. sessionIssue /
+          // sessionWorktree 는 dispatch 사본의 cleanupSubSession 이 지운다.
+          clearToolCalls(registry, sid);
+          registry.pendingPermissions.delete(sid);
         }
         return;
       }
@@ -1248,16 +1376,17 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
 
       logger.debug(`[makdoong2-team hook] tool.execute.before fired: tool="${input.tool}" sessionID="${sessionID}" agent="${agent ?? "unknown"}" callID="${(input as any).callID}"`);
 
-      // 활성 툴 카운터는 **증분과 감소가 반드시 짝을 이뤄야 한다**.
+      // 활성 툴 집합은 **넣기와 빼기가 반드시 짝을 이뤄야 한다**.
       // tool.execute.after 는 툴이 실제로 실행된 뒤에만 돈다. 아래 가드들이 throw 하면
       // (차단된 bash · sealed 서브에이전트의 outer-world 툴 · leader 의 파일 쓰기 등)
-      // after 훅이 돌지 않아 카운터가 영구히 ≥1 로 남고, 그러면 isRecentlyActive() 가
+      // after 훅이 돌지 않아 항목이 영구히 남고, 그러면 isRecentlyActive() 가
       // 항상 true 가 되어 그 세션의 gone 감지와 orphan 회수가 **영구 비활성**된다.
       // 차단은 정상 동작이라 반드시 일어나므로 확정적으로 누수됐다.
-      if (sessionID) {
-        sessionLastToolExecuteAt.set(sessionID, Date.now());
-        sessionActiveToolCount.set(sessionID, (sessionActiveToolCount.get(sessionID) ?? 0) + 1);
-      }
+      // (툴 자체가 throw 하는 경우 — 권한 거부 · 파일 없음 — 는 여기서 잡을 수 없다.
+      // 그쪽은 폴러가 스냅샷의 completed/error part 로 정리한다: settleToolCalls.)
+      const activeToolKey = sessionID
+        ? toolStarted(registry, sessionID, (input as any).callID as string | undefined)
+        : undefined;
       try {
 
         if (sessionID && (toolLower === "dispatch_stage" || toolLower === "dispatch_verifier")) {
@@ -1558,8 +1687,8 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
           throw new Error((r.stderr || "makdoong2-team gate blocked").trim());
         }
       } catch (err) {
-        // 차단으로 끝난 호출은 실행되지 않았다 → 증분을 되돌린다.
-        if (sessionID) releaseActiveTool(sessionID);
+        // 차단으로 끝난 호출은 실행되지 않았다 → 넣은 항목을 되돌린다.
+        if (sessionID) toolFinished(registry, sessionID, activeToolKey);
         throw err;
       }
     },
@@ -1573,8 +1702,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
       const toolLowerAfter = (input.tool || "").toLowerCase();
       const afterSessionID = (input as any).sessionID as string | undefined;
       if (afterSessionID) {
-        sessionLastToolExecuteAt.set(afterSessionID, Date.now());
-        releaseActiveTool(afterSessionID);
+        toolFinished(registry, afterSessionID, (input as any).callID as string | undefined);
       }
 
       // ── Issue-reporter 표시 증명 기록·소멸 ──
