@@ -192,6 +192,23 @@
 - **필수 마커 정의는 게이트 · stage spec 의 self_check · verifier 세 곳이 항상 일치해야 한다.** 한 곳만 갖고 있으면 substage 가 `done=true` + VERIFIED 로 끝난 뒤 **다음 게이트가 하드 차단**하는 정지가 난다. 실제 사례: 당시 `stage3-scope-verify.sh`(현 `stage-analysis-verify.sh`) 는 `spec_hash` 가 있으면 `draft_path` 를 요구하는데, `02-requirements.md` 의 self_check 8항목에도 verifier 기준에도 `draft_path` 가 없어서 마커를 빠뜨린 채 통과됐다 (issue #6-①). verifier 가 **마커가 아니라 파일 존재**를 보고 있었던 것이 검출 실패의 직접 원인이다 — 파일은 멀쩡했다. 마커를 추가할 때는 세 곳을 한 번에 고치고, `test/gate-requirements-quality.test.ts` 의 "스펙 정합" 블록에 케이스를 추가한다.
 
 
+### 테스트 동반 원칙은 requirements 의 선언을 따른다 (hardrule)
+
+- `2_implementation.dev` 의 "테스트 동반 원칙" 은 **무조건 적용되지 않는다.** 판정 입력은 `1_planning.requirements` 가 승인·동결한 `.stages."1_planning".substages."requirements".test_scope.new_tests_required` 하나다. **마커 부재·`null` 은 `true`** 로 간주한다 (fail-closed — 선언 누락이 테스트 면제로 둔갑하지 않는다).
+- `false` 일 때 `self_check.new_tests_added` 는 `false` 가 정답이며, 그것이 슬립이 아님을 나타내는 `.stages."2_implementation".substages."dev".new_tests_waived=true` 를 **한 쌍으로** 기록한다. 마커 하나만 있으면 `stage4-dev-post-verify.sh` 가 BLOCK 한다.
+- **마커 정의 3곳 일치**: 게이트(`gates/stage4-dev-post-verify.sh`) · stage spec self_check(`stages/05-worktree-dev.md` §4-4-pre·§4-4, `stages/02-requirements.md` §2-6a, `stages/01-planning.md` §2-5c) · verifier(`agents/makdoong2-verifier.md` §2 의 `2_implementation.dev`). 한 곳만 고치면 승인된 스코프 아웃이 다시 무한 반려로 돌아온다.
+- **`test_scope` 는 planner 만 쓴다. engineer·verifier 는 읽기만 한다.** engineer 가 "테스트가 불필요해 보인다" 는 자체 판단으로 이 마커를 기록하면 요구사항 동결(§2-4a)을 우회하는 것이다 — 선언과 실제 작업이 어긋나면 `done` 을 기록하지 말고 리더에게 보고한다.
+- **verifier 는 sub-agent output 의 문구로 판정하지 않는다.** 판정 근거는 state.json 마커 + 게이트 재실행이고 output 은 보조다. 종전 기준("output 에 '테스트 추가' 명시")은 텍스트 없이 끝난 세션(`preamble_only`, `.done=true` 만으로 성공 처리되는 정상 경로)까지 반려해, 승인된 스코프 밖의 테스트 코드를 유입시켰다 (issue #11).
+- 회귀: `test/dev-test-scope-declaration.test.ts`. 상세: ARCHITECTURE.md §6.3.
+
+### state.json 사본은 cwd 마다 하나다 — 쓴 사본과 읽는 사본을 맞춘다 (hardrule)
+
+- `state.sh root()` 는 호출 cwd 의 git toplevel 을 쓴다. 전용 worktree 가 생긴 뒤 main repo cwd 에서 실행한 `set` 은 **main 사본만** 고치고, `dispatch_stage` 의 done 검사와 dev 이후 게이트는 **worktree 사본**을 본다.
+- 이 비대칭이 REJECTED 재작업 규약을 구조적으로 깨뜨렸다: 규약은 리더에게 `.done=false` 재설정을 시키는데 리더의 cwd 는 main repo 다. 규약대로 했는데 `already_done: true` 로 차단되고, 오류 문구는 원인을 알려주지 않아 같은 실수가 반복됐다 (issue #11, 2/2회 재현).
+- 방어는 셋이다. ① `dispatch_stage` 가 서브세션 생성 전 **정방향 동기화**(main→worktree)를 한다 — `dispatch_verifier` 가 이미 하던 것으로, 없던 쪽이 비대칭이었다. ② `already_done` 응답이 두 사본의 `done` 을 **실제로 읽어** `state_copy_mismatch` / `main_repo_done` / `worktree_done` 으로 보고한다 (추측이 아니라 관측). ③ `state.sh set` 이 `root()` 와 `.worktree` 가 갈리면 stderr 로 경고한다 — 쓰기는 막지 않고 stdout 계약·종료 코드도 그대로다.
+- **정방향 동기화는 main 을 durable 사본으로 본다** (worktree 는 forward-seed / reverse-merge 되는 작업 사본 — `finally` 의 REVERSE 와 같은 불변식). 그러므로 worktree cwd 에서 직접 고친 뒤 재-dispatch 하는 것은 이제 틀린 절차다.
+- 회귀: `test/dev-test-scope-declaration.test.ts` 의 "state.json 사본 분리 진단" 블록.
+
 ### 리뷰 인라인 코멘트 (hardrule)
 - **1 파일 = 1 commit 원칙에 대응하여 인라인 코멘트도 커밋 1개당 최소 1개** (`stage8-post-review-verify.sh` 강제).
 - publisher 는 posting 전에 `review-comment-plan.json` 계획 아티팩트를 먼저 산출한다 (`<worktree>/.makdoong2-team/<이슈키>/review-comment-plan.json`). 스키마 및 절차 상세: `stages/09-review-comments.md` §8-2.
