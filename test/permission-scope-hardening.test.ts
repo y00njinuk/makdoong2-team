@@ -70,7 +70,7 @@ describe("pluginOwnAllowPatterns — 설정과 무관한 자가 허용", () => {
     const src = read("src/opencode-plugin.ts");
     assert.match(
       src,
-      /const configuredAllowPatterns[\s\S]{0,200}\.\.\.pluginOwnPatterns,[\s\S]{0,120}loadOpencodeExternalDirAllows\(\)/,
+      /const configuredAllowPatterns[\s\S]{0,200}\.\.\.pluginOwnPatterns,[\s\S]{0,120}loadOpencodeExternalDirAllows\(/,
       "자가 허용이 configuredAllowPatterns 에 합쳐지지 않는다 — 부분 설치가 다시 PERMISSION_STALL 로 나타난다",
     );
   });
