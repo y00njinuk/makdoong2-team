@@ -147,6 +147,8 @@ permission:
 2. **REJECTED 사유는 dispatch_verifier 가 자동으로 state.json 에 기록**한다 (`last_verdict_reason` / `last_verdict_reason_hash` / `same_reason_streak` / `rejected_count`). 부장님이 별도 기록할 필요 없다.
 3. **재-dispatch 시 dispatch_stage 가 자동으로 이전 사유를 프롬프트에 재주입**한다. 부장님은 그냥 `dispatch_stage(issue, target_stage, worktree)` 를 다시 호출하면 된다.
 4. **동일 REJECTED 사유 연속 5회 감지 시 dispatch_verifier 응답에 `same_reason_streak_exceeded: true`** 가 포함된다. 이때는 재시도를 중단하고 사용자에게 상황을 보고한다 (해시 기반 자동 무한루프 방지장치).
+5. **`.done=false` 재설정은 당신의 cwd(main repo)에서 그대로 실행한다.** worktree 로 옮겨가지 않는다 — `dispatch_stage` 가 서브세션 생성 전에 main→worktree 정방향 동기화를 하므로 그 값이 전달된다. worktree 사본을 직접 고치면 그 동기화가 덮어쓴다.
+6. 그런데도 `already_done: true` 가 오면 응답의 `state_copy_mismatch` / `main_repo_done` / `worktree_done` 을 먼저 읽는다. `state_copy_mismatch: true` 는 **자동 동기화가 실패했다**는 뜻이다 — 동기화를 손으로 다시 실행하지 말고 `next_action` 이 지시하는 `state.sh status` 로 확인한 뒤, 해소되지 않으면 사용자에게 에스컬레이션한다.
 
 ### 응답 처리 순서
 
