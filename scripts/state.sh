@@ -61,6 +61,37 @@ validate_issue() {
 
 sp()    { validate_issue "$1"; echo "$(root)/.makdoong2-team/$1/state.json"; }
 
+# ── 사본 불일치 경고 ────────────────────────────────────────────────────────
+# state.json 사본은 cwd(git toplevel)마다 하나씩이다. 전용 worktree 가 이미 있는데
+# main repo cwd 에서 `set` 을 실행하면, 갱신되는 것은 main 사본이고 dispatch_stage /
+# 게이트가 보는 것은 worktree 사본이다 — 쓴 사람은 반영됐다고 믿는데 파이프라인은
+# 옛 값을 본다. 실제로 REJECTED 재작업 규약(`.done=false` 재설정)이 이 경로에서
+# 두 번 연속 `already_done: true` 오차단으로 되돌아왔고, 오류 문구도 원인을 알려주지
+# 않아 같은 실수가 반복됐다 (issue #11).
+#
+# 쓰기 자체는 막지 않는다 — main 사본을 고치는 것이 옳은 상황도 있다. 어느 사본을
+# 건드렸는지 stderr 로 알리기만 한다 (stdout 계약·종료 코드 불변).
+norm_path() { if [ -d "$1" ]; then (cd "$1" && pwd -P); else printf '%s' "$1"; fi; }
+
+warn_if_copy_split() {
+  local file="$1" here there
+  [ -f "${file}" ] || return 0
+  there="$(jq -r '.worktree // ""' "${file}" 2>/dev/null || true)"
+  { [ -n "${there}" ] && [ "${there}" != "null" ] && [ -d "${there}" ]; } || return 0
+  here="$(norm_path "$(root)")"
+  there="$(norm_path "${there}")"
+  [ "${here}" != "${there}" ] || return 0
+  cat >&2 <<WARN
+[state.sh] 경고: 지금 갱신한 것은 이 cwd 의 사본이지, 이 이슈의 전용 worktree 사본이 아니다.
+  갱신한 사본 : ${here}
+  worktree    : ${there}
+  state.json 사본은 cwd(git toplevel)마다 하나씩이고, dispatch_stage 와 dev 이후 게이트는
+  worktree 사본을 본다. 자동 동기화(wt-sync-ignored.sh)는 서브에이전트 세션 앞뒤에서만 돌므로
+  이 쓰기는 다음 dispatch 까지 worktree 사본에 반영되지 않을 수 있다.
+  의도한 것이 worktree 사본이면 그 경로를 cwd 로 하여 다시 실행한다.
+WARN
+}
+
 # usage_die <시그니처> [부연 설명...]
 # `${2:?}` 가 뱉는 raw bash 에러(`line 127: 2: parameter null or not set`)는 복구
 # 작업 중인 에이전트에게 아무것도 알려주지 못한다. 대신 무엇을 어떻게 부를지 적는다.
@@ -294,6 +325,7 @@ JSON
     P="$(sp "${ISSUE}")"
     check_flat_stage_notation "$Q"
     write_json_atomic "$P" "set ${Q}" "$Q = $V"
+    warn_if_copy_split "$P"
     echo "state[$ISSUE] $Q = $V" ;;
   append)
     ISSUE="${1:-}"; Q="${2:-}"; V="${3:-}"
