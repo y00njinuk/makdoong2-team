@@ -60,6 +60,7 @@ const STEPS = [
   "node --test test/gate-post-pr-verify.test.ts",
   "node --test test/gate-post-review-verify.test.ts",
   "node --test test/gate-requirements-quality.test.ts",
+  "node --test test/dev-test-scope-declaration.test.ts",
   "node --test test/worktree-sync-gate.test.ts",
   "node --test test/planner-prompt-early-exit.test.ts",
   "node --test test/plugin-bug-fixes.test.ts",
