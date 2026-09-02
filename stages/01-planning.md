@@ -225,6 +225,21 @@ bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.scope_size' '"large"'
 bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.categorized_by' '"1_planning.requirements"'
 ```
 
+**테스트 범위 선언 (`test_scope` — 기계 판독 마커, 필수)**: 위 `**테스트 범위**` 서술은 사람이 읽는 문장이라 dev 게이트·verifier 가 해석할 수 없다. 같은 결정을 마커로 한 번 더 기록한다 — 없으면 `2_implementation.dev` 의 테스트 동반 원칙이 승인된 스코프 아웃을 보지 못하고 무조건 적용된다 (issue #11). 상세: `stages/02-requirements.md` §2-6a.
+
+```bash
+# 테스트를 동반하는 일반적인 경우
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".test_scope' \
+  '{"new_tests_required": true, "unit": "<대상 클래스/메서드>", "integration": "<빌드 플랜명/시나리오>", "rationale": "<한 줄 근거>"}'
+
+# 테스트 추가를 이번 이슈 범위에서 제외하기로 승인한 경우 (스코프 아웃에도 함께 명시)
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".test_scope' \
+  '{"new_tests_required": false, "unit": null, "integration": "<기존 통합 테스트로만 검증>", "rationale": "<왜 제외가 타당한지>"}'
+```
+
+- 마커 부재는 `new_tests_required: true` 로 간주된다 (fail-closed) — 선언 누락이 테스트 면제로 둔갑하지 않는다.
+- `test_scope_defined` self_check 항목은 **이 마커를 실제로 기록했다는 뜻**이다. 기록 후 값을 읽어 확인한다.
+
 ### 2-6. Requirements 완료 기록
 
 ```bash
