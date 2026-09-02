@@ -98,6 +98,8 @@
 - main↔worktree 상태 동기화는 **플러그인이** 한다 (`wt-sync-ignored.sh` forward/reverse). 에이전트가 경계를 직접 건널 일은 없다.
 - **리더에게 돌려주는 `next_action` 에 절대경로를 싣지 않는다.** bash 명령이 참조하는 디렉토리만으로 승인이 발화하므로, 안내를 따르는 순간 primary 세션이 사용자를 멈춰 세운다. `state.sh status/init <이슈키>` 는 경로 인자 없이 cwd 기준으로 동작한다. 동기화가 필요하면 리더에게 시키지 말고 플러그인이 직접 시도한다 (`SELF_HEAL`).
 - 거부 사유 3종(`outside_allowed_roots` / `non_external_permission` / `tool_call_stall`)은 처방이 서로 달라 뭉개지 않는다. 상세: ARCHITECTURE.md §4.2a. 회귀: `test/permission-scope-hardening.test.ts`.
+- **자동 승인 범위는 `dirname(worktree)` 한 단계로 고정한다 — 넓히지 않는다 (hardrule).** 이 판정 결과는 사람 확인 없이 `allow` 로 응답되므로, 조부모를 열면 `/root/IdeaProjects/*` 하나가 형제 프로젝트 전부를, 루트면 파일시스템 전체를 무단 승인 대상으로 만든다. 조부모 요청 차단은 **정상 동작**이다 (issue #12 의 스코프 확장 제안을 채택하지 않은 이유).
+- **`permission_stall` 은 "승인 대기" 가 아니라 "이미 종료됨" 이다 (hardrule).** 권한은 자동 거부됐고 세션도 abort 된 뒤이며, 헤드리스 서브세션에는 승인 채널이 없다. 종전에는 `attempts` 가 1에서 늘지 않고 `next_action` 도 비어 있어, 리더가 그 공백을 "승인한 뒤 재개해 주세요" 로 채워 워크플로를 세웠다 (issue #12). 방어는 셋이다: ① `outside_allowed_roots` 는 차단 패턴·허용 범위·대체 조치를 프롬프트에 주입해 재디스패치한다 (서브세션은 대화 이력을 승계하지 못하므로 주입 없는 재시도는 같은 지점에서 다시 죽는다) ② 최종 응답이 `awaiting_user_approval: false` / `session_aborted: true` / `permission_*` / `next_action` 을 싣는다 ③ 최종 실패는 `hang_history` 에 `permission_stall:<사유>` 로 남아 cross-call 상한이 무장한다. 회귀: `test/poll-permission-scope.test.ts` · `test/dispatch-stage-redispatch.test.ts` 의 "issue #12" 블록.
 
 ### 게이트의 state 조회 (hardrule)
 - `state.sh get` 은 **실패해도 stdout 에 `null` 한 줄을 찍고 exit 1** 한다 (게이트들이 의존하는 계약). 따라서 `q(){ … || echo "__MISSING__"; }` 는 그 위에 한 줄을 **덧붙여** `null\n__MISSING__` 두 줄을 만들고, 그 값은 `= "null"` 에도 `= "__MISSING__"` 에도 걸리지 않는다 — **부재/손상이 "값이 있음" 으로 통과**한다.
