@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { pollSubSession, isWithinWorktreeScope, isMatchedByConfiguredRules } from "../dist/poll-sub-session.js";
+import { pollSubSession, isWithinWorktreeScope, isMatchedByConfiguredRules,
+  worktreeAllowedScope, pollOutcomeToLegacy, PERMISSION_STALL_NEXT_ACTION } from "../dist/poll-sub-session.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PLUGIN_SRC = readFileSync(resolve(HERE, "../src/opencode-plugin.ts"), "utf8");
@@ -394,5 +395,127 @@ describe("pollSubSession — permission reject branch (outside worktree scope or
     // Critical assertion: permission from ses_OTHER must NOT be replied to.
     assert.equal(replyCalls.length, 0, "must not reply to other session's permission");
     assert.ok(outcome.kind !== "permission_stall", "other session's permission must not cause stall");
+  });
+});
+
+// ── GitHub #12 — 조부모 요청 차단은 유지하고, 회복은 "범위 확장" 이 아니라 안내로 한다 ──
+//
+// 관측된 정지: worktree=/root/IdeaProjects/<group>/<repo>-<KEY> 에서 engineer 의
+// read-only `glob` 이 /root/IdeaProjects/* 를 요청 → 스코프 밖 → 자동 거부 + abort
+// → dispatch_stage 하드 실패 → team-leader 가 "승인 대기" 로 오판 보고.
+//
+// 이슈의 제안 1(스코프를 조부모까지 확장)은 **채택하지 않는다.** 이 판정의 결과는
+// 사람의 확인 없이 `allow` 로 응답되므로, 조부모를 여는 순간 형제 프로젝트 전체가
+// 무단 승인 대상이 되고 루트(`/`)면 파일시스템 전체가 열린다. 차단은 정상 동작이고
+// 고칠 것은 (a) 무엇이 막혔고 어디까지 허용인지 알려주는 것, (b) 그 안내를 실어
+// 재디스패치하는 것, (c) "이미 종료됨" 을 리더가 오판하지 못하게 하는 것이다.
+describe("issue #12 — 자동 승인 범위는 worktree 부모 한 단계로 고정된다", () => {
+  const wt = "/root/IdeaProjects/tutorial/my-project-PROJ-123";
+
+  test("worktreeAllowedScope 는 부모 한 단계다 (조부모가 아니다)", () => {
+    assert.equal(worktreeAllowedScope(wt), "/root/IdeaProjects/tutorial");
+    assert.equal(worktreeAllowedScope("/root/IdeaProjects/tutorial/x/"), "/root/IdeaProjects/tutorial");
+  });
+
+  test("조부모 glob(`/root/IdeaProjects/*`) 은 계속 스코프 밖이다 — 확장 금지", () => {
+    assert.ok(!isWithinWorktreeScope(["/root/IdeaProjects/*"], wt));
+  });
+
+  test("루트 패턴은 어떤 worktree 에서도 통과하지 못한다", () => {
+    for (const pat of ["/", "/*", "/**"]) {
+      assert.ok(!isWithinWorktreeScope([pat], wt), `${pat} 가 자동 승인됐다 — 파일시스템 전체가 열린다`);
+    }
+  });
+
+  test("스코프 밖 요청은 outcome 에 permissionScope 를 실어 준다", async () => {
+    const SID = "ses_i12_scope";
+    const client = makePermissionClient({
+      sessionId: SID,
+      pendingPermissions: [{
+        id: "per_i12", sessionID: SID,
+        permission: "external_directory",
+        patterns: ["/root/IdeaProjects/*"],
+      }],
+      replyCalls: [],
+      abortCalls: [],
+    });
+
+    const outcome = await pollSubSession(client, SID, {
+      pollIntervalMs: 1,
+      timeoutMs: 5_000,
+      allowedWorktree: wt,
+      permissionCheckIntervalPolls: 5,
+    });
+
+    assert.equal(outcome.kind, "permission_stall");
+    assert.equal(outcome.permissionReason, "outside_allowed_roots");
+    assert.equal(
+      outcome.permissionScope,
+      "/root/IdeaProjects/tutorial",
+      "허용 범위를 안 실어 주면 서브에이전트도 리더도 경로를 좁힐 근거가 없다",
+    );
+  });
+});
+
+describe("issue #12 — outside_allowed_roots 처방은 차단 경로와 허용 범위를 담는다", () => {
+  const legacy = (over = {}) => pollOutcomeToLegacy({
+    kind: "permission_stall",
+    polls: 1, elapsedMs: 1000, stalledMs: 0,
+    permissionType: "external_directory",
+    permissionReason: "outside_allowed_roots",
+    permissionPatterns: ["/root/IdeaProjects/*"],
+    permissionScope: "/root/IdeaProjects/tutorial",
+    ...over,
+  });
+
+  test("차단된 패턴과 허용 범위가 본문에 그대로 나온다", () => {
+    const { text } = legacy();
+    assert.match(text, /\/root\/IdeaProjects\/\*/, "무엇이 막혔는지 안 알려준다");
+    assert.match(text, /\/root\/IdeaProjects\/tutorial/, "어디까지 허용인지 안 알려준다");
+  });
+
+  test("조회(glob/grep/read/list) 처방이 있다 — 종전에는 임시파일 안내뿐이었다", () => {
+    const { text } = legacy();
+    assert.match(text, /glob/, "read-only 조회가 막힌 경우의 처방이 없다");
+  });
+
+  test("임시 파일 처방은 그대로 남는다 (기존 회귀 유지)", () => {
+    assert.match(legacy().text, /\.makdoong2-team\/<이슈키>\/tmp\//);
+  });
+
+  test("scope 미상이어도 던지지 않고 일반 문구로 떨어진다", () => {
+    const { text } = legacy({ permissionScope: undefined, permissionPatterns: undefined });
+    assert.ok(text.length > 0);
+    assert.match(text, /패턴 미상/);
+  });
+});
+
+describe("issue #12 — permission_stall 은 '승인 대기' 로 보고될 수 없다", () => {
+  test("next_action 이 승인 요청 보고를 명시적으로 금지한다", () => {
+    const { nextAction } = pollOutcomeToLegacy({
+      kind: "permission_stall",
+      polls: 1, elapsedMs: 1, stalledMs: 0,
+      permissionReason: "outside_allowed_roots",
+    });
+    assert.equal(nextAction, PERMISSION_STALL_NEXT_ACTION);
+    assert.match(nextAction, /승인/);
+    assert.match(nextAction, /abort|종료/);
+  });
+
+  test("permission_stall 외의 outcome 에는 next_action 이 붙지 않는다", () => {
+    for (const outcome of [
+      { kind: "text", text: "ok", polls: 1, elapsedMs: 1 },
+      { kind: "timeout", polls: 1, elapsedMs: 1, transientFailures: 0 },
+      { kind: "session_gone", polls: 1, elapsedMs: 1 },
+    ]) {
+      assert.equal(pollOutcomeToLegacy(outcome).nextAction, undefined, `${outcome.kind} 에 next_action 이 붙었다`);
+    }
+  });
+
+  test("team-leader 프롬프트가 '승인 대기' 오판을 하드룰로 막는다", () => {
+    const md = readFileSync(resolve(HERE, "../agents/makdoong2-team-leader.md"), "utf8");
+    assert.match(md, /permission_stall.*승인 대기|승인 대기.*permission_stall/s, "하드룰 섹션이 없다");
+    assert.match(md, /awaiting_user_approval/, "응답 필드를 안 가리킨다");
+    assert.match(md, /permission_scope/, "허용 범위 필드를 안 가리킨다");
   });
 });
