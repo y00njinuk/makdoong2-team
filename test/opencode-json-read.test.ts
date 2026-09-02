@@ -96,6 +96,34 @@ describe("loadOpencodeExternalDirAllows — opencode.json 을 읽는다", () => 
     assert.deepEqual(withOpencodeJson("{ broken", () => loadOpencodeExternalDirAllows()), []);
   });
 
+  test("빈 배열로 끝난 이유를 diag 콜백으로 알린다 — 부재 / 파싱 실패 / 키 부재 (issue #10)", () => {
+    // 같은 pid 의 두 플러그인 사본이 7개와 5개를 읽은 사례에서, 어느 쪽이 왜
+    // 빈 배열이었는지 로그에 남지 않았다. 세 이유는 처방이 다르다.
+    const reasons: string[] = [];
+    const diag = (r: string) => { reasons.push(r); };
+    withOpencodeJson(null, () => loadOpencodeExternalDirAllows(diag));
+    assert.equal(reasons.length, 1);
+    assert.match(reasons[0], /^read failed: .*opencode\.json/);
+
+    reasons.length = 0;
+    withOpencodeJson("{ broken", () => loadOpencodeExternalDirAllows(diag));
+    assert.equal(reasons.length, 1);
+    assert.match(reasons[0], /^parse failed: .*opencode\.json \(\d+ bytes\)/);
+
+    reasons.length = 0;
+    withOpencodeJson(JSON.stringify({ plugin: ["makdoong2-team"] }), () => loadOpencodeExternalDirAllows(diag));
+    assert.equal(reasons.length, 1);
+    assert.match(reasons[0], /^permission\.external_directory absent/);
+
+    reasons.length = 0;
+    const got = withOpencodeJson(
+      JSON.stringify({ permission: { external_directory: { "/opt/pkg/**": "allow" } } }),
+      () => loadOpencodeExternalDirAllows(diag),
+    );
+    assert.deepEqual(got, ["/opt/pkg/**"]);
+    assert.deepEqual(reasons, [], "정상 경로에서는 부르지 않는다");
+  });
+
   test("external_directory 가 없으면 빈 배열", () => {
     assert.deepEqual(
       withOpencodeJson(JSON.stringify({ plugin: ["makdoong2-team"] }), () => loadOpencodeExternalDirAllows()),
