@@ -352,3 +352,25 @@ bash <SCRIPTS_DIR>/state.sh set <이슈키> '.policy.categorized_by' '"1_plannin
 ```
 
 self_check 에 `paths_explicit` / `test_scope_defined` / `atomic_units` / `scope_out_listed` 4항목을 함께 기록한다.
+
+### 2-6a. 테스트 범위 선언 (`test_scope` — 기계 판독 마커, 필수)
+
+위 `**테스트 범위**` 서술은 사람이 읽는 문장이라 dev 단계의 게이트·verifier 가 해석할 수 없다. **같은 결정을 기계가 읽는 마커로 한 번 더 기록한다** — 이 마커가 없으면 `2_implementation.dev` 의 "테스트 동반 원칙" 이 승인된 스코프 아웃을 보지 못한 채 무조건 적용되어, 요구사항 밖의 테스트 코드가 강제로 추가된다 (issue #11).
+
+```bash
+# 테스트를 동반하는 일반적인 경우
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".test_scope' \
+  '{"new_tests_required": true, "unit": "<대상 클래스/메서드>", "integration": "<빌드 플랜명/시나리오>", "rationale": "<한 줄 근거>"}'
+
+# 테스트 추가를 이번 이슈의 범위에서 제외하기로 승인한 경우
+bash <SCRIPTS_DIR>/state.sh set <이슈키> '.stages."1_planning".substages."requirements".test_scope' \
+  '{"new_tests_required": false, "unit": null, "integration": "<기존 통합 테스트로만 검증>", "rationale": "<왜 제외가 타당한지 — 예: 애플리케이션 코드가 아닌 배포 설정 전환이라 단위 테스트 대상이 없음>"}'
+```
+
+- `new_tests_required` 는 **`true` 가 기본값**이다. 마커를 기록하지 않으면 하류(게이트·verifier)는 `true` 로 간주한다 (fail-closed) — 선언 누락이 "테스트 면제" 로 둔갑하지 않는다.
+- `false` 로 선언하려면 **스코프 아웃 항목에 그 사실이 함께 적혀 있어야 하고**, §2-3-2 의 "스코프 아웃 항목은 항상 명시적으로 확인한다" 절차를 거쳐야 한다. `rationale` 은 빈 문자열·`null` 금지.
+- `test_scope_defined` self_check 항목은 **이 마커를 실제로 기록했다는 뜻**이다. 자기선언이 아니라 값을 읽어 확인한다:
+  ```bash
+  bash <SCRIPTS_DIR>/state.sh get <이슈키> '.stages."1_planning".substages."requirements".test_scope'
+  ```
+- 이 선언은 요구사항 명세의 일부다 — 동결(2-4a) 이후 변경은 §2-4a 3번의 재승인 절차만 허용한다. **engineer / verifier 는 이 마커를 쓰지 않는다. 읽기만 한다.**
