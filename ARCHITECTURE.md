@@ -325,11 +325,25 @@ team-leader 는 파일을 고치지 않지만 **bash 명령이 참조하는 디�
 
 | `permissionReason` | 뜻 | 처방 |
 |---|---|---|
-| `outside_allowed_roots` | 허용 경로 밖 접근 | 대체 스크래치 경로로 회복 |
+| `outside_allowed_roots` | 허용 경로 밖 접근 | 경로를 허용 범위 안으로 좁혀 재디스패치 (아래) |
 | `non_external_permission` | `external_directory` 가 아닌 권한이 도달 | 경로가 아니라 에이전트 frontmatter `permission:` 문제 (정식 키는 `edit`) |
 | `tool_call_stall` | 권한 요청 없이 툴 호출만 정지 | `npx makdoong2-team doctor` (시드 점검) |
 
 셋을 한 문장으로 뭉개면 호출자가 매번 같은 재시도를 고른다. 회귀는 `test/permission-scope-hardening.test.ts`.
+
+#### 자동 승인 범위는 worktree 부모 한 단계다 — 넓히지 않는다
+
+`isWithinWorktreeScope` 의 scope 는 `dirname(worktree)` 로 고정한다. 형제(메인 저장소·다른 worktree)까지 열고 그 위는 닫는다. 이 판정의 결과는 **사람의 확인 없이 `allow` 로 응답**되므로, 조부모 한 칸을 여는 순간 `/root/IdeaProjects/*` 하나가 형제 프로젝트 전부를, 루트면 파일시스템 전체를 무단 승인 대상으로 만든다. GitHub #12 가 제안한 스코프 확장을 채택하지 않은 이유다 — 차단은 정상 동작이었다.
+
+고친 것은 차단이 **회복 불가능한 하드 실패**였다는 점이다. 종전 `dispatch_stage` 는 `permission_stall` 을 받으면 곧장 최종 결과로 떨어졌다: `attempts` 가 1에서 늘지 않고 `next_action` 도 비어 있었다. 그 공백을 team-leader 가 "worktree 접근 권한 승인 대기 — 승인한 뒤 재개해 주세요" 로 채워, **헤드리스 서브세션에는 존재하지도 않는 승인 행위**를 사용자에게 요구하며 워크플로가 멈췄다 (2_implementation.dev, read-only `glob` 이 `/root/IdeaProjects/*` 를 요청한 건).
+
+세 가지를 넣었다:
+
+1. **회복 안내 재디스패치.** `outside_allowed_roots` 는 `session_gone` 과 같은 attempt 예산 안에서 재디스패치하되, 새 세션 프롬프트에 차단된 패턴·허용 범위(`permissionScope`)·대체 조치를 주입한다 (`permissionBlockNote`). 서브세션은 이전 세션의 대화 이력을 이어받지 못하므로, 이 주입이 없으면 새 세션이 같은 경로를 다시 요청해 같은 지점에서 죽는다. 나머지 두 사유는 경로 문제가 아니라 재시도가 결과를 바꾸지 못하므로 즉시 실패한다.
+2. **처방 문구 분기.** 종전 `outside_allowed_roots` remedy 는 "임시 파일은 worktree 안에 써라" 뿐이었다. 정작 막힌 것은 read-only `glob` 이라 아무 조치도 유도하지 못했다. 이제 차단 패턴과 허용 범위를 먼저 못 박고 조회/쓰기 두 갈래로 나눈다.
+3. **"승인 대기 아님" 을 필드로 못 박음.** 최종 응답에 `awaiting_user_approval: false` / `session_aborted: true` / `permission_reason` / `permission_patterns` / `permission_scope` / `next_action`(= `PERMISSION_STALL_NEXT_ACTION`) 을 싣고, team-leader 프롬프트에 같은 하드룰을 넣었다. 최종 실패는 `hang_history` 에 `reason: "permission_stall:<사유>"` 로 남아 cross-call 상한(`stall_escalate_threshold`)이 무장한다.
+
+회귀: `test/poll-permission-scope.test.ts` · `test/dispatch-stage-redispatch.test.ts` ("issue #12" 블록).
 
 ### 4.3 2중 방어
 
