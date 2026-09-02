@@ -76,6 +76,7 @@ const STEPS = [
   "node --test test/verdict-reason-injection.test.ts",
   "node --test test/verdict-hash-normalize.test.ts",
   "node --test test/session-index-fallback.test.ts",
+  "node --test test/sub-session-registry.test.ts",
   "node --test test/plugin-exports-shape.test.ts",
   "node --test test/stale-worktree-recovery.test.ts",
   "node --test test/rollback-commits.test.ts",
