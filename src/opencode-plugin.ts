@@ -33,6 +33,7 @@ import {
   pendingPermissionsFor,
   permissionAsked,
   permissionReplied,
+  permissionsRejectedCascade,
   settleToolCalls,
   sharedSubSessionRegistry,
   toolFinished,
@@ -67,6 +68,7 @@ import {
   pluginOwnAllowPatterns,
   readLoggingConfig,
   DEFAULT_STALL_ESCALATE_THRESHOLD,
+  DEFAULT_PERMISSION_CORRECTIONS_PER_SESSION,
 } from "./config.ts";
 import {
   scanSkillMcpRegistry,
@@ -76,7 +78,12 @@ import {
   type SkillMcpRegistry,
 } from "./skill-mcp-registry.ts";
 import { injectAllSecrets } from "./mcp-secret-injector.ts";
-import { pollSubSession as pollSubSessionCore, pollOutcomeToLegacy, type PollOutcome } from "./poll-sub-session.ts";
+import {
+  pollSubSession as pollSubSessionCore,
+  pollOutcomeToLegacy,
+  buildPathScopePromptBlock,
+  type PollOutcome,
+} from "./poll-sub-session.ts";
 import { logger } from "./logger.ts";
 import { redactAndTruncate } from "./redact-secrets.ts";
 import { extractApplyPatchPaths, isApplyPatchTool } from "./apply-patch-paths.ts";
@@ -759,6 +766,13 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
     Math.round(config.timeout?.stall_escalate_threshold ?? DEFAULT_STALL_ESCALATE_THRESHOLD),
   );
 
+  // 워크스페이스 밖 경로 요청을 세션 안에서 되돌려 주는 예산 (issue #12 재발 보고).
+  // abort → 재디스패치는 대화 이력을 잃는 비싼 경로라 이 예산이 소진된 뒤에만 탄다.
+  const permissionCorrectionsPerSession = Math.max(
+    0,
+    Math.round(config.timeout?.permission_corrections_per_session ?? DEFAULT_PERMISSION_CORRECTIONS_PER_SESSION),
+  );
+
   // 자동 승인 대상 외부 디렉터리 패턴 = 플러그인 자기 경로(항상) + 사용자 시드.
   //
   // 앞쪽이 2차 방어다: 설치가 opencode.json 패치를 남기지 못해도 서브에이전트가
@@ -973,6 +987,39 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
       // permission.replied 이벤트는 세션의 사본에 도착하지만, 그 사본이 이벤트를
       // 놓치더라도 다음 폴이 같은 요청을 다시 처리하지 않도록 즉시 뺀다.
       permissionReplied(registry, sessionId, req.path.requestID);
+      // reject 는 같은 세션의 나머지 대기 요청까지 연쇄 거부한다 — 이벤트가 오기
+      // 전에 다음 폴이 그것들에 다시 답하지 않도록 즉시 비운다.
+      if (req.body.reply === "reject") permissionsRejectedCascade(registry, sessionId);
+      return res;
+    },
+    // 피드백 거부(in-place correction). 세션-라우팅 엔드포인트는 `{response}` 만
+    // 받아 문구를 실을 수 없으므로 `POST /permission/{requestID}/reply` 를 쓴다.
+    // 그 라우트는 **디렉토리 스코프**(`?directory=` 가 헤더보다 우선)라 worktree
+    // 서브세션의 요청에 닿으려면 세션의 worktree 를 query 로 명시해야 한다 —
+    // 클라이언트 기본 헤더는 main repo 를 가리키므로 생략하면 NotFound 다.
+    // `reject` + `message` 는 opencode 가 `CorrectedError` 로 바꿔 툴 호출 하나만
+    // 실패시키고 세션 루프는 계속 돌린다 (`RejectedError` 는 루프를 세운다).
+    correct: async (req: { path: { requestID: string }; body: { message: string } }) => {
+      const raw = (client as unknown as { _client?: { post?: (o: unknown) => Promise<{ error?: unknown; response?: { status?: number } }> } })._client;
+      if (!raw || typeof raw.post !== "function") {
+        throw new Error("raw permission reply endpoint unavailable on this client");
+      }
+      const directory = registry.sessionWorktree.get(sessionId);
+      const res = await raw.post({
+        url: "/permission/{requestID}/reply",
+        path: { requestID: req.path.requestID },
+        query: directory ? { directory } : undefined,
+        body: { reply: "reject", message: req.body.message },
+        headers: { "Content-Type": "application/json" },
+      });
+      if (res?.error !== undefined) {
+        throw new Error(
+          `permission correction rejected by server: status=${res.response?.status ?? "?"} ` +
+          `error=${JSON.stringify(res.error).slice(0, 200)}`
+        );
+      }
+      permissionReplied(registry, sessionId, req.path.requestID);
+      permissionsRejectedCascade(registry, sessionId);
       return res;
     },
   });
@@ -991,9 +1038,11 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
       configuredAllowPatterns,
       logger: {
         debug: (msg: string) => logger.debug(msg),
+        warn: (msg: string) => logger.warn(msg),
         error: (msg: string) => logger.error(msg),
       },
       permissionCheckIntervalPolls: 1,
+      maxPermissionCorrections: permissionCorrectionsPerSession,
       nudgeAtFraction: onNudge ? 0.8 : undefined,
       onNudge,
       messageStallThresholdMs,
@@ -2203,6 +2252,10 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
               `Stage spec: read ${specPath} and follow it strictly.`,
               `모든 state.sh / wt-sync-ignored.sh / config.sh 호출은 위 Scripts directory 경로를 사용하시오. \`$HOME/.config/opencode/scripts/\`나 \`scripts/\` 상대경로를 사용하지 마시오.`,
               `Stage 명세 파일은 위 Stages directory 경로에서 읽으시오. \`<SCRIPTS_DIR>/../stages/\` 상대경로를 사용하지 마시오.`,
+              // 경로 범위는 차단이 난 뒤가 아니라 첫 프롬프트부터 알린다. 관측된
+              // 위반은 모델이 저장소 밖을 검색 루트로 **명시적으로** 고른 것이라
+              // (issue #12 재발 보고), 사후 안내만으로는 첫 시도를 막지 못한다.
+              ...buildPathScopePromptBlock(effectiveWorktree, permissionCorrectionsPerSession),
             ];
             if (args.target_stage === "2_implementation.dev") {
               base.push(
@@ -2632,10 +2685,15 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 const scopeLine = outcome.permissionScope
                   ? `자동 승인 범위: ${outcome.permissionScope}/ 이하 — worktree(${effectiveWorktree}) 와 그 형제 디렉토리까지다. 그 위(조부모 이상)는 열리지 않는다.`
                   : `자동 승인 범위: worktree(${effectiveWorktree}) 와 그 형제 디렉토리까지다. 그 위는 열리지 않는다.`;
+                const corrections = outcome.permissionCorrections ?? 0;
+                const correctionLine = corrections > 0
+                  ? `그 세션은 abort 전에 이미 ${corrections}회 "경로를 좁혀라" 는 피드백 거부를 받았는데도 같은 범위를 다시 요청했다. 이번에는 첫 안내에서 멈춰야 한다.`
+                  : null;
                 permissionBlockNote = [
                   `직전 attempt(${attempt}) 는 워크스페이스 밖 경로에 대한 external_directory 권한 요청 때문에 자동 거부되고 세션이 abort 됐다.`,
                   `차단된 요청 패턴: ${JSON.stringify(blockedPatterns)}`,
                   scopeLine,
+                  ...(correctionLine ? [correctionLine] : []),
                   `서브세션에는 이 승인을 받을 채널이 없다 — 같은 경로를 다시 요청하면 또 즉시 중단되고, 그때까지 한 작업은 전부 버려진다.`,
                   `조치:`,
                   `  - glob / grep / read / list 의 경로 인자를 위 허용 범위 안으로 좁혀라. 경로 인자를 아예 주지 않고 cwd 기준 상대 패턴을 쓰는 것이 가장 안전하다.`,
@@ -2646,7 +2704,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                   `[dispatch_stage] PERMISSION_BLOCK session=${subSessionID} stage=${args.target_stage} ` +
                   `attempt=${attempt}/${currentMaxAttempts} reason=${outcome.permissionReason} ` +
                   `patterns=${JSON.stringify(blockedPatterns)} scope=${outcome.permissionScope ?? "unknown"} ` +
-                  `— redispatching with allowed-scope guidance injected`,
+                  `corrections=${corrections} — redispatching with allowed-scope guidance injected`,
                 );
                 continue;
               }
@@ -2660,6 +2718,7 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 reason: `permission_stall:${outcome.permissionReason ?? "unknown"}`,
                 patterns: blockedPatterns,
                 scope: outcome.permissionScope ?? null,
+                corrections: outcome.permissionCorrections ?? 0,
                 elapsed_ms: outcome.elapsedMs,
                 polls: outcome.polls,
                 session_id: subSessionID,
@@ -2690,6 +2749,9 @@ export const Makdoong2TeamPlugin: Plugin = async ({ $, client, directory, worktr
                 permission_reason: outcome.permissionReason ?? "unknown",
                 permission_patterns: blockedPatterns,
                 permission_scope: outcome.permissionScope ?? null,
+                // abort 전에 세션 안에서 돌려보낸 횟수. 0 이면 교정 경로가 없었다는
+                // 뜻(0 예산 또는 회복 불가 사유)이고, >0 이면 안내를 받고도 반복한 것.
+                permission_corrections: outcome.permissionCorrections ?? 0,
                 permission_id: outcome.permissionID,
                 permission_type: outcome.permissionType,
                 // 승인 대기가 아니라 "이미 종료됨" 이다. 이 두 필드를 읽고 보고한다.
