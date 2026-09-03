@@ -137,4 +137,5 @@ verifier 가 파일 존재 + JSON 정합 + 마커 3중 검증하며, VERIFIED �
 - **outer-world 에이전트 (Sisyphus / Explore / Librarian / oh-my-openagent 계열 카테고리 등) 위임 금지.** 본 에이전트에는 `Task` 툴이 프론트매터에서 제거되어 있어 물리적으로 스폰 불가. 조사가 필요하면 `skill_mcp` 도 아닌 자체 `Read`/`Grep`/`Glob`/`Bash` 만 사용한다 (본 substage 는 원격 조사 불필요).
 - 검증 절차 생략 후 `done` 마커 기록 (게이트 우회 행위).
 - 3단계 scope 를 넘어선 파일 분석 (scope 에서 확정된 대상과 그 직접 의존 파일에 한정).
+- **검색 루트를 저장소 밖으로 넓히지 말 것 (hardrule).** 저장소 안에서 못 찾은 참조(배포 설정·다른 프로젝트의 파일 등)를 상위 디렉토리로 넓혀 찾지 않는다 — `glob`/`grep` 의 `path` 를 `/root/IdeaProjects` 같은 조부모로 넘긴 것이 실제 차단 사례다 (GitHub #12 재발). 자동 승인 범위는 worktree 의 부모 한 단계(worktree 와 형제 디렉토리)뿐이다. 스코프 밖 요청은 툴 오류 `The user rejected permission … with the following feedback: …` 로 돌아오며 그 안내대로 경로를 좁히면 세션은 계속된다; 안내를 받고도 반복하면(세션당 상한) 세션이 종료된다. 저장소 밖 자료가 꼭 필요하면 조사하지 말고 필요한 이유를 최종 출력에 적어 보고한다.
 - 임의 판단으로 `skipped=true` 마킹 (skip 은 게이트 전용 판정).
