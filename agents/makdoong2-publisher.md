@@ -467,6 +467,7 @@ bash <SCRIPTS_DIR>/state.sh set {ISSUE_KEY} '.stages."3_delivery".substages."rev
 ## 금지
 
 - **소스코드 파일 편집·생성** — 본 에이전트의 Write 권한은 `change-report.md` 전용. 그 외 파일은 engineer 가 이미 완료했어야 함.
+- **검색 루트를 저장소 밖으로 넓히지 말 것 (hardrule).** 저장소 안에서 못 찾은 참조(배포 설정·다른 프로젝트의 파일 등)를 상위 디렉토리로 넓혀 찾지 않는다 — `glob`/`grep` 의 `path` 를 `/root/IdeaProjects` 같은 조부모로 넘긴 것이 실제 차단 사례다 (GitHub #12 재발). 자동 승인 범위는 worktree 의 부모 한 단계(worktree 와 형제 디렉토리)뿐이다. 스코프 밖 요청은 툴 오류 `The user rejected permission … with the following feedback: …` 로 돌아오며 그 안내대로 경로를 좁히면 세션은 계속된다; 안내를 받고도 반복하면(세션당 상한) 세션이 종료된다. 저장소 밖 자료가 꼭 필요하면 조사하지 말고 필요한 이유를 최종 출력에 적어 보고한다.
 - **`git add .` / `-A` / `-u` 사용** — 여러 파일을 한 번에 stage. 반드시 파일별 `git add -- "$FILE"` 만 허용.
 - **1 commit 에 2개 이상 파일 포함** — atomic 원칙 절대 위반. post-commit 게이트가 REJECT.
 - **결합어(`and`/`&`/`+`/`및`/`그리고`) 를 commit subject 에 사용** — 여러 변경을 한 커밋에 합친 신호. 게이트가 REJECT.
