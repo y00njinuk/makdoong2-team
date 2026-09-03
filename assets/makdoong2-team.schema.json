@@ -141,6 +141,11 @@
           "type": "integer",
           "minimum": 1,
           "description": "Accumulated hang_history entries (message_stall / status_absent) per substage that block further dispatch_stage calls and force user escalation. Counts across tool calls, unlike the per-call MAX_ATTEMPTS budget which resets on every re-dispatch. Default 5."
+        },
+        "permission_corrections_per_session": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many times per sub-session an external_directory request outside the allowed scope (worktree parent) is answered with a feedback-reject (tool error telling the model to narrow its path) instead of reject + abort. The session keeps running and can self-correct in place. 0 disables and restores abort-on-first-violation. Default 3."
         }
       }
     },
