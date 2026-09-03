@@ -345,6 +345,20 @@ team-leader 는 파일을 고치지 않지만 **bash 명령이 참조하는 디�
 
 회귀: `test/poll-permission-scope.test.ts` · `test/dispatch-stage-redispatch.test.ts` ("issue #12" 블록).
 
+#### 재발: 위반은 우연이 아니라 의도된 검색 루트 확장이었다 — abort 앞에 두 층을 더 둔다
+
+수정 전 설치에서 같은 정지가 재현됐고, 이번 보고는 **왜** 조부모가 요청됐는지를 보여줬다. 배포 설정 관련 작업에서 저장소 안 검색이 비자 engineer 모델이 `glob {"pattern":"**/ansible/*.yml","path":"/root/IdeaProjects"}` / `grep {"path":"/root/IdeaProjects"}` 로 검색 루트를 **명시적으로** 한 칸 위로 넘겼다. 위 세 가지는 전부 세션이 죽은 **뒤**에 작동한다 — 재디스패치는 대화 이력·진행 중이던 병렬 툴·그때까지의 작업을 버리는 비싼 경로다. 그래서 그 앞에 두 층을 넣었다.
+
+**Layer 0 — 선제 안내.** 모든 `dispatch_stage` 프롬프트의 base 블록에 `buildPathScopePromptBlock()` 이 실린다: 허용 범위, 경로 인자 규칙, "저장소 안에서 못 찾은 참조를 상위 디렉토리로 넓혀 찾지 말 것", 위반 시 보게 될 오류 문구와 예산. 서브에이전트 4종(engineer / planner / analyzer / publisher) 프롬프트에도 같은 하드룰을 넣었다.
+
+**Layer 1 — in-place correction (피드백 거부).** opencode 의 `Permission.reply` 는 `reject` 에 `message` 가 실리면 `RejectedError` 대신 `CorrectedError({feedback})` 로 요청을 실패시킨다 (`permission/index.ts`). 세션 프로세서는 `RejectedError` 에만 `blocked` 를 세워 루프를 멈추고 (`session/processor.ts`), `CorrectedError` 는 툴 결과 `"The user rejected permission to use this specific tool call with the following feedback: <message>"` 로 모델에 돌아가 **루프가 계속 돈다.** 즉 스코프 밖 요청은 abort 할 일이 아니라 툴 오류 하나로 고쳐질 일이다. 폴러(`pollSubSession`)는 `outside_allowed_roots` 에 대해 `client.permission.correct` 가 있으면 `buildPermissionCorrectionMessage()`(차단 패턴 · 허용 범위 · 조치 · 남은 예산)를 실어 피드백 거부하고 abort 하지 않는다. 예산은 세션당 `timeout.permission_corrections_per_session`(기본 3, 0 이면 종전 동작). 소진 뒤의 위반, `correct` 부재·throw, `non_external_permission` 은 종전대로 reject + abort 다.
+
+응답 경로가 다르다. 플러그인이 쓰던 세션-라우팅 엔드포인트 `POST /session/{id}/permissions/{permissionID}` 는 `{response}` 만 받아 문구를 실을 수 없다. 문구는 `POST /permission/{requestID}/reply` (`{reply, message}`) 로만 가는데 그 라우트는 **디렉토리 스코프**라 (`?directory=` 가 `x-opencode-directory` 헤더보다 우선) worktree 서브세션의 요청에 닿으려면 `registry.sessionWorktree` 의 값을 query 로 명시해야 한다 — 클라이언트 기본 헤더는 main repo 를 가리킨다. `permissionSourceFor(sessionId).correct` 가 hey-api 원시 클라이언트(`client._client.post`)로 이것을 부르고, 응답 `.error` 는 throw 해서 폴러가 abort 경로로 폴백하게 한다.
+
+**연쇄 거부 제약.** `reject` 하나는 같은 세션의 **다른 대기 요청 전부**를 plain `RejectedError` 로 거부한다 (문구 없음 → `blocked`). 그래서 폴러는 한 폴의 대기 요청을 허용/거부로 나눠 **허용을 먼저 전부 답한 뒤** 첫 거부 대상 하나만 교정한다 — 순서를 섞으면 병렬 배치의 정당한 형제 디렉토리 요청이 딸려 죽는다. 스코프 밖 요청이 한 폴에 둘 이상 동시에 떠 있으면 두 번째부터는 plain 거부라 그 턴은 멈춘다 (opencode 의 제약이며 여기서 풀 수 없다). 또 연쇄로 사라진 요청에 다음 폴이 다시 답해 NotFound 를 받지 않도록, 거부 응답 직후 레지스트리의 그 세션 대기 목록을 선제로 비운다 (`permissionsRejectedCascade`). `experimental.continue_loop_on_deny` 를 opencode.json 에 시드하는 방법은 사용자의 대화형 세션 동작까지 바꾸므로 채택하지 않았다.
+
+**Layer 2 이후.** 예산 소진 뒤의 abort 는 종전 경로 그대로이되 `permissionCorrections` 가 outcome → legacy 처방 → `permissionBlockNote` → 최종 응답 `permission_corrections` → `hang_history.corrections` 로 흐른다. `>0` 이면 "안내를 받고도 같은 범위를 반복했다" 는 뜻이라 리더가 첫 차단과 구분한다. 회귀: `test/poll-permission-scope.test.ts` · `test/dispatch-stage-redispatch.test.ts` ("issue #12 재발" 블록).
+
 ### 4.3 2중 방어
 
 | 층 | 위치 | 역할 |
