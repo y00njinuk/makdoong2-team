@@ -57,6 +57,14 @@ export interface PollClientLike {
   permission?: {
     list: () => Promise<{ data?: PermissionRequestLike[] } | null | undefined>;
     reply: (req: { path: { requestID: string }; body: { reply: string } }) => Promise<unknown>;
+    /**
+     * 피드백을 실은 거부. opencode 는 `reject` + `message` 를 `RejectedError` 가 아니라
+     * `CorrectedError` 로 바꾼다 — 툴 호출은 그 문구를 오류로 돌려받고, **세션 루프는
+     * 멈추지 않는다** (`processor.ts` 의 `ctx.blocked` 는 `RejectedError` 에만 걸린다).
+     * 그래서 서브에이전트가 경로를 좁혀 같은 자리에서 이어갈 수 있다. 없으면(구버전
+     * 클라이언트) 종전대로 reject + abort 로 떨어진다.
+     */
+    correct?: (req: { path: { requestID: string }; body: { message: string } }) => Promise<unknown>;
   };
 }
 
@@ -75,7 +83,10 @@ export type PollOutcome =
   //   non_external_permission — external_directory 가 아닌 권한(edit/bash 등)이 도달.
   //                             경로 문제가 아니라 에이전트 설정 문제다
   //   tool_call_stall        — 권한 요청 없이 툴 호출만 멈춰 있는 경우
-  | { kind: "permission_stall"; polls: number; elapsedMs: number; stalledMs: number; permissionID?: string; permissionType?: string; permissionPatterns?: string[]; permissionReason?: PermissionStallReason; permissionScope?: string }
+  // permissionCorrections 는 abort 전에 같은 세션 안에서 피드백 거부(in-place
+  // correction)를 몇 번 보냈는지다. 0 이 아니면 서브에이전트가 안내를 받고도
+  // 스코프 밖 경로를 반복 요청한 것이다 — 재디스패치 안내에 그 사실을 싣는다.
+  | { kind: "permission_stall"; polls: number; elapsedMs: number; stalledMs: number; permissionID?: string; permissionType?: string; permissionPatterns?: string[]; permissionReason?: PermissionStallReason; permissionScope?: string; permissionCorrections?: number }
   // 세션이 등장 후 사라진 케이스 (sessionEverAppeared=true → 3회 연속 status absent + no new messages)
   // 또는 message stall 케이스 (sessionEverAppeared=true → busy 지속 + assistant message 0건 + messageStallThresholdMs 초과).
   // 호출자는 session.abort() 를 "실제 gone" 인 경우에만 skip 해야 한다 (skipSessionOps 플래그로 전달).
@@ -93,10 +104,16 @@ export interface PollOptions {
   permissionCheckIntervalPolls?: number;
   allowedWorktree?: string;
   configuredAllowPatterns?: string[];
+  // 세션 하나에서 스코프 밖 요청을 abort 없이 피드백 거부로 돌려보내는 횟수 상한.
+  // 초과하면 종전 경로(reject + abort → permission_stall) 로 떨어진다. 0 이면
+  // in-place correction 을 끈다. Default: 3.
+  maxPermissionCorrections?: number;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
   logger?: {
     debug?: (msg: string) => void;
+    // 회복 가능한 이상 상황 (in-place correction 등). 없으면 error 로 떨어진다.
+    warn?: (msg: string) => void;
     error?: (msg: string) => void;
   };
   // Tool-call stall: sub-agent has a pending tool_call part that has not made
@@ -273,6 +290,64 @@ export function worktreeAllowedScope(worktree: string): string {
   return posixDirname(worktree);
 }
 
+/**
+ * 스코프 밖 요청을 abort 없이 돌려보낼 때 툴 오류로 실리는 문구.
+ *
+ * 서브에이전트가 보는 것은 "The user rejected permission … with the following
+ * feedback: <이 문구>" 다. 재디스패치 노트(`permissionBlockNote`)와 같은 내용을
+ * 담되, **지금 이 세션에서 바로 고칠 수 있다**는 전제로 쓴다 — 대화 이력이 그대로
+ * 남아 있으므로 새 세션에 실었던 "직전 세션이 죽었다" 류 설명은 필요 없다.
+ * `remaining` 은 이번 교정 이후 남은 횟수다. 0 이면 다음 위반에서 세션이 종료된다.
+ */
+export function buildPermissionCorrectionMessage(input: {
+  patterns: string[];
+  worktree?: string;
+  scope?: string;
+  remaining: number;
+}): string {
+  const blocked = input.patterns.length ? JSON.stringify(input.patterns) : "(패턴 미상)";
+  const scope = input.scope
+    ? `${input.scope}/ 이하(worktree 와 그 형제 디렉토리)`
+    : "worktree 와 그 형제 디렉토리";
+  const wt = input.worktree ? `worktree(${input.worktree})` : "worktree";
+  const budget = input.remaining > 0
+    ? `남은 자동 교정 ${input.remaining}회 — 그 뒤에는 세션이 종료되고 지금까지의 작업이 버려진다.`
+    : `자동 교정 한도에 도달했다 — 한 번 더 스코프 밖을 요청하면 세션이 종료되고 지금까지의 작업이 버려진다.`;
+  return [
+    `워크스페이스 밖 경로 요청이라 자동 거부됐다 (요청 패턴 ${blocked}). 이 세션에는 승인 채널이 없다 — 사용자에게 승인을 요청하지 말 것.`,
+    `자동 승인 범위는 ${scope}뿐이고 그 위(조부모 이상)는 열리지 않는다.`,
+    `조치: glob / grep / read / list / bash 의 경로 인자를 ${wt} 안으로 좁혀 다시 시도하라. 경로 인자를 아예 주지 않고 cwd 기준 상대 패턴을 쓰는 것이 가장 안전하다.`,
+    `저장소 안에서 못 찾은 참조를 상위 디렉토리로 넓혀 찾지 말 것. 저장소 밖 자료가 꼭 필요하면 조사하지 말고, 필요한 이유를 최종 출력에 적어 보고하라.`,
+    `임시 파일은 /tmp 가 아니라 worktree 안의 .makdoong2-team/<이슈키>/tmp/ 에 만든다.`,
+    budget,
+  ].join(" ");
+}
+
+/**
+ * 모든 dispatch_stage 프롬프트에 상시 주입되는 경로 범위 안내 (선제 방어).
+ *
+ * 재디스패치 노트와 in-place 교정은 둘 다 **차단이 난 뒤**에 작동한다. 관측된
+ * 위반은 우연이 아니라 의도된 것이었다 — 저장소 안 검색이 비자 모델이 상위
+ * 디렉토리를 검색 루트로 **명시적으로** 넘겼다 (`glob {path:"/root/IdeaProjects"}`,
+ * GitHub #12 재발 보고). 그 판단이 내려지기 전에 규칙을 보여주는 것이 가장 싸다.
+ * 문구는 교정 메시지·재디스패치 노트와 같은 어휘를 쓴다 — 세 층이 다른 말을
+ * 하면 모델은 어느 것이 규칙인지 모른다.
+ */
+export function buildPathScopePromptBlock(worktree: string, maxCorrections: number): string[] {
+  const scope = worktreeAllowedScope(worktree);
+  const budget = maxCorrections > 0
+    ? `위반하면 툴 호출이 "The user rejected permission … with the following feedback: …" 오류로 실패하고 경로를 좁히라는 안내가 실린다 (세션당 ${maxCorrections}회). 그 이상 반복하면 세션이 종료되고 지금까지의 작업이 버려진다.`
+    : `위반하면 세션이 즉시 종료되고 지금까지의 작업이 버려진다.`;
+  return [
+    `\n=== 경로 범위 (hardrule) ===`,
+    `이 세션은 헤드리스라 권한 요청에 답할 사람이 없다. 자동 승인 범위는 ${scope}/ 이하(worktree 와 그 형제 디렉토리)뿐이고, 그 위(조부모 이상)는 열리지 않는다.`,
+    `glob / grep / read / list / bash 의 경로 인자는 항상 worktree(${worktree}) 안으로 둔다. 경로 인자를 아예 주지 않고 cwd 기준 상대 패턴을 쓰는 것이 가장 안전하다.`,
+    `저장소 안에서 못 찾은 참조(배포 설정·다른 프로젝트의 파일 등)를 상위 디렉토리로 넓혀 찾지 말 것. 저장소 밖 자료가 꼭 필요하면 조사하지 말고, 필요한 이유를 최종 출력에 적어 보고한다.`,
+    `임시 파일은 /tmp 가 아니라 worktree 안의 .makdoong2-team/<이슈키>/tmp/ 에 만든다.`,
+    budget,
+  ];
+}
+
 // Returns true when every permission pattern resides within the allowed scope,
 // defined as the parent directory of the worktree (siblings are the main repo
 // and other worktrees — all legitimate access targets for engineers).
@@ -334,6 +409,7 @@ export async function pollSubSession(
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)));
   const dbg = options.logger?.debug;
   const err = options.logger?.error ?? ((msg: string) => console.error(msg));
+  const warn = options.logger?.warn ?? err;
 
   const startTime = now();
   const deadline = startTime + timeoutMs;
@@ -348,8 +424,10 @@ export async function pollSubSession(
   const isRecentlyActive = options.isRecentlyActive;
   const isToolExecuting = options.isToolExecuting;
   const permissionCheckIntervalPolls = options.permissionCheckIntervalPolls ?? 5;
+  const maxPermissionCorrections = options.maxPermissionCorrections ?? 3;
 
   let pollCount = 0;
+  let permissionCorrections = 0;
   let transientFailures = 0;
   let sessionEverAppeared = false;
   let hasProducedAssistantMessage = false;
@@ -543,55 +621,112 @@ export async function pollSubSession(
     if (client.permission && pollCount % permissionCheckIntervalPolls === 0) {
       const permResult = await client.permission.list().catch(() => null);
       const pending = (permResult?.data ?? []).filter(p => p.sessionID === sessionId);
-      for (const p of pending) {
-        const withinScope =
-          p.permission === "external_directory" && (
-            (!!options.allowedWorktree && isWithinWorktreeScope(p.patterns, options.allowedWorktree)) ||
-            isMatchedByConfiguredRules(p.patterns, options.configuredAllowPatterns ?? [])
-          );
+      const isWithinScope = (p: PermissionRequestLike): boolean =>
+        p.permission === "external_directory" && (
+          (!!options.allowedWorktree && isWithinWorktreeScope(p.patterns, options.allowedWorktree)) ||
+          isMatchedByConfiguredRules(p.patterns, options.configuredAllowPatterns ?? [])
+        );
+      // 허용을 먼저 전부 답하고 거부는 그 뒤에 한다. opencode 의 `reject` 는 같은
+      // 세션의 **다른 대기 요청까지 연쇄 거부**하므로(`Permission.reply`), 순서를
+      // 섞으면 병렬 배치의 정당한 형제 디렉토리 요청이 스코프 밖 요청 하나에
+      // 딸려 죽는다.
+      const allowed = pending.filter(isWithinScope);
+      const denied = pending.filter(p => !isWithinScope(p));
+      for (const p of allowed) {
+        dbg?.(
+          `[pollSubSession] PERMISSION_ALLOW session=${sessionId} polls=${pollCount}` +
+          ` permissionID=${p.id} type=${p.permission} patterns=${JSON.stringify(p.patterns)}` +
+          ` scope=dirname(${options.allowedWorktree})`
+        );
+        await client.permission
+          .reply({ path: { requestID: p.id }, body: { reply: "once" } })
+          .catch(() => undefined);
+      }
+      for (const p of denied) {
+        // 두 실패를 뭉뚱그리지 않는다. "허용 경로 밖" 은 대안 경로를 알려주면
+        // 회복 가능하고, "external_directory 가 아닌 권한" 은 경로와 무관한
+        // 에이전트 설정 문제라 조치가 정반대다. 종전에는 한 문장이었다.
+        const reason: PermissionStallReason =
+          p.permission === "external_directory"
+            ? "outside_allowed_roots"
+            : "non_external_permission";
+        const permissionScope = options.allowedWorktree
+          ? worktreeAllowedScope(options.allowedWorktree)
+          : undefined;
 
-        if (withinScope) {
-          dbg?.(
-            `[pollSubSession] PERMISSION_ALLOW session=${sessionId} polls=${pollCount}` +
-            ` permissionID=${p.id} type=${p.permission} patterns=${JSON.stringify(p.patterns)}` +
-            ` scope=dirname(${options.allowedWorktree})`
-          );
-          await client.permission
-            .reply({ path: { requestID: p.id }, body: { reply: "once" } })
-            .catch(() => undefined);
-        } else {
-          // 두 실패를 뭉뚱그리지 않는다. "허용 경로 밖" 은 대안 경로를 알려주면
-          // 회복 가능하고, "external_directory 가 아닌 권한" 은 경로와 무관한
-          // 에이전트 설정 문제라 조치가 정반대다. 종전에는 한 문장이었다.
-          const reason: PermissionStallReason =
-            p.permission === "external_directory"
-              ? "outside_allowed_roots"
-              : "non_external_permission";
-          err(
-            `[pollSubSession] PERMISSION_STALL session=${sessionId} polls=${pollCount}` +
-            ` permissionID=${p.id} type=${p.permission} patterns=${JSON.stringify(p.patterns)}` +
-            ` reason=${reason} — auto-rejecting`
-          );
-          await client.permission
-            .reply({ path: { requestID: p.id }, body: { reply: "reject" } })
-            .catch(() => undefined);
-          await client.session.abort({ path: { id: sessionId } }).catch(() => undefined);
-          return {
-            kind: "permission_stall",
-            polls: pollCount,
-            elapsedMs: now() - startTime,
-            stalledMs,
-            permissionID: p.id,
-            permissionType: p.permission,
-            permissionPatterns: p.patterns,
-            permissionReason: reason,
-            // 무엇이 막혔는지(patterns)만으로는 처방이 안 나온다 — **어디까지가
-            // 허용인지**를 같이 실어야 서브에이전트가 경로를 좁혀 재시도할 수 있다.
-            permissionScope: options.allowedWorktree
-              ? worktreeAllowedScope(options.allowedWorktree)
-              : undefined,
-          };
+        // ── in-place correction: 세션을 죽이지 않고 경로를 좁히게 한다 ─────────
+        //
+        // 관측된 차단은 전부 모델이 **명시적으로** 조부모를 검색 루트로 넘긴
+        // 것이었다 (`glob {path:"/root/IdeaProjects"}` — 저장소 안 검색이 비어
+        // 상위로 넓힌 것, GitHub #12 재발 보고). 이건 세션을 abort 할 일이 아니라
+        // 툴 오류 하나로 고쳐질 일이다. `reject` 에 `message` 를 실으면 opencode 가
+        // `CorrectedError` 로 바꿔 툴 호출만 실패시키고 루프는 계속 돈다 — 모델은
+        // 그 문구를 읽고 같은 자리에서 경로를 좁힌다. 대화 이력·진행 중이던 병렬
+        // 툴·지금까지의 작업이 전부 보존된다. 재디스패치는 이 예산이 소진된 뒤의
+        // 후순위 경로다.
+        //
+        // 예산은 세션당 `maxPermissionCorrections` 회. 안내를 받고도 반복하면
+        // 프롬프트로 고쳐지지 않는 것이므로 종전대로 abort → 재디스패치 →
+        // hang_history 상한으로 넘긴다.
+        const canCorrect =
+          reason === "outside_allowed_roots" &&
+          typeof client.permission.correct === "function" &&
+          permissionCorrections < maxPermissionCorrections;
+        if (canCorrect) {
+          const remaining = maxPermissionCorrections - permissionCorrections - 1;
+          const message = buildPermissionCorrectionMessage({
+            patterns: p.patterns,
+            worktree: options.allowedWorktree,
+            scope: permissionScope,
+            remaining,
+          });
+          const corrected = await client.permission
+            .correct!({ path: { requestID: p.id }, body: { message } })
+            .then(() => true)
+            .catch((e: unknown) => {
+              err(
+                `[pollSubSession] PERMISSION_CORRECT_FAILED session=${sessionId} polls=${pollCount}` +
+                ` permissionID=${p.id} error=${e} — falling back to reject + abort`
+              );
+              return false;
+            });
+          if (corrected) {
+            permissionCorrections++;
+            warn(
+              `[pollSubSession] PERMISSION_CORRECT session=${sessionId} polls=${pollCount}` +
+              ` permissionID=${p.id} type=${p.permission} patterns=${JSON.stringify(p.patterns)}` +
+              ` scope=${permissionScope ?? "unknown"} corrections=${permissionCorrections}/${maxPermissionCorrections}` +
+              ` — rejected with feedback, session continues`
+            );
+            // 연쇄 거부로 나머지 대기 요청은 이미 opencode 가 정리했다. 이번 폴에서
+            // 더 답하면 NotFound 만 난다.
+            break;
+          }
         }
+
+        err(
+          `[pollSubSession] PERMISSION_STALL session=${sessionId} polls=${pollCount}` +
+          ` permissionID=${p.id} type=${p.permission} patterns=${JSON.stringify(p.patterns)}` +
+          ` reason=${reason} corrections=${permissionCorrections}/${maxPermissionCorrections} — auto-rejecting`
+        );
+        await client.permission
+          .reply({ path: { requestID: p.id }, body: { reply: "reject" } })
+          .catch(() => undefined);
+        await client.session.abort({ path: { id: sessionId } }).catch(() => undefined);
+        return {
+          kind: "permission_stall",
+          polls: pollCount,
+          elapsedMs: now() - startTime,
+          stalledMs,
+          permissionID: p.id,
+          permissionType: p.permission,
+          permissionPatterns: p.patterns,
+          permissionReason: reason,
+          // 무엇이 막혔는지(patterns)만으로는 처방이 안 나온다 — **어디까지가
+          // 허용인지**를 같이 실어야 서브에이전트가 경로를 좁혀 재시도할 수 있다.
+          permissionScope,
+          permissionCorrections,
+        };
       }
     }
 
@@ -941,7 +1076,14 @@ export function pollOutcomeToLegacy(
             const scope = outcome.permissionScope
               ? `\`${outcome.permissionScope}/\` 이하 (worktree 와 그 형제 디렉토리)`
               : "worktree 와 그 형제 디렉토리";
-            return `워크스페이스 밖 경로 접근이라 차단됐다 — 요청 ${blocked}, 자동 승인 범위 ${scope}. ` +
+            // in-place 교정이 있었다면 abort 는 "안내를 받고도 같은 범위를 다시
+            // 요청했다" 는 뜻이다. 그 횟수를 보고에 싣지 않으면 리더는 첫 차단과
+            // 구분할 수 없어 같은 안내를 한 번 더 주입하는 데 그친다.
+            const corrections = outcome.permissionCorrections ?? 0;
+            const correctionNote = corrections > 0
+              ? `세션 안에서 ${corrections}회 경로 교정 안내(피드백 거부)를 받고도 같은 범위를 다시 요청해 abort 됐다. `
+              : "";
+            return `워크스페이스 밖 경로 접근이라 차단됐다 — 요청 ${blocked}, 자동 승인 범위 ${scope}. ${correctionNote}` +
               "그 위(조부모 이상)는 설계상 열지 않는다: 한 번 열면 형제 프로젝트 전체가 사람의 확인 없이 승인 대상이 된다. " +
               "조치는 둘 중 하나다. " +
               "(1) 조회(glob/grep/read/list)라면 경로 인자를 허용 범위 안으로 좁혀라 — 경로 인자 없이 cwd 기준 상대 패턴을 쓰는 것이 가장 안전하다. " +
