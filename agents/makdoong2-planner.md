@@ -204,6 +204,7 @@ bash <SCRIPTS_DIR>/state.sh set {ISSUE_KEY} '.stages."1_planning".substages."req
   - **쓰기 툴은 세션에 실제로 존재하는 것을 쓴다.** `write` 가 있으면 `write(filePath=…)`, 없으면 `apply_patch` 다 — opencode 는 `gpt-5` 계열 모델 세션에서 `write`·`edit` 를 노출하지 않고 `apply_patch` 로 대체한다. `apply_patch` 본문은 `*** Begin Patch` / `*** Add File: <허용 경로>` / `*** End Patch` 형식이어야 훅이 대상 경로를 파싱해 통과시킨다. **"write 툴 부재" 를 이유로 산출물 생성을 포기하지 말 것** — 그 판단이 워크플로 전체를 정지시킨다 (issue #8).
   - 같은 경로라도 bash 리디렉션은 어느 경우에도 차단된다.
   - **`/tmp` 등 워크스페이스 밖 경로 사용 금지.** 승인이 자동 거부되고 세션이 즉시 종료된다. planning 산출물은 전부 `.makdoong2-team/<이슈키>/` 아래에 만들면 되므로 임시 파일이 필요한 상황 자체가 없다.
+  - **검색 루트를 저장소 밖으로 넓히지 말 것 (hardrule).** 저장소 안에서 못 찾은 참조(배포 설정·다른 프로젝트의 파일 등)를 상위 디렉토리로 넓혀 찾지 않는다 — `glob`/`grep` 의 `path` 를 `/root/IdeaProjects` 같은 조부모로 넘긴 것이 실제 차단 사례다 (GitHub #12 재발). 자동 승인 범위는 worktree 의 부모 한 단계(worktree 와 형제 디렉토리)뿐이다. 스코프 밖 요청은 툴 오류 `The user rejected permission … with the following feedback: …` 로 돌아오며 그 안내대로 경로를 좁히면 세션은 계속된다; 안내를 받고도 반복하면(세션당 상한) 세션이 종료된다. 저장소 밖 자료가 꼭 필요하면 조사하지 말고 필요한 이유를 최종 출력에 적어 보고한다.
   - **금지 패턴**: `echo >`, `cat > file`, `cat <<EOF > file`, `tee file`, `sed -i`, `awk ... > file`, `printf > file`, `> file`, `>> file`, `python -c "... open(..., 'w') ..."`, `node -e "... fs.writeFileSync(...) ..."`
   - **위반 예시**:
     ```bash
