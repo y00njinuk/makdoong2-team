@@ -486,3 +486,39 @@ describe("issue #12 — dispatch_stage 의 permission_stall 처리", () => {
       "별도 상한을 쓰면 예산이 두 배가 된다");
   });
 });
+
+describe("issue #12 재발 — abort 이전에 세션 안에서 되돌려 주는 층이 앞에 있다", () => {
+  const PLUGIN_SRC = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "..", "src", "opencode-plugin.ts"),
+    "utf8",
+  );
+  const stallBlock = PLUGIN_SRC.slice(
+    PLUGIN_SRC.indexOf('if (outcome.kind === "permission_stall") {'),
+    PLUGIN_SRC.indexOf('if (outcome.kind === "empty") {'),
+  );
+
+  test("교정 예산은 config.timeout.permission_corrections_per_session 으로 조정되고 폴러에 전달된다", () => {
+    assert.match(PLUGIN_SRC, /config\.timeout\?\.permission_corrections_per_session \?\? DEFAULT_PERMISSION_CORRECTIONS_PER_SESSION/);
+    assert.match(PLUGIN_SRC, /maxPermissionCorrections: permissionCorrectionsPerSession/,
+      "폴러 옵션에 예산이 안 실린다 — 폴러 기본값 3 이 config 를 무시한다");
+  });
+
+  test("재디스패치 노트는 '안내를 받고도 반복했다' 는 사실을 실어 첫 차단과 구분한다", () => {
+    assert.match(stallBlock, /const corrections = outcome\.permissionCorrections \?\? 0;/);
+    assert.match(stallBlock, /피드백 거부를 받았는데도 같은 범위를 다시 요청했다/);
+    assert.match(stallBlock, /\.\.\.\(correctionLine \? \[correctionLine\] : \[\]\)/, "노트에 조건부로 붙지 않는다");
+  });
+
+  test("최종 응답·hang_history 항목이 permission_corrections 를 싣는다", () => {
+    assert.ok(stallBlock.includes("permission_corrections: outcome.permissionCorrections ?? 0"));
+    assert.ok(stallBlock.includes("corrections: outcome.permissionCorrections ?? 0"));
+  });
+
+  test("경로 범위 블록은 attempt 1 부터 실린다 — 차단 후 안내는 후순위다", () => {
+    const promptStart = PLUGIN_SRC.indexOf("const buildPromptText = (attemptNum: number");
+    const scopeIdx = PLUGIN_SRC.indexOf("...buildPathScopePromptBlock(effectiveWorktree", promptStart);
+    const resumeIdx = PLUGIN_SRC.indexOf("if (attemptNum > 1) {", promptStart);
+    assert.ok(scopeIdx > promptStart && scopeIdx < resumeIdx,
+      "경로 범위 블록이 재개 블록보다 앞(base 배열)에 있어야 첫 세션부터 규칙을 본다");
+  });
+});
