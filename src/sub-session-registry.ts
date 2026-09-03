@@ -220,6 +220,21 @@ export function permissionReplied(reg: SubSessionRegistry, sessionID: string, re
   if (bySession.size === 0) reg.pendingPermissions.delete(sessionID);
 }
 
+/**
+ * 세션의 대기 요청을 전부 뺀다. opencode 는 `reject` 하나에 같은 세션의 나머지
+ * 대기 요청을 **연쇄 거부**하고 각각 `permission.replied` 를 발행한다 — 그 이벤트가
+ * 사본에 도착하기 전 다음 폴이 돌면 이미 없는 요청에 다시 답하려다 NotFound 를
+ * 받는다 (피드백 거부 경로에서는 그 오류가 abort 로 격상된다). 거부 응답 직후
+ * 폴러 쪽에서 선제로 비운다. 반환값은 뺀 개수.
+ */
+export function permissionsRejectedCascade(reg: SubSessionRegistry, sessionID: string): number {
+  const bySession = reg.pendingPermissions.get(sessionID);
+  if (!bySession) return 0;
+  const n = bySession.size;
+  reg.pendingPermissions.delete(sessionID);
+  return n;
+}
+
 /** 이 세션에 답을 기다리는 권한 요청 — 오래된 순. */
 export function pendingPermissionsFor(reg: SubSessionRegistry, sessionID: string): PendingPermission[] {
   const bySession = reg.pendingPermissions.get(sessionID);
