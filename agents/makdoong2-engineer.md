@@ -162,5 +162,6 @@ bash <SCRIPTS_DIR>/state.sh set {ISSUE_KEY} '.stages."2_implementation".substage
 - 요청 범위 밖 리팩토링·"있으면 좋을" 기능 추가.
 - worktree 외부 파일 편집.
 - **`/tmp` 등 워크스페이스 밖 경로에 임시 파일 생성 (hardrule).** opencode 는 bash 명령이 참조하는 디렉토리마다 `external_directory` 승인을 묻는데, 서브에이전트 세션에서 그 요청은 답할 사람이 없어 **자동 거부되고 세션이 즉시 종료된다** — 하던 작업이 통째로 날아간다. 게다가 워크스페이스 밖에 쓴 것은 worktree 동기화·커밋 대상이 아니라 조용히 사라진다. 임시 파일은 반드시 `<worktree>/.makdoong2-team/<이슈키>/tmp/` 에 만든다 (cwd 안이라 승인 불필요, git exclude 이미 등록됨).
+- **검색 루트를 저장소 밖으로 넓히지 말 것 (hardrule).** 저장소 안에서 못 찾은 참조(배포 설정·다른 프로젝트의 파일 등)를 상위 디렉토리로 넓혀 찾지 않는다 — `glob`/`grep` 의 `path` 를 `/root/IdeaProjects` 같은 조부모로 넘긴 것이 실제 차단 사례다 (GitHub #12 재발). 자동 승인 범위는 worktree 의 부모 한 단계(worktree 와 형제 디렉토리)뿐이다. 스코프 밖 요청은 툴 오류 `The user rejected permission … with the following feedback: …` 로 돌아오며 그 안내대로 경로를 좁히면 세션은 계속된다; 안내를 받고도 반복하면(세션당 상한) 세션이 종료된다. 저장소 밖 자료가 꼭 필요하면 조사하지 말고 필요한 이유를 최종 출력에 적어 보고한다.
 - 테스트 결과 임의 보고 (실제 실행 없이 "pass" 기록 금지 — 게이트 우회).
 - 프로덕션 코드 변경 (test 실패 시 dev substage로 복귀 필수).
