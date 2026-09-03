@@ -134,10 +134,11 @@ permission:
 | `permission_reason` | `outside_allowed_roots` / `non_external_permission` / `tool_call_stall` — **처방이 서로 다르다** |
 | `permission_patterns` | 실제로 차단된 경로 패턴 |
 | `permission_scope` | 자동 승인되는 범위 (worktree 의 부모 디렉토리 이하) |
+| `permission_corrections` | abort **전에** 세션 안에서 "경로를 좁혀라" 는 피드백 거부를 받은 횟수. `>0` 이면 안내를 받고도 같은 범위를 반복한 것 |
 
 `permission_reason` 별 조치:
 
-- **`outside_allowed_roots`** — 서브에이전트가 워크스페이스 밖 경로를 요청했다. `dispatch_stage` 가 이미 허용 범위를 프롬프트에 주입해 자동 재디스패치를 시도했고(`attempts` 확인), 그 예산까지 소진한 상태다. **같은 인자로 재호출하지 않는다.** `permission_patterns` 와 `permission_scope` 를 그대로 인용해 보고하고 사용자 지시를 기다린다. 스코프를 넓혀 달라는 요청은 하지 않는다 — 조부모 이상을 여는 것은 형제 프로젝트 전체를 사람 확인 없이 승인 대상으로 만드는 일이라 설계상 거부된다.
+- **`outside_allowed_roots`** — 서브에이전트가 워크스페이스 밖 경로를 요청했다. 방어는 이미 세 번 돌았다: ① 첫 프롬프트에 경로 범위 하드룰이 실려 있었고 ② 스코프 밖 요청은 abort 없이 툴 오류(피드백 거부)로 되돌려져 세션 안에서 고칠 기회를 받았으며(`permission_corrections` 회) ③ 그래도 반복해 abort 된 뒤 `dispatch_stage` 가 허용 범위를 프롬프트에 주입해 자동 재디스패치를 시도했고(`attempts` 확인), 그 예산까지 소진한 상태다. **같은 인자로 재호출하지 않는다.** `permission_patterns` 와 `permission_scope` 를 그대로 인용해 보고하고 사용자 지시를 기다린다. 스코프를 넓혀 달라는 요청은 하지 않는다 — 조부모 이상을 여는 것은 형제 프로젝트 전체를 사람 확인 없이 승인 대상으로 만드는 일이라 설계상 거부된다.
 - **`non_external_permission`** — 경로 문제가 아니라 해당 에이전트 frontmatter 의 `permission:` 블록 문제다 (정식 키는 `edit`; `write` 는 존재하지 않아 조용히 무시된다). 사용자에게 보고한다.
 - **`tool_call_stall`** — 부분 설치 의심. `npx makdoong2-team doctor` 실행을 안내한다.
 
@@ -342,7 +343,7 @@ loop (max_substage_retries=3 per substage):
 - 모델 폴백 시: `[fallback] <agent>: <primary> → <fallback> (reason: ...)`
 - `retry_disallowed` 감지 시: `[substage X RETRY DISALLOWED] outcome=timeout, transient_failures=0 — sub-agent hang. <retry_disallowed_reason>`
 - `session_gone` 최종 실패 시: `[substage X SESSION_GONE gone_reason=<message_stall|status_absent>] dispatch_stage 3회 자동 redispatch 후 실패. attempts=<N>, previous_session_ids=[...]`
-- `permission_stall` 시: `[substage X PERMISSION BLOCKED reason=<permission_reason>] 서브세션이 차단되어 **이미 종료됨** (승인 대기 아님). 차단 경로=<permission_patterns>, 허용 범위=<permission_scope>, attempts=<N>`
+- `permission_stall` 시: `[substage X PERMISSION BLOCKED reason=<permission_reason>] 서브세션이 차단되어 **이미 종료됨** (승인 대기 아님). 차단 경로=<permission_patterns>, 허용 범위=<permission_scope>, 세션 내 교정=<permission_corrections>회, attempts=<N>`
 - verifier ERROR 시: `[substage X VERIFIER ERROR source=<verdict_source>] 검증 미수행 — verifier 만 재호출 (streak=<N>/3). stage 는 건드리지 않음`
 - verifier ERROR streak 초과 시: `[substage X VERIFIER ERROR STREAK EXCEEDED] 판정 3회 연속 실패. source=<verdict_source>. 사용자 개입 필요.`
 - REJECTED 재시도 시: `[substage X REJECTED retry] streak=<N>, reason_prefix="<40자>" → dispatch_stage 재호출`
