@@ -51,9 +51,13 @@ export interface TimeoutConfig {
   substage_minutes?: number;
   per_agent?: Record<string, number>;
   stall_escalate_threshold?: number;
+  // 서브세션 하나에서 워크스페이스 밖 경로 요청을 abort 없이 피드백 거부로
+  // 되돌려 주는 횟수. 0 이면 종전대로 첫 요청에서 abort 한다.
+  permission_corrections_per_session?: number;
 }
 
 export const DEFAULT_STALL_ESCALATE_THRESHOLD = 5;
+export const DEFAULT_PERMISSION_CORRECTIONS_PER_SESSION = 3;
 
 
 export type LogLevel = "silent" | "error" | "warn" | "info" | "debug" | "trace";
